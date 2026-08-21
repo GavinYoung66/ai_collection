@@ -1,7 +1,4 @@
 """rag-service 测试 fixtures。"""
-import asyncio
-import tempfile
-from pathlib import Path
 
 import pytest
 

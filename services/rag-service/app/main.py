@@ -31,8 +31,6 @@ register_auth_handlers(app)
 async def startup():
     """启动时初始化 Milvus collection + ES index。"""
     from app.api.deps import get_es_client, get_milvus_client
-    from app.vectorstore.es_client import ESClient
-    from app.vectorstore.milvus_client import MilvusClient
 
     milvus = get_milvus_client()
     try:

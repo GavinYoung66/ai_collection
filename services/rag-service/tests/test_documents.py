@@ -7,7 +7,6 @@ import pytest
 from app.parsers import ParserFactory
 from app.parsers.text_parser import TextParser
 from app.parsers.md_parser import MDParser
-from app.services.chunk_service import ChunkService
 
 
 class TestParserFactory:

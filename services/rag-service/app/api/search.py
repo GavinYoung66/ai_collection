@@ -1,5 +1,6 @@
 """混合检索 API。"""
 import asyncio
+import time
 
 import structlog
 from fastapi import APIRouter, Depends
@@ -8,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from common.config.settings import settings
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
+from common.trace.middleware import get_trace_id
 
 from app.api.deps import (
     get_db,
@@ -17,7 +19,7 @@ from app.api.deps import (
     get_rerank_client,
     success_response,
 )
-from app.models.search import SearchRequest, SearchResponse
+from app.models.search import SearchRequest
 from app.repositories.doc_repo import DocRepo
 from app.services import query_cache
 from app.services.log_service import LogService
@@ -46,8 +48,27 @@ async def hybrid_search(
     cache_key: str | None = None
     if settings.KB_CACHE_ENABLED:
         cache_key = query_cache.make_cache_key(req.query, req.category, req.top_k)
+        cache_start = time.time()
         cached = await query_cache.get_cached(cache_key)
         if cached is not None:
+            # 缓存命中也必须落 kb_search_logs（cache_hit='1'），
+            # 否则命中率监控失真（V1-T20，对齐 step6/02 检索命中率指标）
+            await LogService(db).log(
+                trace_id=get_trace_id(),
+                query=req.query,
+                category=req.category,
+                dense_hit_count=0,
+                sparse_hit_count=0,
+                fused_count=0,
+                reranked_count=0,
+                max_rerank_score=None,
+                hit_doc_ids=[],
+                hit_chunk_ids=[],
+                latency_ms=int((time.time() - cache_start) * 1000),
+                degraded=False,
+                is_fallback=False,
+                cache_hit="1",
+            )
             return cached
 
     log_service = LogService(db)
@@ -72,6 +93,7 @@ async def hybrid_search(
         raise BizException(ErrorCode.A3005, "检索超时，请稍后重试")
 
     response = success_response(result)
-    if cache_key is not None:
+    # 兜底/降级响应不写缓存（V1-T19），避免故障/无匹配结果被缓存 1 小时
+    if cache_key is not None and query_cache.is_cacheable(result):
         await query_cache.set_cached(cache_key, response, req.category)
     return response

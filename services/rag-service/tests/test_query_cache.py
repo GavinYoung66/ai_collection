@@ -267,6 +267,107 @@ class TestSearchRouteCache:
         assert embed.calls == 1
 
 
+# ---------- V1-T19/T20 整改测试：兜底不缓存 + 命中落日志 ----------
+
+class TestCacheFallbackAndHitLog:
+    def test_is_cacheable_unit(self):
+        """is_cacheable：降级/兜底响应不缓存，正常响应可缓存。"""
+        assert query_cache.is_cacheable(
+            {"results": [{"doc_id": "d"}], "degraded": False, "message": None}
+        ) is True
+        assert query_cache.is_cacheable(
+            {"results": [], "degraded": True, "message": None}
+        ) is False  # 降级（单路召回）
+        assert query_cache.is_cacheable(
+            {"results": [], "degraded": False, "message": "知识库暂无该业务"}
+        ) is False  # 无匹配兜底
+
+    @pytest.mark.asyncio
+    async def test_fallback_response_not_cached(
+        self, monkeypatch, fake_redis, cache_enabled
+    ):
+        """兜底响应（rerank 0.1 < 0.35）不写缓存（V1-T19）。"""
+        req = SearchRequest(query="无匹配查询", category="regulation", top_k=5)
+
+        class LowScoreRerank:
+            async def is_degraded(self):
+                return False
+
+            async def rerank(self, query, candidates):
+                return [
+                    {"chunk_id": c["chunk_id"], "rerank_score": 0.1}
+                    for c in candidates
+                ]
+
+        embed = MockEmbed()
+        args = _route_args(embed)
+        args["rerank"] = LowScoreRerank()
+        resp = await search_api.hybrid_search(req, **args)
+        assert resp["code"] == "0"
+        assert resp["data"]["results"] == []  # 兜底响应
+
+        key = query_cache.make_cache_key(req.query, req.category, req.top_k)
+        assert key not in fake_redis.store  # 兜底结果未被缓存
+        assert fake_redis.calls["setex"] == 0
+
+    @pytest.mark.asyncio
+    async def test_degraded_response_not_cached(
+        self, monkeypatch, fake_redis, cache_enabled
+    ):
+        """降级响应（Milvus 宕机 ES-only）不写缓存（V1-T19）。"""
+        req = SearchRequest(query="降级查询", category="regulation", top_k=5)
+
+        class MilvusDown:
+            async def search(self, query_vector, top_n=20, category=None):
+                raise ConnectionError("milvus down")
+
+            async def delete_by_doc(self, doc_id):
+                pass
+
+        embed = MockEmbed()
+        args = _route_args(embed)
+        args["milvus"] = MilvusDown()
+        resp = await search_api.hybrid_search(req, **args)
+        assert resp["code"] == "0"
+        assert resp["data"]["degraded"] is True
+
+        key = query_cache.make_cache_key(req.query, req.category, req.top_k)
+        assert key not in fake_redis.store  # 降级结果未被缓存
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_logs_cache_hit_entry(
+        self, monkeypatch, fake_redis, cache_enabled
+    ):
+        """缓存命中落 kb_search_logs（cache_hit='1'）（V1-T20）。"""
+        req = SearchRequest(query="逾期协商", category="regulation", top_k=5)
+        key = query_cache.make_cache_key(req.query, req.category, req.top_k)
+        cached = {
+            "code": "0",
+            "message": "success",
+            "data": {"results": []},
+            "trace_id": "old",
+        }
+        fake_redis.store[key] = json.dumps(cached, ensure_ascii=False)
+
+        class CapturingDB(MockDB):
+            def __init__(self):
+                self.added = []
+
+            def add(self, obj):
+                self.added.append(obj)
+
+        db = CapturingDB()
+        args = _route_args(MockEmbed())
+        args["db"] = db
+        resp = await search_api.hybrid_search(req, **args)
+        assert resp == cached
+        assert len(db.added) == 1
+        entry = db.added[0]
+        assert entry.cache_hit == "1"
+        assert entry.query == "逾期协商"
+        assert entry.category == "regulation"
+
+
 # ---------- 路由级：文档操作触发缓存失效 ----------
 
 class MockDoc:

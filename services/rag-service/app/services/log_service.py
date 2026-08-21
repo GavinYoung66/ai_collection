@@ -28,6 +28,7 @@ class LogService:
         latency_ms: int,
         degraded: bool,
         is_fallback: bool,
+        cache_hit: str = "0",
     ) -> None:
         try:
             entry = KBSearchLog(
@@ -45,6 +46,7 @@ class LogService:
                 latency_ms=latency_ms,
                 degraded=degraded,
                 is_fallback=is_fallback,
+                cache_hit=cache_hit,
             )
             self.db.add(entry)
             await self.db.commit()

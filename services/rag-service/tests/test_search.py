@@ -3,7 +3,6 @@ import asyncio
 
 import pytest
 
-from app.services.search_service import SearchService
 
 
 class TestRRFFusion:

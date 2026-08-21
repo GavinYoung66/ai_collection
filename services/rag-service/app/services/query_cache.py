@@ -42,6 +42,19 @@ def make_cache_key(query: str, category: str | None, top_k: int) -> str:
     return _CACHE_KEY_PREFIX + hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
+def is_cacheable(result: dict) -> bool:
+    """检索响应是否可写缓存（V1-T19）。
+
+    兜底/降级结果不缓存：degraded=true（降级路径）或 results 为空且带兜底文案
+    （无匹配兜底），否则故障/无匹配结果会被缓存 1 小时，知识库更新后仍返回旧结果。
+    """
+    if result.get("degraded"):
+        return False
+    if not result.get("results") and result.get("message"):
+        return False
+    return True
+
+
 def _index_key(category: str | None) -> str:
     return _INDEX_KEY_PREFIX + (category or "")
 

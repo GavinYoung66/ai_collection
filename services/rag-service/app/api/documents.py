@@ -2,11 +2,10 @@
 import uuid
 
 import structlog
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, get_embed_client, get_es_client, get_milvus_client, save_upload_file, success_response
-from app.models.document import DocumentDetailResponse, DocumentListResponse, DocumentUploadResponse
 from app.parsers import ParserFactory
 from app.repositories.chunk_repo import ChunkRepo
 from app.repositories.doc_repo import DocRepo
@@ -80,20 +79,23 @@ async def upload_document(
 async def list_documents(
     category: str | None = None,
     status: str | None = None,
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(1, ge=1),
+    page_size: int | None = Query(None, ge=1, le=100),
+    size: int | None = Query(None, ge=1, le=100),
     rate: None = Depends(rate_limiter("kb_list", 60)),
     db: AsyncSession = Depends(get_db),
 ):
+    # 分页双支持（对齐 step5/02）：page_size 优先，size 兼容回退，默认 20，最大 100
+    resolved_size = page_size or size or 20
     doc_repo = DocRepo(db)
     items, total = await doc_repo.list_by_category(
-        category=category, status=status, page=page, size=size
+        category=category, status=status, page=page, size=resolved_size
     )
     return success_response({
         "items": items,
         "total": total,
         "page": page,
-        "size": size,
+        "page_size": resolved_size,
     })
 
 

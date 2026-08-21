@@ -46,7 +46,6 @@ class SearchService:
         start = time.time()
         trace_id = get_trace_id()
         degraded = False
-        is_fallback = False
 
         try:
             query_vector = await self.embed.embed(query)
@@ -87,6 +86,30 @@ class SearchService:
             degraded = True
 
         fused = self._rrf_fuse(dense_hits, sparse_hits, k=settings.KB_RRF_K)
+
+        # 闸门 1（对齐 step1/01、step4/02 §四.1）：召回相似度不足 → 判定无匹配，走兜底
+        # 说明：RRF 融合分是排名分（量纲约 1/(k+rank)），不能直接与 0.6 比较，
+        # 故以稠密召回最高相似度（Milvus IP，BGE-M3 归一化后≈cosine）作为相似度判定依据；
+        # ES-only 降级（无稠密相似度）时跳过本闸门，交由闸门 2（rerank 0.35）兜底。
+        max_dense_score: float | None = None
+        if dense_hits:
+            max_dense_score = max(float(h.get("score", 0.0)) for h in dense_hits)
+        if max_dense_score is not None and max_dense_score < settings.RAG_SCORE_THRESHOLD:
+            latency_ms = int((time.time() - start) * 1000)
+            return await self._build_fallback(
+                trace_id=trace_id,
+                query=query,
+                category=category,
+                dense_hit_count=len(dense_hits),
+                sparse_hit_count=len(sparse_hits),
+                fused_count=len(fused),
+                reranked_count=0,
+                max_rerank_score=None,
+                hit_doc_ids=list({f["doc_id"] for f in fused if f.get("doc_id")}),
+                hit_chunk_ids=[f["chunk_id"] for f in fused],
+                latency_ms=latency_ms,
+                degraded=degraded,
+            )
 
         chunk_ids = [f["chunk_id"] for f in fused]
         doc_ids = list({f["doc_id"] for f in fused if f.get("doc_id")})
@@ -167,23 +190,21 @@ class SearchService:
 
         threshold = settings.KB_RERANK_THRESHOLD
         if rerank_ok and max_rerank_score is not None and max_rerank_score < threshold:
-            is_fallback = True
             latency_ms = int((time.time() - start) * 1000)
-            await self.logger.log(
-                trace_id=trace_id, query=query, category=category,
-                dense_hit_count=len(dense_hits), sparse_hit_count=len(sparse_hits),
-                fused_count=len(fused), reranked_count=len(reranked),
+            return await self._build_fallback(
+                trace_id=trace_id,
+                query=query,
+                category=category,
+                dense_hit_count=len(dense_hits),
+                sparse_hit_count=len(sparse_hits),
+                fused_count=len(fused),
+                reranked_count=len(reranked),
                 max_rerank_score=max_rerank_score,
-                hit_doc_ids=doc_ids, hit_chunk_ids=chunk_ids,
-                latency_ms=latency_ms, degraded=degraded, is_fallback=True,
+                hit_doc_ids=doc_ids,
+                hit_chunk_ids=chunk_ids,
+                latency_ms=latency_ms,
+                degraded=degraded,
             )
-            return {
-                "results": [],
-                "degraded": degraded,
-                "query_original": query,
-                "message": _FALLBACK_MESSAGE,
-                "trace_id": trace_id,
-            }
 
         top_results = reranked[:top_k]
 
@@ -221,6 +242,46 @@ class SearchService:
             "degraded": degraded,
             "query_original": query,
             "message": None,
+            "trace_id": trace_id,
+        }
+
+    async def _build_fallback(
+        self,
+        *,
+        trace_id: str,
+        query: str,
+        category: str | None,
+        dense_hit_count: int,
+        sparse_hit_count: int,
+        fused_count: int,
+        reranked_count: int,
+        max_rerank_score: float | None,
+        hit_doc_ids: list[str],
+        hit_chunk_ids: list[str],
+        latency_ms: int,
+        degraded: bool,
+    ) -> dict:
+        """公共兜底路径：落检索日志 + 返回兜底响应（闸门 1/2 共用）。"""
+        await self.logger.log(
+            trace_id=trace_id,
+            query=query,
+            category=category,
+            dense_hit_count=dense_hit_count,
+            sparse_hit_count=sparse_hit_count,
+            fused_count=fused_count,
+            reranked_count=reranked_count,
+            max_rerank_score=max_rerank_score,
+            hit_doc_ids=hit_doc_ids,
+            hit_chunk_ids=hit_chunk_ids,
+            latency_ms=latency_ms,
+            degraded=degraded,
+            is_fallback=True,
+        )
+        return {
+            "results": [],
+            "degraded": degraded,
+            "query_original": query,
+            "message": _FALLBACK_MESSAGE,
             "trace_id": trace_id,
         }
 
