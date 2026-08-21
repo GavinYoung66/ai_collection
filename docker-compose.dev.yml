@@ -1,0 +1,78 @@
+services:
+  embedding:
+    build: ./deploy/embedding
+    ports: ["8100:8100"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  rerank-service:
+    build: ./deploy/rerank
+    ports: ["8101:8101"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8101/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  data-platform:
+    build: ./services/data-platform
+    ports: ["8001:8000"]
+    env_file: .env
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  rag-service:
+    build: ./services/rag-service
+    ports: ["8002:8000"]
+    env_file: .env
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      milvus: {condition: service_healthy}
+      embedding: {condition: service_healthy}
+      elasticsearch: {condition: service_healthy}
+      rerank-service: {condition: service_healthy}
+
+  qc-service:
+    build: ./services/qc-service
+    ports: ["8003:8000"]
+    env_file: .env
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  call-service:
+    build: ./services/call-service
+    ports: ["8004:8000"]
+    env_file: .env
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  case-service:
+    build: ./services/case-service
+    ports: ["8005:8000"]
+    env_file: .env
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  complaint-service:
+    build: ./services/complaint-service
+    ports: ["8006:8000"]
+    env_file: .env
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  review-service:
+    build: ./services/review-service
+    ports: ["8007:8000"]
+    env_file: .env
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}

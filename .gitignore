@@ -1,0 +1,81 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# Conda
+.conda/
+
+# Env / Secrets
+.env
+.env.*
+!.env.example
+
+# Docker volumes
+data/
+pg_data/
+redis_data/
+milvus_data/
+es_data/
+etcd_data/
+minio_data/
+
+
+# OS
+.DS_Store
+
+# Test
+.pytest_cache/
+.coverage
+htmlcov/
+
+
+# Python缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+
+# docker、本地环境
+.env
+*.local
+docker-compose.override.yml
+
+# IDE编辑器
+.vscode/
+.idea/
+.trae/
+*.swp
+*.swo
+
+# OS系统垃圾
+.DS_Store
+Thumbs.db
+
+# 日志
+logs/
+*.log
+
+#模型
+models/

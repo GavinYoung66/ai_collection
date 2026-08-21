@@ -1,0 +1,14 @@
+schema: spec-driven
+
+context: |
+  【重要指令给AI】
+  1. 项目所有全局文档：项目概述、架构设计、技术规范、需求，都在根目录【标准工程目录结构】文件夹。
+  2. 做设计、写代码前，**必须检索Trae文档集知识库读取这些文档**，不允许自己脑补规则。
+  3. 模块接口、数据契约以 openspec/specs 下面md文件为最高标准。
+  4. 如果知识库找不到对应的规则，直接问我，不要编造。
+
+rules:
+  proposal:
+    max_sections: 8
+  tasks:
+    max_task_size: 2h

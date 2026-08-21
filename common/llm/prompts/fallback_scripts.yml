@@ -1,0 +1,59 @@
+# 兜底话术库（LLM 不可用或 confidence<0.7 时降级使用）
+# 版本: v1.0
+# 由 RuleBasedScriptEngine 加载，按 category 匹配关键词
+
+rules:
+  # 通用开场白
+  - category: "opening"
+    keywords: []
+    response: "您好，这里是XX催收中心，关于您名下逾期款项，需要与您沟通还款事宜。请问您现在方便吗？"
+
+  # 客户表示愿意还款
+  - category: "willing_to_pay"
+    keywords: ["还", "可以还", "马上还", "今天还", "转账"]
+    response: "好的，请您尽快完成还款。逾期记录会影响您的信用，建议今日内处理完毕。"
+
+  # 客户请求延期
+  - category: "extension_request"
+    keywords: ["宽限", "延期", "晚几天", "下个月", "缓一缓"]
+    response: "理解您的困难。请问您预计能在什么时间还款？我可以帮您备注还款意向，但逾期费用仍会持续产生。"
+
+  # 客户表示经济困难
+  - category: "financial_difficulty"
+    keywords: ["没钱", "困难", "失业", "生病", "住院", "没工作"]
+    response: "很抱歉听到您的困难情况。建议您主动联系债权方说明情况，或申请分期还款方案，我可以为您转接人工坐席。"
+
+  # 客户拖延推诿
+  - category: "stalling"
+    keywords: ["再说", "等等", "想想", "回头", "再说吧", "考虑一下"]
+    response: "逾期不处理会产生更多费用并影响信用记录。建议您尽快做出还款安排，避免后续更严重的影响。"
+
+  # 客户拒绝还款
+  - category: "rejection"
+    keywords: ["不还", "拒绝", "不认识", "没借过", "不清楚"]
+    response: "该笔借款有明确的合同记录。如果您有疑问，我们可以核实相关信息。建议您妥善处理，避免影响个人信用。"
+
+  # 客户情绪激动/愤怒
+  - category: "anger"
+    keywords: ["烦", "别打了", "骚扰", "报警", "投诉", "滚"]
+    response: "非常抱歉打扰到您。我们会记录您的反馈，您可以随时联系我们处理此事。祝您生活愉快。"
+
+  # 客户投诉意向
+  - category: "complaint"
+    keywords: ["投诉", "举报", "银监会", "12378", "315"]
+    response: "您的反馈已记录。如需投诉，可通过官方渠道反映，我们也会将您的情况上报处理。"
+
+  # 意图不明
+  - category: "uncertain"
+    keywords: []
+    response: "请问您目前是否有还款计划？如果您有任何疑问，我可以为您转接人工坐席详细沟通。"
+
+  # 系统异常兜底
+  - category: "system_error"
+    keywords: []
+    response: "抱歉，系统暂时繁忙，请稍后再试。"
+
+  # 超轮次兜底
+  - category: "max_turns"
+    keywords: []
+    response: "您的问题需要进一步处理，正在为您转接人工坐席，请稍候。"
