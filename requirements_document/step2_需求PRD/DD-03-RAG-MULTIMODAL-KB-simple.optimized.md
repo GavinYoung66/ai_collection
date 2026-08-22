@@ -93,32 +93,58 @@
 
 ```
 services/rag-service/
-├── app/
-│   ├── main.py                    # FastAPI 入口：路由注册 + 鉴权/限流/异常 handler + /health
-│   ├── api/                       # 路由层（health / documents / search / sensitive_words）
-│   ├── services/                  # ingest / chunk / search / log / rate_limit / require_role / query_cache
-│   ├── parsers/                   # base(text/md/pdf/docx)，ABC + ParserFactory
-│   ├── vectorstore/               # milvus_client / es_client / embed_client
-│   ├── repositories/              # doc_repo / chunk_repo
-│   ├── models/                    # Pydantic 请求/响应模型
-│   └── tests/                     # 77 用例（解析/缓存/限流/权限/降级/双闸门/分页/reindex 端到端）
-├── data/sensitive_words.dict      # 敏感词字典（V1 数据源，差异见 §5.3）
-└── Dockerfile
+├── app/                          # 应用主目录（六层架构：api → models → parsers → repositories → services → vectorstore）
+│   ├── main.py                   # FastAPI 入口：路由注册 + 鉴权/限流/异常 handler + startup 初始化 Milvus/ES + /health
+│   ├── api/                      # 路由层（Controller）：先权限 → 再限流 → 再业务
+│   │   ├── health.py             # GET /health：依赖探活（PG/Milvus/Redis/embedding）
+│   │   ├── deps.py               # 依赖注入（db/redis/各客户端）+ success_response 统一响应包 + save_upload_file
+│   │   ├── documents.py          # 上传/列表/详情/删除/reindex（权限 + 限流 + 缓存失效）
+│   │   ├── search.py             # 混合检索（限流 200/min + 缓存切面 + 请求级超时）
+│   │   └── sensitive_words.py    # GET /sensitive-words/current.dict（INTERNAL，text/plain 原样返回）
+│   ├── models/                   # Pydantic 模型层
+│   │   ├── orm.py                # SQLAlchemy ORM：kb_documents / kb_chunks / kb_search_logs
+│   │   ├── document.py           # DocumentUploadResponse / DocumentListItem / DocumentListResponse
+│   │   └── search.py             # SearchRequest / SourceItem / SearchResponse
+│   ├── parsers/                  # 文档解析层（ABC + ParserFactory 按扩展名分发）
+│   │   ├── base.py               # DocumentParser ABC：async extract_text()
+│   │   ├── text_parser.py        # TXT：UTF-8 + 编码检测 fallback
+│   │   ├── md_parser.py          # MD：正则去除 #/`/*/-
+│   │   ├── pdf_parser.py         # PDF：pdfplumber，页文本>4 行去首尾各 2 行（页眉页脚）
+│   │   └── docx_parser.py        # DOCX：python-docx 段落提取，空段过滤
+│   ├── repositories/             # 数据访问层（Repository）
+│   │   ├── doc_repo.py           # kb_documents：create/get/list/update_status/soft_delete/chunks 计数
+│   │   └── chunk_repo.py         # kb_chunks：batch_create/delete_by_doc/get_by_ids
+│   ├── services/                 # 业务逻辑层（Service）
+│   │   ├── chunk_service.py      # 分块：段落→句号→chunk_size，overlap=50，过滤 len<10
+│   │   ├── ingest_service.py     # 入库编排（10 步流程 §6.1）；PG 成功但索引失败→回滚+failed+A3003
+│   │   ├── search_service.py     # 检索编排：双路并行→RRF→Rerank→双闸门兜底；降级 §6.4
+│   │   ├── log_service.py        # kb_search_logs 落库（写入失败不阻断主流程）
+│   │   ├── query_cache.py        # 查询缓存：key=md5(query+category+top_k)，分类 Set 索引，禁 KEYS
+│   │   ├── rate_limit.py         # 限流：Redis INCR+EXPIRE，X-User-Id 优先/IP 回退，429+B0006
+│   │   └── require_role.py       # 权限：Bearer JWT（common.security.rbac），401+B0002 / 403+B0003
+│   └── vectorstore/              # 向量存储客户端层
+│       ├── milvus_client.py      # kb_vectors：UUID→INT64 + str 冗余字段，insert/search/delete_by_doc
+│       ├── es_client.py          # kb_bm25：ik_max_word（缺插件回退 standard），index/search/delete_by_doc
+│       ├── embed_client.py       # embedding-service:8100：超时/重试/熔断（rag:embed:degraded TTL 60s）
+│       └── rerank_client.py      # rerank-service:8101：精排，失败降级 RRF score 排序
+├── data/
+│   └── sensitive_words.dict      # 敏感词字典（每行一词，与 seed 一致；V1 只读接口数据源，差异见 §5.3）
+├── tests/                        # 12 个测试文件（解析/缓存/限流/权限/降级/双闸门/分页/reindex 端到端）
+│   ├── conftest.py               # 共享 fixture（TestClient / DB / Redis mock）
+│   ├── test_health.py            # /health 探活
+│   ├── test_documents.py         # ParserFactory/Text/MD 解析 + ChunkService clean/split（20 用例）
+│   ├── test_pdf_docx_parser.py   # PDF/DOCX 解析（页眉页脚过滤）
+│   ├── test_search.py            # RRF 融合（双路/去重/空路/排序）+ 检索响应结构
+│   ├── test_search_degradation.py# Milvus/ES/Rerank 降级场景
+│   ├── test_gate_threshold.py    # 双闸门兜底阈值（rerank 0.35 / dense 0.6）
+│   ├── test_query_cache.py       # 缓存 key 生成/读写/失效
+│   ├── test_rate_limit.py        # 限流阈值/429+统一响应包/用户维度隔离/Redis 故障放行（4 用例）
+│   ├── test_require_role.py      # 401+B0002 / 403+B0003 / 角色大小写不敏感（6 用例）
+│   ├── test_sensitive_words_api.py # 字典只读接口（存在返回原文 / 缺失返回 404）
+│   ├── test_pagination.py        # 列表分页（page / page_size / size 兼容回退）
+│   └── test_reindex.py           # reindex 端到端
+└── Dockerfile                    # 镜像：公共基础镜像 + 全局 requirements 安装
 ```
-
-| 文件                   | 职责      | 关键点                                                         |
-| :--------------------- | :-------- | :------------------------------------------------------------- |
-| parsers/pdf_parser.py  | PDF 解析  | pdfplumber，页文本>4 行去首尾各 2 行                           |
-| parsers/docx_parser.py | DOCX 解析 | python-docx 段落提取，空段过滤                                 |
-| chunk_service.py       | 分块      | 段落→句号→chunk_size，overlap=50，过滤 len<10                  |
-| ingest_service.py      | 入库编排  | 10 步流程 §6.1；PG 成功但索引失败→回滚+failed+A3003            |
-| search_service.py      | 检索编排  | 双路并行→RRF→Rerank→双闸门兜底；降级 §6.4                      |
-| query_cache.py         | 查询缓存  | key=md5(query+category+top_k)，分类 Set 索引，禁 KEYS          |
-| rate_limit.py          | 限流      | Redis INCR+EXPIRE，`X-User-Id` 优先/IP 回退，429+B0006         |
-| require_role.py        | 权限      | Bearer JWT（common.security.rbac），角色大小写不敏感           |
-| milvus_client.py       | 向量库    | UUID→INT64 映射 + str 冗余字段，insert/search/delete_by_doc    |
-| es_client.py           | 全文索引  | ik_max_word（缺插件回退 standard），index/search/delete_by_doc |
-| embed_client.py        | Embedding | HTTP 8100，超时/重试/熔断（`rag:embed:degraded` TTL 60s）      |
 
 ---
 

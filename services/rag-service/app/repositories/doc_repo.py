@@ -12,14 +12,22 @@ class DocRepo:
         self.db = db
 
     async def create(
-        self, title: str, category: str, content: str, created_by: uuid.UUID | None = None
+        self,
+        title: str,
+        category: str,
+        content: str,
+        created_by: uuid.UUID | None = None,
+        source: str | None = None,
     ) -> uuid.UUID:
+        # V2: source 记录文档来源（"ocr"/"asr"/"v1_legacy"/null），
+        # 存量 V1 文档未传 source 时为 NULL，由 get_meta_dict 回填 "v1_legacy"。
         doc = KBDocument(
             title=title,
             category=category,
             content=content,
             status="processing",
             created_by=created_by,
+            source=source,
         )
         self.db.add(doc)
         await self.db.flush()
@@ -96,3 +104,38 @@ class DocRepo:
             )
         )
         return {str(row[0]): row[1] for row in result.all()}
+
+    async def get_meta_dict(self, doc_ids: list[uuid.UUID]) -> dict[str, dict]:
+        """批量查询文档 V2 元数据，返回 {doc_id_str: {customer_id, agent_id, call_date, risk_tag, source, version}}。
+
+        存量 V1 文档（source/version 为 NULL）由调用方回填默认值 source='v1_legacy', version=1。
+        """
+        if not doc_ids:
+            return {}
+        result = await self.db.execute(
+            select(
+                KBDocument.id,
+                KBDocument.customer_id,
+                KBDocument.agent_id,
+                KBDocument.call_date,
+                KBDocument.risk_tag,
+                KBDocument.source,
+                KBDocument.version,
+            ).where(
+                KBDocument.id.in_(doc_ids), KBDocument.is_delete == "0"
+            )
+        )
+        meta: dict[str, dict] = {}
+        for row in result.all():
+            doc_id_str = str(row[0])
+            source = row[5] if row[5] is not None else "v1_legacy"
+            version = row[6] if row[6] is not None else 1
+            meta[doc_id_str] = {
+                "customer_id": row[1],
+                "agent_id": row[2],
+                "call_date": row[3],
+                "risk_tag": row[4],
+                "source": source,
+                "version": version,
+            }
+        return meta

@@ -36,6 +36,7 @@ services:
       embedding: {condition: service_healthy}
       elasticsearch: {condition: service_healthy}
       rerank-service: {condition: service_healthy}
+      ocr-service: {condition: service_healthy}
 
   qc-service:
     build: ./services/qc-service

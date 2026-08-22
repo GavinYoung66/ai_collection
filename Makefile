@@ -1,4 +1,4 @@
-.PHONY: dev test lint migrate compile install smoke clean
+.PHONY: dev test lint migrate compile install smoke smoke-v2 clean
 
 # 启动开发环境
 dev:
@@ -32,6 +32,10 @@ lint:
 # 冒烟测试
 smoke:
 	bash scripts/smoke/smoke_all.sh
+
+# V2 冒烟测试（rag-service 多模态 + V2 开关）
+smoke-v2:
+	bash scripts/smoke/smoke_rag_v2.sh
 
 # 清理
 clean:

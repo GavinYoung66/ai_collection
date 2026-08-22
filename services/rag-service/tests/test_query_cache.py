@@ -71,8 +71,9 @@ def cache_enabled(monkeypatch):
 class TestQueryCacheUnit:
     def test_make_cache_key_format(self):
         key = query_cache.make_cache_key("逾期协商", "regulation", 5)
-        assert key.startswith("rag:cache:query:")
-        assert len(key) == len("rag:cache:query:") + 32
+        # V2: key 前缀升级为 rag:cache:query:v2:{md5}（含 flags_hash 隔离）
+        assert key.startswith("rag:cache:query:v2:")
+        assert len(key) == len("rag:cache:query:v2:") + 32
         assert key == query_cache.make_cache_key("逾期协商", "regulation", 5)
         assert key != query_cache.make_cache_key("逾期协商", "regulation", 3)
         assert key != query_cache.make_cache_key("逾期协商", None, 5)
@@ -206,12 +207,30 @@ class MockRerank:
 
 
 def _route_args(embed):
+    """构造 hybrid_search 路由参数（含 V2 服务 mock，开关全关时传 None 安全）。"""
+    from starlette.datastructures import Headers
+
+    class MockRequest:
+        headers = Headers({})
+
+    class MockResponse:
+        def __init__(self):
+            self.headers = {}
+
     return {
+        "request": MockRequest(),
+        "response": MockResponse(),
         "db": MockDB(),
         "milvus": MockMilvus(),
         "es": MockES(),
         "embed": embed,
         "rerank": MockRerank(),
+        # V2 服务（开关全关，传 None 不触发调用）
+        "rewrite_svc": None,
+        "routing_svc": None,
+        "weighting_svc": None,
+        "row_access_svc": None,
+        "session_svc": None,
     }
 
 

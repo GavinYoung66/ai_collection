@@ -1,6 +1,8 @@
 """检索查询缓存切面：读/写/按 category 失效，全部静默容错。
 
-- cache key: rag:cache:query:{md5(query+category+top_k)}
+- V2 cache key: rag:cache:query:v2:{md5(query+category+top_k+flags_hash)}
+  flags_hash 为 7 个 V2 开关状态 hash，开关变化时缓存隔离，避免 V1 旧 key 冲突。
+  V1 旧 key（rag:cache:query:{md5}）不做任何读写，自然过期。
 - 每个 category 用 Redis Set（rag:cache:keys:{category}）维护关联 cache key，
   失效时遍历 Set 删除，禁止使用 KEYS 通配扫描。
 - Redis 任何异常均静默绕过缓存，绝不抛业务异常。
@@ -15,7 +17,7 @@ from common.config.settings import settings
 
 logger = structlog.get_logger()
 
-_CACHE_KEY_PREFIX = "rag:cache:query:"
+_CACHE_KEY_PREFIX = "rag:cache:query:v2:"
 _INDEX_KEY_PREFIX = "rag:cache:keys:"
 
 _redis: Redis | None = None
@@ -36,9 +38,26 @@ def _client() -> Redis:
     return _redis
 
 
+def _flags_hash() -> str:
+    """7 个 V2 开关状态 hash（8 字符），开关变化时缓存隔离。"""
+    flags = "|".join([
+        str(settings.KB_QUERY_REWRITE_ENABLED),
+        str(settings.KB_ROUTING_ENABLED),
+        str(settings.KB_WEIGHTING_ENABLED),
+        str(settings.KB_ROW_LEVEL_ENABLED),
+        str(settings.KB_MULTITURN_ENABLED),
+        str(settings.KB_EMBED_DEGRADED_KEEP_TEXT),
+        str(settings.ES_DUAL_WRITE),
+    ])
+    return hashlib.md5(flags.encode("utf-8")).hexdigest()[:8]
+
+
 def make_cache_key(query: str, category: str | None, top_k: int) -> str:
-    """md5 由 query + category + top_k 拼接字符串生成。"""
-    raw = f"{query}{category or ''}{top_k}"
+    """V2 cache key: rag:cache:query:v2:{md5(query+category+top_k+flags_hash)}。
+
+    flags_hash 随 7 个开关状态变化，开关切换后旧缓存自动隔离不命中。
+    """
+    raw = f"{query}{category or ''}{top_k}{_flags_hash()}"
     return _CACHE_KEY_PREFIX + hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 

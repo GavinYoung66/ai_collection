@@ -75,6 +75,29 @@ class Settings(BaseSettings):
     RERANK_TIMEOUT: float = 10.0  # rerank 超时（秒）：实测冷启动约 5s 留余量，GPU 部署可收紧至 5s
     KB_SEARCH_TIMEOUT: float = 15.0  # 检索请求级总时限（秒），防慢调用堆积
 
+    # === RAG V2 功能开关（默认全 false = V1 行为） ===
+    KB_QUERY_REWRITE_ENABLED: bool = False       # Query 改写（LLM 纠错/术语归一/扩展）
+    KB_ROUTING_ENABLED: bool = False             # 动态路由（意图规则分类→权重调整）
+    KB_WEIGHTING_ENABLED: bool = False           # 业务加权（新通话 ×1.5、高危 ×1.3）
+    KB_ROW_LEVEL_ENABLED: bool = False           # 行级权限（角色/部门过滤 KB 分类）
+    KB_MULTITURN_ENABLED: bool = False           # 多轮对话（Redis session 上下文）
+    KB_EMBED_DEGRADED_KEEP_TEXT: bool = False    # Embedding 失败降级入库（仅 ES，无向量）
+    ES_DUAL_WRITE: bool = False                  # ES 双写过渡（kb_bm25 + kb_chunks_bm25）
+
+    # === RAG V2 OCR/ASR/LLM 配置 ===
+    OCR_ENDPOINT: str = "http://ocr-service:8200/ocr"
+    OCR_TIMEOUT: int = 30
+    ASR_PROVIDER: str = "dashscope"  # dashscope | whisper
+    ASR_TIMEOUT: int = 60
+    LLM_DASHSCOPE_ENDPOINT: str = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+    LLM_TIMEOUT: int = 10
+    DASHSCOPE_API_KEY: str = ""  # 从 env 读，可选，未配置则 Rewrite/ASR 走 disabled
+
+    # === RAG V2 Session 配置 ===
+    SESSION_TTL_SECONDS: int = 1800       # 会话 TTL 30min
+    SESSION_HISTORY_CAP: int = 10         # 每会话最多保存 10 轮
+    SESSION_REWRITE_LOOKBACK: int = 3     # Query 改写时回看最近 3 轮
+
     # 业务参数
     CALL_ALLOWED_HOURS: str = "08:00-21:00"
     CALL_DAILY_LIMIT_PER_USER: int = 3

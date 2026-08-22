@@ -1,0 +1,14 @@
+# 意图路由配置：keyword 命中后按 weights 调整召回类别权重
+# 对齐 design.md Decision 4：adjusted_rank = rank / weight
+# 空文件/文件缺失 → RoutingService degraded=True，bypass 全 1.0
+
+negotiate:
+  keywords:
+    - "协商"
+    - "分期"
+    - "延期"
+  weights:
+    regulation: 1.8
+    script: 1.2
+    case: 1.0
+    other: 0.6

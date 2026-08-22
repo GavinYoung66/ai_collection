@@ -1,4 +1,9 @@
-"""Milvus 客户端：collection 管理 + 向量增删查。"""
+"""Milvus 客户端：collection 管理 + 向量增删查。
+
+V2 增量：若 kb_vectors_v2 collection 存在则自动切换到 v2 schema
+（含 version INT64 / source VARCHAR(255) 字段），否则保持 V1 行为。
+v2 collection 由 scripts/rag/rebuild_milvus_v2.py 创建并 alias 切换。
+"""
 import asyncio
 import uuid as uuid_module
 
@@ -25,6 +30,7 @@ def uuid_to_int64(uuid_str: str) -> int:
 
 class MilvusClient:
     COLLECTION_NAME = "kb_vectors"
+    COLLECTION_NAME_V2 = "kb_vectors_v2"
     DIM = 1024
 
     def __init__(self, host: str | None = None, port: int | None = None):
@@ -32,6 +38,7 @@ class MilvusClient:
         self.port = port or settings.MILVUS_PORT
         self._connected = False
         self._collection: Collection | None = None
+        self._use_v2: bool = False
 
     def _connect(self) -> None:
         if not self._connected:
@@ -42,9 +49,21 @@ class MilvusClient:
             )
             self._connected = True
 
+    @property
+    def _active_name(self) -> str:
+        """当前生效的 collection 名（v2 优先，回退 v1）。"""
+        return self.COLLECTION_NAME_V2 if self._use_v2 else self.COLLECTION_NAME
+
     async def ensure_collection(self) -> None:
         def _ensure() -> None:
             self._connect()
+            # V2: 检查 kb_vectors_v2 是否存在，存在则切换
+            if utility.has_collection(self.COLLECTION_NAME_V2):
+                self._collection = Collection(self.COLLECTION_NAME_V2)
+                self._use_v2 = True
+                logger.info("milvus_using_v2_collection", collection=self.COLLECTION_NAME_V2)
+                return
+            # V1 回退
             if utility.has_collection(self.COLLECTION_NAME):
                 self._collection = Collection(self.COLLECTION_NAME)
                 return
@@ -76,20 +95,36 @@ class MilvusClient:
     ) -> list[str]:
         def _insert() -> list[str]:
             self._connect()
-            col = self._collection or Collection(self.COLLECTION_NAME)
+            col = self._collection or Collection(self._active_name)
             chunk_ids = [uuid_to_int64(m["chunk_id"]) for m in metadata]
             doc_ids = [uuid_to_int64(m["doc_id"]) for m in metadata]
             categories = [m.get("category", "other") for m in metadata]
             chunk_id_strs = [m["chunk_id"] for m in metadata]
             doc_id_strs = [m["doc_id"] for m in metadata]
-            col.insert([
-                chunk_ids,
-                vectors,
-                doc_ids,
-                categories,
-                chunk_id_strs,
-                doc_id_strs,
-            ])
+
+            if self._use_v2:
+                # V2 schema: 含 version / source 字段
+                versions = [int(m.get("version", 1)) for m in metadata]
+                sources = [str(m.get("source", "v1_legacy")) for m in metadata]
+                col.insert([
+                    chunk_ids,
+                    vectors,
+                    doc_ids,
+                    categories,
+                    chunk_id_strs,
+                    doc_id_strs,
+                    versions,
+                    sources,
+                ])
+            else:
+                col.insert([
+                    chunk_ids,
+                    vectors,
+                    doc_ids,
+                    categories,
+                    chunk_id_strs,
+                    doc_id_strs,
+                ])
             col.flush()
             return [str(cid) for cid in chunk_ids]
 
@@ -101,25 +136,32 @@ class MilvusClient:
     ) -> list[dict]:
         def _search() -> list[dict]:
             self._connect()
-            col = self._collection or Collection(self.COLLECTION_NAME)
+            col = self._collection or Collection(self._active_name)
             col.load()
             expr = f'category == "{category}"' if category else ""
+            output_fields = ["chunk_id_str", "doc_id_str", "category"]
+            if self._use_v2:
+                output_fields.extend(["version", "source"])
             results = col.search(
                 data=[query_vector],
                 anns_field="vector",
                 param={"metric_type": "IP", "params": {"nprobe": 16}},
                 limit=top_n,
                 expr=expr,
-                output_fields=["chunk_id_str", "doc_id_str", "category"],
+                output_fields=output_fields,
             )
             hits = []
             for hit in results[0]:
-                hits.append({
+                entry = {
                     "chunk_id": hit.entity.get("chunk_id_str"),
                     "doc_id": hit.entity.get("doc_id_str"),
                     "category": hit.entity.get("category"),
                     "score": hit.score,
-                })
+                }
+                if self._use_v2:
+                    entry["version"] = hit.entity.get("version", 1)
+                    entry["source"] = hit.entity.get("source", "v1_legacy")
+                hits.append(entry)
             return hits
 
         return await asyncio.to_thread(_search)
@@ -127,7 +169,7 @@ class MilvusClient:
     async def delete_by_doc(self, doc_id: str) -> None:
         def _delete() -> None:
             self._connect()
-            col = self._collection or Collection(self.COLLECTION_NAME)
+            col = self._collection or Collection(self._active_name)
             try:
                 col.load()
             except Exception:

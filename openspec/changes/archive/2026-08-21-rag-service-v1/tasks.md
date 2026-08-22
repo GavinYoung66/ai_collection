@@ -83,3 +83,17 @@
 - [x] 13.2 创建 `app/api/sensitive_words.py`：GET /sensitive-words/current.dict，INTERNAL 无鉴权，text/plain 原样返回，字典缺失/IO 失败返回 404，全部异常就地捕获不冒泡
 - [x] 13.3 `app/main.py` 仅注册路由（prefix=/api/v1），其余代码零改动
 - [x] 13.4 单元测试 `tests/test_sensitive_words_api.py`：字典存在返回原文 / 字典缺失返回 404 两场景
+
+## 14. 接口限流
+
+- [x] 14.1 创建 `app/services/rate_limit.py`：固定窗口计数（Redis INCR + EXPIRE，DB2），按用户维度计数（优先 `X-User-Id` 请求头，缺失回退客户端 IP），Redis 异常静默放行不阻断业务
+- [x] 14.2 路由接入 `rate_limiter` 依赖（固定窗口 60s）：上传 `kb_upload` 20/min、列表 `kb_list` 60/min、详情 `kb_detail` 60/min、删除 `kb_delete` 20/min、reindex `kb_reindex` 10/min、检索 `kb_search` 200/min
+- [x] 14.3 `app/main.py` 注册 `register_rate_limit_handler`：触发限流返回 HTTP 429 + 统一响应包（code=B0006，message=请求过于频繁，请稍后再试）
+- [x] 14.4 单元测试 `tests/test_rate_limit.py`：未触发放行 / 达阈值 429+B0006 / X-User-Id 用户维度隔离 / Redis 故障静默放行
+
+## 15. 接口鉴权权限
+
+- [x] 15.1 创建 `app/services/require_role.py`：解析 `Authorization: Bearer <JWT>`，复用 `common.security.rbac.verify_token`，角色比较大小写不敏感
+- [x] 15.2 路由接入 `require_roles`：上传/删除/reindex 要求 ADMIN/SUPERVISOR；列表/详情/检索 ALL 跳过校验；敏感词只读接口 INTERNAL 完全不接入
+- [x] 15.3 `app/main.py` 注册 `register_auth_handlers`：未携带/无效凭证 → HTTP 401 + B0002（请先登录），角色不足 → HTTP 403 + B0003（无操作权限）
+- [x] 15.4 单元测试 `tests/test_require_role.py`：无凭证/无效 token 401+B0002 / agent 403+B0003 / admin、supervisor 小写放行 / 公共路由不受影响

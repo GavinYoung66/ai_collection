@@ -29,6 +29,10 @@ class LogService:
         degraded: bool,
         is_fallback: bool,
         cache_hit: str = "0",
+        query_original: str | None = None,
+        query_rewritten: str | None = None,
+        intent_tag: str | None = None,
+        session_id: str | None = None,
     ) -> None:
         try:
             entry = KBSearchLog(
@@ -44,9 +48,15 @@ class LogService:
                 hit_doc_ids=",".join(hit_doc_ids),
                 hit_chunk_ids=",".join(hit_chunk_ids),
                 latency_ms=latency_ms,
-                degraded=degraded,
-                is_fallback=is_fallback,
+                # V2: BOOLEAN → VARCHAR('0'/'1')，应用层仍传 bool，存储层自动转换
+                degraded="1" if degraded else "0",
+                is_fallback="1" if is_fallback else "0",
                 cache_hit=cache_hit,
+                # V2 新增 5 字段
+                query_original=query_original,
+                query_rewritten=query_rewritten,
+                intent_tag=intent_tag,
+                session_id=session_id,
             )
             self.db.add(entry)
             await self.db.commit()

@@ -95,6 +95,16 @@ services:
       timeout: 10s
       retries: 5
 
+  ocr-service:
+    build: ./deploy/ocr
+    ports: ["8200:8200"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8200/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
 volumes:
   pg_data:
   redis_data:

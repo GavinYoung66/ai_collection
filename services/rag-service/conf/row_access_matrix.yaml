@@ -1,0 +1,50 @@
+# 行级权限矩阵：(role, department) → 允许的 category 集合
+# 对齐 search-enhancements spec：department claim 由认证/签发系统写入 payload
+# V2 不修改 users 关系表（step4/01 DDL 无 department 列）
+#
+# 规则：
+#   1. JWT 缺失 department 或为 "UNKNOWN" → 走 (role, default)
+#   2. (role, default) 无匹配 → 走 (default, default) 保底
+#   3. 默认放行全部 4 类 = V1 兼容行为
+#
+# 三元组键注释示例（V2 tenant_id bypass，默认注释掉）：
+#   # (tenant_01, admin, headquarters) → {regulation, script, case, other}
+
+# 角色级权限（department=default 或缺失时生效）
+"(COMPLIANCE_OFFICER, default)":
+  - regulation
+
+"(AGENT, default)":
+  - regulation
+  - script
+  - case
+  - other
+
+"(ADMIN, default)":
+  - regulation
+  - script
+  - case
+  - other
+
+"(SUPERVISOR, default)":
+  - regulation
+  - script
+  - case
+  - other
+
+# 部门级权限（department claim 正常签发时生效）
+"(COMPLIANCE_OFFICER, 合规部)":
+  - regulation
+
+"(AGENT, 催收一部)":
+  - regulation
+  - script
+  - case
+  - other
+
+# 保底规则：未知组合走 default → 全量放行（V1 兼容）
+"(default, default)":
+  - regulation
+  - script
+  - case
+  - other

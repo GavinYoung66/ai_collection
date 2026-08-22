@@ -1,46 +1,9 @@
-# Python
-__pycache__/
-*.pyc
-*.pyo
-.venv/
-*.egg-info/
-
-# Conda
-.conda/
-
-# Env / Secrets
-.env
-.env.*
-!.env.example
-
-# Docker volumes
-data/
-pg_data/
-redis_data/
-milvus_data/
-es_data/
-etcd_data/
-minio_data/
-
-
-# OS
-.DS_Store
-
-# Test
-.pytest_cache/
-.coverage
-htmlcov/
-
-
-# Python缓存
+# ── Python ─────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-env/
-venv/
-.venv/
 build/
 develop-eggs/
 dist/
@@ -56,26 +19,64 @@ var/
 .installed.cfg
 *.egg
 
+# ── 虚拟环境 ───────────────────────────────────────────
+.venv/
+venv/
+env/
 
-# docker、本地环境
+# ── 静态检查 / 测试产物 ────────────────────────────────
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+
+# ── Conda ──────────────────────────────────────────────
+.conda/
+
+# ── 环境变量 / 密钥 ────────────────────────────────────
 .env
+.env.*
+!.env.example
 *.local
+
+# ── Docker 数据卷（仅根目录挂载）──────────────────────
+# 注意：必须锚定 /data/，否则会误伤 services/rag-service/data/sensitive_words.dict
+/data/
+pg_data/
+redis_data/
+milvus_data/
+es_data/
+etcd_data/
+minio_data/
 docker-compose.override.yml
 
-# IDE编辑器
+# ── 前端（Vue3 + Vite，M3 引入）───────────────────────
+node_modules/
+.vite/
+coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── IDE / 编辑器 ───────────────────────────────────────
 .vscode/
 .idea/
 .trae/
 *.swp
 *.swo
+*.swn
 
-# OS系统垃圾
+# ── 操作系统 ───────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# 日志
+# ── 日志 ───────────────────────────────────────────────
 logs/
 *.log
 
-#模型
+# ── 模型 / 大文件 ──────────────────────────────────────
 models/

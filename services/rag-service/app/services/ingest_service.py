@@ -5,16 +5,33 @@ from pathlib import Path
 import structlog
 
 from app.parsers import ParserFactory
+from app.parsers.audio_parser import AudioParser
+from app.parsers.image_parser import ImageParser
 from app.repositories.chunk_repo import ChunkRepo
 from app.repositories.doc_repo import DocRepo
 from app.services.chunk_service import ChunkService
 from app.vectorstore.embed_client import EmbedClient
 from app.vectorstore.es_client import ESClient
 from app.vectorstore.milvus_client import MilvusClient
+from common.config.settings import settings
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
 
 logger = structlog.get_logger()
+
+
+def _detect_source(parser) -> str:
+    """根据 Parser 实例类型推断文档来源标签。
+
+    - ImageParser → "ocr"
+    - AudioParser → "asr"
+    - 其他（Text/MD/PDF/Docx）→ "v1_legacy"
+    """
+    if isinstance(parser, ImageParser):
+        return "ocr"
+    if isinstance(parser, AudioParser):
+        return "asr"
+    return "v1_legacy"
 
 
 class IngestService:
@@ -50,10 +67,17 @@ class IngestService:
             logger.error("parse_failed", filename=filename, error=str(e))
             raise BizException(ErrorCode.A3001, f"文档解析失败: {e}")
 
+        # V2: 根据 Parser 类型记录文档来源标签（§6.6 / §15.1）
+        source = _detect_source(parser)
+
         cleaned_text = self.chunk_service.clean(raw_text)
 
         doc_id = await self.doc_repo.create(
-            title=filename, category=category, content=cleaned_text, created_by=created_by
+            title=filename,
+            category=category,
+            content=cleaned_text,
+            created_by=created_by,
+            source=source,
         )
 
         try:
@@ -78,6 +102,15 @@ class IngestService:
             vectors = await self.embed.batch_embed(texts)
         except Exception as e:
             logger.error("embed_failed", doc_id=str(doc_id), error=str(e))
+            # V2 §6.6: 降级入库开关——Embedding 失败时仅写 ES + 文本，不写 Milvus/kb_chunks.vector_id=null
+            if settings.KB_EMBED_DEGRADED_KEEP_TEXT:
+                await self._ingest_degraded_fallback(doc_id, chunks, source, error=str(e))
+                return {
+                    "doc_id": str(doc_id),
+                    "chunks_count": len(chunks),
+                    "status": "active",
+                    "degraded": True,
+                }
             await self.doc_repo.update_status(doc_id, "failed")
             raise BizException(ErrorCode.A3003, f"向量入库失败: {e}")
 
@@ -131,6 +164,52 @@ class IngestService:
             "chunks_count": len(chunks),
             "status": "active",
         }
+
+    async def _ingest_degraded_fallback(
+        self, doc_id: uuid.UUID, chunks: list[dict], source: str, error: str
+    ) -> None:
+        """V2 §6.6 降级入库：Embedding 失败但 KB_EMBED_DEGRADED_KEEP_TEXT=true 时，
+        仅写 ES + kb_chunks（vector_id 占位为空串），文档 status=active，不写 Milvus。
+
+        - 保证文本可被 ES BM25 检索到，向量召回路径静默缺失；
+        - 日志 warning degraded，便于后续重建脚本（rebuild_milvus_v2.py）补齐向量。
+        """
+        logger.warning(
+            "ingest_degraded_embed_fallback",
+            doc_id=str(doc_id),
+            source=source,
+            error=error,
+        )
+        try:
+            es_docs = [
+                {
+                    "chunk_id": c["id"],
+                    "content": c["content"],
+                    "doc_id": c["doc_id"],
+                    "category": c["category"],
+                }
+                for c in chunks
+            ]
+            await self.es.index_docs(es_docs)
+        except Exception as e:
+            logger.error("degraded_es_index_failed", doc_id=str(doc_id), error=str(e))
+            await self.doc_repo.update_status(doc_id, "failed")
+            raise BizException(ErrorCode.A3003, f"降级入库 ES 写入失败: {e}")
+
+        chunk_entities = [
+            {
+                "id": uuid.UUID(c["id"]),
+                "doc_id": doc_id,
+                "chunk_index": c["chunk_index"],
+                "content": c["content"],
+                # vector_id 唯一索引非空约束：降级时用占位 id 标记无向量
+                "vector_id": f"degraded:{c['id']}",
+                "category": c["category"],
+            }
+            for c in chunks
+        ]
+        await self.chunk_repo.batch_create(chunk_entities)
+        await self.doc_repo.update_status(doc_id, "active")
 
     async def delete_by_doc(self, doc_id: str) -> None:
         uid = uuid.UUID(doc_id)
