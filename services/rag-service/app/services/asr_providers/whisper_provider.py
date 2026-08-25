@@ -1,5 +1,10 @@
 """Whisper ASR Provider 实现（本地 faster-whisper 模型转写）。"""
+import threading
+
 from app.services.asr_providers.base import ASRProvider
+
+# 模块级锁：faster-whisper 模型懒加载的并发保护（并发首次转写只加载一次）
+_MODEL_LOCK = threading.Lock()
 
 
 class WhisperASRProvider(ASRProvider):
@@ -31,11 +36,15 @@ class WhisperASRProvider(ASRProvider):
 
         model = getattr(self, "_model", None)
         if model is None:
-            try:
-                model = WhisperModel("tiny", device="cpu", compute_type="int8")
-            except Exception as e:
-                raise RuntimeError(f"Whisper 模型加载失败: {e}")
-            self._model = model
+            with _MODEL_LOCK:
+                # 双重检查：锁内再次确认，避免并发首次调用重复加载模型
+                model = getattr(self, "_model", None)
+                if model is None:
+                    try:
+                        model = WhisperModel("tiny", device="cpu", compute_type="int8")
+                    except Exception as e:
+                        raise RuntimeError(f"Whisper 模型加载失败: {e}")
+                    self._model = model
 
         def _run() -> str:
             try:

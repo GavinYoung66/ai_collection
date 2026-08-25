@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from common.config.logging import setup_logging
 from common.errors.handlers import register_exception_handlers
 from common.trace.middleware import TraceMiddleware
-from app.api.health import router as health_router
+from app.api.health import router as health_router, probe_health
 from app.api.documents import router as documents_router
 from app.api.search import router as search_router
 from app.api.sensitive_words import router as sensitive_words_router
@@ -157,6 +157,80 @@ async def _ensure_sensitive_words_baseline() -> None:
             "sensitive_baseline_ok", count=count, version=version
         )
 
+async def _resume_backfill_pending() -> None:
+    """启动时扫描 `rag:backfill:pending` 集合，从 PG 回读文档重新调度 ES 补索引（5.9）。
+
+    - 补索引任务随进程退出丢失，重启后由此恢复：成功/放弃由任务自身从集合移除；
+    - 单条失败仅 warning，不阻塞其他条目与启动流程；
+    - 补索引仅用 ES + Redis，直调模块级 backfill_es_index_task，不构造依赖 DB session 的
+      IngestService（避免跨 session 使用隐患）。
+    """
+    import uuid
+    from typing import Any, cast
+
+    from sqlalchemy import select
+
+    from app.api.deps import get_es_client, get_redis
+    from app.models.orm import KBChunk
+    from app.repositories.doc_repo import DocRepo
+    from app.services.ingest_service import (
+        _BACKFILL_PENDING_KEY,
+        backfill_es_index_task,
+    )
+    from common.db.session import async_session_factory
+
+    try:
+        redis = await get_redis()
+        # redis.asyncio 方法桩返回 Awaitable|T 联合类型，cast 消除 union
+        pending = await cast(Any, redis).smembers(_BACKFILL_PENDING_KEY)
+    except Exception as e:
+        logger.warning("backfill_resume_scan_failed", error=str(e))
+        return
+    if not pending:
+        return
+    logger.warning("backfill_resume_found", count=len(pending))
+
+    es = get_es_client()
+    for doc_id_str in pending:
+        try:
+            uid = uuid.UUID(doc_id_str)
+        except ValueError:
+            await cast(Any, redis).srem(_BACKFILL_PENDING_KEY, doc_id_str)
+            continue
+        try:
+            async with async_session_factory() as session:
+                doc_repo = DocRepo(session)
+                doc = await doc_repo.get_by_id(uid)
+                if doc is None or doc.status != "active":
+                    await cast(Any, redis).srem(_BACKFILL_PENDING_KEY, doc_id_str)
+                    continue
+                result = await session.execute(
+                    select(KBChunk).where(
+                        KBChunk.doc_id == uid, KBChunk.is_delete == "0"
+                    )
+                )
+                chunks = result.scalars().all()
+                if not chunks:
+                    await cast(Any, redis).srem(_BACKFILL_PENDING_KEY, doc_id_str)
+                    continue
+                es_docs = [
+                    {
+                        "chunk_id": str(c.id),
+                        "content": c.content,
+                        "doc_id": doc_id_str,
+                        "category": c.category,
+                        "doc_summary": doc.summary or "",
+                    }
+                    for c in chunks
+                ]
+            # DB session 已随 async with 退出关闭；补索引仅用 ES + Redis
+            asyncio.create_task(backfill_es_index_task(es, redis, es_docs, uid))
+        except Exception as e:
+            logger.warning(
+                "backfill_resume_item_failed", doc_id=doc_id_str, error=str(e)
+            )
+
+
 app = FastAPI(title="RAG Service", version="1.0.0")
 app.add_middleware(TraceMiddleware)
 register_exception_handlers(app)
@@ -199,7 +273,55 @@ async def startup():
     except Exception as e:
         logger.warning("sensitive_baseline_init_failed", error=str(e))
 
+    # ES 降级补索引恢复（5.9）：扫描 rag:backfill:pending 集合，重新调度待补任务
+    try:
+        await _resume_backfill_pending()
+    except Exception as e:
+        logger.warning("backfill_resume_init_failed", error=str(e))
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    """幂等关闭全局客户端（embed/rerank/milvus/es/redis）。
+
+    - 各客户端 close 已实现幂等；单点失败仅 warning，不影响其余关闭。
+    """
+    from app.api.deps import (
+        _embed_client,
+        _es_client,
+        _milvus_client,
+        _redis_client,
+        _rerank_client,
+    )
+
+    if _es_client is not None:
+        try:
+            await _es_client.close()
+        except Exception as e:
+            logger.warning("shutdown_es_close_failed", error=str(e))
+    if _embed_client is not None:
+        try:
+            await _embed_client.close()
+        except Exception as e:
+            logger.warning("shutdown_embed_close_failed", error=str(e))
+    if _rerank_client is not None:
+        try:
+            await _rerank_client.close()
+        except Exception as e:
+            logger.warning("shutdown_rerank_close_failed", error=str(e))
+    if _milvus_client is not None:
+        try:
+            await _milvus_client.close()
+        except Exception as e:
+            logger.warning("shutdown_milvus_close_failed", error=str(e))
+    if _redis_client is not None:
+        try:
+            await _redis_client.aclose()
+        except Exception as e:
+            logger.warning("shutdown_redis_close_failed", error=str(e))
+
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "service": "rag-service", "version": "1.0.0"}
+    """根路径 /health：docker-compose healthcheck 依赖此路径，与 /api/v1/health 共用同一探活实现。"""
+    return await probe_health()

@@ -1,9 +1,10 @@
 #!/bin/bash
 set -e
 
-# RAG Service V4 冒烟测试（§17 + V4 摘要元数据能力）
-# 15 步全链路：health → 上传 TXT → 上传 JPG(OCR) → 上传 MP3(ASR) → 列表 → 检索(V1) → 检索(V2 改写) → 删除 → 敏感词 → Embedding 熔断 ES-only 降级 → 回归自检
+# RAG Service V4 冒烟测试（§17 + V4 摘要元数据能力 + rag-service-final-fix）
+# 17 步全链路：health → 上传 TXT → 上传 JPG(OCR) → 上传 MP3(ASR) → 列表 → 检索(V1) → 检索(V2 改写) → 删除 → 敏感词 → Embedding 熔断 ES-only 降级 → 回归自检
 # V4 追加步骤：上传携带摘要 → 详情返回摘要 → 摘要补全 → 检索 summary 字段契约 → 无摘要存量行为不变（降级不阻断）
+# fix 追加步骤：上传大小校验（>20MB → B0001）、reindex 摘要保持（PG summary 两端一致）
 #
 # 前置：docker compose up（rag-service + PG + Milvus + ES + Redis + OCR service + mock rerank/embed）
 # 用法：bash scripts/smoke/smoke_rag_v4.sh
@@ -69,10 +70,13 @@ fi
 echo "=== RAG Service V4 Smoke Test ==="
 echo ""
 
-# ---------- Step 1: /health ----------
-echo "Step 1: /health..."
+# ---------- Step 1: /health（依赖探活） ----------
+echo "Step 1: /health（PG/Milvus/Redis/Embedding 四项探活）..."
 HEALTH=$(curl -sf "$HEALTH_URL" 2>/dev/null || echo "")
-if echo "$HEALTH" | grep -q "healthy"; then
+HEALTH_STATUS=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','__MISSING__'))" 2>/dev/null || echo "__ERROR__")
+HEALTH_CHECKS=$(echo "$HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); print('OK' if {'database','milvus','redis','embedding'} <= set(d.get('checks',{})) else 'MISSING_CHECKS')" 2>/dev/null || echo "__ERROR__")
+if [ "$HEALTH_STATUS" = "healthy" ] && [ "$HEALTH_CHECKS" = "OK" ]; then
+    echo "   status=$HEALTH_STATUS checks=$HEALTH_CHECKS"
     step_pass
 else
     step_fail "health check returned: $HEALTH"
@@ -398,6 +402,54 @@ else
     # 清理 V4 产生的文档
     curl -sf -X DELETE "$BASE_URL/kb/documents/$V4_DOC_ID" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null 2>&1 || true
     curl -sf -X DELETE "$BASE_URL/kb/documents/$V4_NO_SUM_ID" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null 2>&1 || true
+fi
+
+# ---------- Step 16: 上传大小校验（>KB_MAX_FILE_SIZE=20MB → B0001） ----------
+echo "Step 16: 上传大小校验（超 20MB → B0001）..."
+TMP_BIG=$(mktemp /tmp/smoke_XXXX.bin)
+python3 -c "open('$TMP_BIG','wb').write(b'0' * (20*1024*1024 + 1))"
+BIG_RESP=$(curl -s -X POST "$BASE_URL/kb/documents" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -F "file=@$TMP_BIG" \
+  -F "category=regulation" 2>/dev/null || echo "")
+rm -f "$TMP_BIG"
+BIG_CODE=$(echo "$BIG_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('code','__MISSING__'))" 2>/dev/null || echo "__ERROR__")
+if [ "$BIG_CODE" = "B0001" ]; then
+    echo "   超限上传返回 B0001（预期）"
+    step_pass
+else
+    step_fail "超限上传 code=$BIG_CODE（期望 B0001）: $(echo "$BIG_RESP" | head -c 100)"
+fi
+
+# ---------- Step 17: reindex 摘要保持（PG summary 权威源两端一致） ----------
+echo "Step 17: reindex 摘要保持（reindex 后详情 summary 与上传一致）..."
+FIX_SUM="fix 冒烟摘要：reindex 后摘要保持一致性验证"
+FIX_UPLOAD_RESP=$(curl -sf -X POST "$BASE_URL/kb/documents" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -F "file=@$SAMPLE_FILE" \
+  -F "category=regulation" \
+  -F "summary=$FIX_SUM" 2>/dev/null || echo "")
+FIX_DOC_ID=$(echo "$FIX_UPLOAD_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['doc_id'])" 2>/dev/null || echo "")
+if [ -z "$FIX_DOC_ID" ]; then
+    step_fail "reindex 前置上传失败: $(echo "$FIX_UPLOAD_RESP" | head -c 100)"
+else
+    FIX_REINDEX_RESP=$(curl -sf -X POST "$BASE_URL/kb/documents/$FIX_DOC_ID/reindex" \
+      -H "Authorization: Bearer $ADMIN_TOKEN" 2>/dev/null || echo "")
+    FIX_REINDEX_CODE=$(echo "$FIX_REINDEX_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('code','__MISSING__'))" 2>/dev/null || echo "__ERROR__")
+    if [ "$FIX_REINDEX_CODE" != "0" ]; then
+        step_fail "reindex code=$FIX_REINDEX_CODE: $(echo "$FIX_REINDEX_RESP" | head -c 100)"
+    else
+        FIX_DETAIL=$(curl -sf "$BASE_URL/kb/documents/$FIX_DOC_ID" \
+          -H "Authorization: Bearer $ADMIN_TOKEN" 2>/dev/null || echo "")
+        FIX_DETAIL_SUMMARY=$(echo "$FIX_DETAIL" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'].get('summary','__MISSING__'))" 2>/dev/null || echo "__ERROR__")
+        if [ "$FIX_DETAIL_SUMMARY" = "$FIX_SUM" ]; then
+            echo "   reindex 后详情 summary 与上传一致"
+            step_pass
+        else
+            step_fail "reindex 后 summary 不一致: got '$FIX_DETAIL_SUMMARY'"
+        fi
+    fi
+    curl -sf -X DELETE "$BASE_URL/kb/documents/$FIX_DOC_ID" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null 2>&1 || true
 fi
 
 # ---------- 清理临时文件 ----------

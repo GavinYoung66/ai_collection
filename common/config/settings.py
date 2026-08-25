@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     KB_RERANK_THRESHOLD: float = 0.35
     KB_CACHE_TTL: int = 3600
     KB_CACHE_ENABLED: bool = True
+    # 文档入库限制（对齐 DD-03 §8：上传大小上限 20MB、解析超时 30s）
+    KB_MAX_FILE_SIZE: int = 20 * 1024 * 1024  # 上传文件大小上限（字节），超限返回 B0001
+    KB_PARSE_TIMEOUT: float = 30.0            # 单文件解析超时（秒），超时按解析失败 A3001 处理
+    KB_HEALTH_DEGRADED_MODE: bool = False     # /health 降级模式：true 时依赖探活失败只告警，status=degraded 不判 unhealthy（不触发容器重启）
     RAG_REDIS_DB: int = 2
     # 超时与请求级时限（对齐 step6/01 §4：通用外部调用 5s/3 次重试）
     EMBED_TIMEOUT: float = 5.0  # 单条向量化超时（秒），规范值

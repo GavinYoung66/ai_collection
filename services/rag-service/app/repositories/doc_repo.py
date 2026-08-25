@@ -68,15 +68,28 @@ class DocRepo:
         result = await self.db.execute(stmt)
         docs = result.scalars().all()
 
+        # 批量分组聚合 chunk 计数，消除逐行 get_chunks_count 的 N+1 查询（rag-service-final-fix 5.11）
+        if docs:
+            count_result = await self.db.execute(
+                select(KBChunk.doc_id, func.count())
+                .where(
+                    KBChunk.doc_id.in_([d.id for d in docs]),
+                    KBChunk.is_delete == "0",
+                )
+                .group_by(KBChunk.doc_id)
+            )
+            counts = {str(row[0]): row[1] for row in count_result.all()}
+        else:
+            counts = {}
+
         items = []
         for doc in docs:
-            chunks_count = await self.get_chunks_count(doc.id)
             items.append({
                 "id": str(doc.id),
                 "title": doc.title,
                 "category": doc.category,
                 "status": doc.status,
-                "chunks_count": chunks_count,
+                "chunks_count": counts.get(str(doc.id), 0),
                 "create_time": doc.create_time.isoformat() if doc.create_time else "",
             })
         return items, total

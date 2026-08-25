@@ -94,15 +94,15 @@
 ```
 services/rag-service/
 ├── app/                          # 应用主目录（六层架构：api → models → parsers → repositories → services → vectorstore）
-│   ├── main.py                   # FastAPI 入口：路由注册 + 鉴权/限流/异常 handler + startup 初始化 Milvus/ES + /health
+│   ├── main.py                   # FastAPI 入口：路由注册 + 鉴权/限流/异常 handler + startup（Milvus/ES 初始化 + 敏感词基线 + 补索引恢复）+ shutdown 幂等关闭全局客户端 + /health 根探活
 │   ├── api/                      # 路由层（Controller）：先权限 → 再限流 → 再业务
-│   │   ├── health.py             # GET /health：依赖探活（PG/Milvus/Redis/embedding）
-│   │   ├── deps.py               # 依赖注入（db/redis/各客户端）+ success_response 统一响应包 + save_upload_file
+│   │   ├── health.py             # GET /health：依赖探活（PG/Milvus/Redis/embedding），/health 与 /api/v1/health 双路由共用 probe_health()
+│   │   ├── deps.py               # 依赖注入（db/redis/各客户端）+ success_response 统一响应包 + save_upload_file（≤20MB 校验 + 临时文件清理）
 │   │   ├── documents.py          # 上传/列表/详情/删除/reindex（权限 + 限流 + 缓存失效）
 │   │   ├── search.py             # 混合检索（限流 200/min + 缓存切面 + 请求级超时）
 │   │   └── sensitive_words.py    # GET /sensitive-words/current.dict（INTERNAL，text/plain 原样返回）
 │   ├── models/                   # Pydantic 模型层
-│   │   ├── orm.py                # SQLAlchemy ORM：kb_documents / kb_chunks / kb_search_logs
+│   │   ├── orm.py                # SQLAlchemy ORM：kb_documents（含 summary）/ kb_chunks / kb_search_logs / sensitive_words
 │   │   ├── document.py           # DocumentUploadResponse / DocumentListItem / DocumentListResponse
 │   │   └── search.py             # SearchRequest / SourceItem / SearchResponse
 │   ├── parsers/                  # 文档解析层（ABC + ParserFactory 按扩展名分发）
@@ -110,40 +110,50 @@ services/rag-service/
 │   │   ├── text_parser.py        # TXT：UTF-8 + 编码检测 fallback
 │   │   ├── md_parser.py          # MD：正则去除 #/`/*/-
 │   │   ├── pdf_parser.py         # PDF：pdfplumber，页文本>4 行去首尾各 2 行（页眉页脚）
-│   │   └── docx_parser.py        # DOCX：python-docx 段落提取，空段过滤
+│   │   ├── docx_parser.py        # DOCX：python-docx 段落提取，空段过滤
+│   │   ├── image_parser.py       # 图片→OCR（PaddleOCR sidecar ocr-service:8200）
+│   │   └── audio_parser.py       # 音视频→ASR（Provider 抽象：DashScope/Whisper；VAD 静音裁剪 + 60s 分片 + 开场白裁剪）
 │   ├── repositories/             # 数据访问层（Repository）
-│   │   ├── doc_repo.py           # kb_documents：create/get/list/update_status/soft_delete/chunks 计数
+│   │   ├── doc_repo.py           # kb_documents：create/get/list（分组聚合计数，无 N+1）/update_status/soft_delete/summary 读写
 │   │   └── chunk_repo.py         # kb_chunks：batch_create/delete_by_doc/get_by_ids
 │   ├── services/                 # 业务逻辑层（Service）
 │   │   ├── chunk_service.py      # 分块：段落→句号→chunk_size，overlap=50，过滤 len<10
-│   │   ├── ingest_service.py     # 入库编排（10 步流程 §6.1）；PG 成功但索引失败→回滚+failed+A3003
-│   │   ├── search_service.py     # 检索编排：双路并行→RRF→Rerank→双闸门兜底；降级 §6.4
+│   │   ├── ingest_service.py     # 入库编排（§6.1）；解析超时（KB_PARSE_TIMEOUT）走既有失败路径；ES 降级补索引持久化（rag:backfill:pending）；删除外部索引失败重试 2 次
+│   │   ├── search_service.py     # 检索编排：双路并行→RRF→同 doc_id 去重→业务加权→Rerank→行级权限→双闸门兜底；降级 §6.4；非法 UUID 召回跳过
 │   │   ├── log_service.py        # kb_search_logs 落库（写入失败不阻断主流程）
 │   │   ├── query_cache.py        # 查询缓存：key=md5(query+category+top_k)，分类 Set 索引，禁 KEYS
 │   │   ├── rate_limit.py         # 限流：Redis INCR+EXPIRE，X-User-Id 优先/IP 回退，429+B0006
-│   │   └── require_role.py       # 权限：Bearer JWT（common.security.rbac），401+B0002 / 403+B0003
+│   │   ├── require_role.py       # 权限：Bearer JWT（common.security.rbac），401+B0002 / 403+B0003
+│   │   ├── asr_client.py         # ASR 客户端（熔断 rag:asr:degraded，Redis 故障按未熔断处理）
+│   │   ├── asr_providers/        # ASR Provider 抽象：base/factory/dashscope_provider/whisper_provider（并发加锁懒加载）
+│   │   ├── ocr_client.py         # OCR 客户端（ocr-service:8200）
+│   │   ├── summary_service.py    # V4 摘要：ES doc_summary → PG summary 写入顺序（ES→PG 防脏状态）
+│   │   ├── sensitive_words_sync.py # 敏感词版本号 + Pub-Sub 热刷新（kb.sensitive_updated）
+│   │   ├── query_rewrite_service.py # V2 Query 改写（KB_QUERY_REWRITE_ENABLED）
+│   │   ├── routing_service.py    # V2 动态路由（KB_ROUTING_ENABLED）
+│   │   ├── weighting_service.py  # V2 业务加权（KB_WEIGHTING_ENABLED）
+│   │   ├── row_access_service.py # V2/V3 行级权限（KB_ROW_LEVEL_ENABLED，fail-closed）
+│   │   └── session_service.py    # V2 多轮会话（KB_MULTITURN_ENABLED）
 │   └── vectorstore/              # 向量存储客户端层
-│       ├── milvus_client.py      # kb_vectors：UUID→INT64 + str 冗余字段，insert/search/delete_by_doc
-│       ├── es_client.py          # kb_bm25：ik_max_word（缺插件回退 standard），index/search/delete_by_doc
+│       ├── milvus_client.py      # kb_vectors：UUID→INT64 + str 冗余字段，insert/search/delete_by_doc/close
+│       ├── es_client.py          # kb_bm25：ik_max_word（缺插件回退 standard），index/search/delete_by_doc；V4 doc_summary 检索副本
 │       ├── embed_client.py       # embedding-service:8100：超时/重试/熔断（rag:embed:degraded TTL 60s）
 │       └── rerank_client.py      # rerank-service:8101：精排，失败降级 RRF score 排序
 ├── data/
 │   └── sensitive_words.dict      # 敏感词字典（每行一词，与 seed 一致；V1 只读接口数据源，差异见 §5.3）
-├── tests/                        # 12 个测试文件（解析/缓存/限流/权限/降级/双闸门/分页/reindex 端到端）
+├── tests/                        # 40 个测试文件（全量基线 240 passed / 1 skipped，V1→V4 分代归档）
 │   ├── conftest.py               # 共享 fixture（TestClient / DB / Redis mock）
-│   ├── test_health.py            # /health 探活
-│   ├── test_documents.py         # ParserFactory/Text/MD 解析 + ChunkService clean/split（20 用例）
-│   ├── test_pdf_docx_parser.py   # PDF/DOCX 解析（页眉页脚过滤）
-│   ├── test_search.py            # RRF 融合（双路/去重/空路/排序）+ 检索响应结构
-│   ├── test_search_degradation.py# Milvus/ES/Rerank 降级场景
-│   ├── test_gate_threshold.py    # 双闸门兜底阈值（rerank 0.35 / dense 0.6）
-│   ├── test_query_cache.py       # 缓存 key 生成/读写/失效
-│   ├── test_rate_limit.py        # 限流阈值/429+统一响应包/用户维度隔离/Redis 故障放行（4 用例）
-│   ├── test_require_role.py      # 401+B0002 / 403+B0003 / 角色大小写不敏感（6 用例）
-│   ├── test_sensitive_words_api.py # 字典只读接口（存在返回原文 / 缺失返回 404）
-│   ├── test_pagination.py        # 列表分页（page / page_size / size 兼容回退）
-│   └── test_reindex.py           # reindex 端到端
-└── Dockerfile                    # 镜像：公共基础镜像 + 全局 requirements 安装
+│   ├── V1 基线：test_health / test_documents / test_pdf_docx_parser / test_search / test_search_degradation /
+│   │           test_gate_threshold / test_query_cache / test_rate_limit / test_require_role /
+│   │           test_sensitive_words_api / test_pagination / test_reindex
+│   ├── V2：test_embed_es_only_degradation / test_ingest_degradation / test_routing / test_query_rewrite /
+│   │       test_weighting / test_row_access / test_session / test_logs_v2 / test_search_dedup_docid /
+│   │       test_sensitive_words_sync / test_sensitive_seed_publish / test_redis_fault_tolerance /
+│   │       test_backward_compat / test_0004_seed_consistency
+│   ├── V3：test_multimodal_parsers / test_asr_vad / test_asr_opening_trim / test_row_access_fail_closed
+│   └── V4/fix：test_summary_metadata / test_api_health / test_api_upload / test_api_deps / test_ingest_service /
+│               test_whisper_provider / test_asr_client / test_doc_repo / test_search_service / test_main
+└── Dockerfile                    # 镜像：公共基础镜像 + 全局 requirements 安装 + conf/ + 功能开关 ENV（V2 起）
 ```
 
 ---
@@ -233,7 +243,7 @@ services/rag-service/
 
 - 格式白名单：`.pdf/.docx/.md/.txt`；其他（含 .exe）→ A3001；空文件/损坏加密 PDF → A3001，status=failed
 - 同名策略：每次上传生成新 doc_id，不覆盖
-- 删除不存在 doc_id → B0004；重复删除幂等（已 archived 直接成功）
+- 删除不存在/已 archived 的 doc_id → B0004（非幂等：重复删除返回资源不存在）
 - reindex 对 failed/archived 文档 → B0004（状态机约束）
 
 ### 5.2 混合检索
@@ -242,7 +252,7 @@ services/rag-service/
 | :--- | :----------- | :------------------ | :------ | :------- |
 | POST | `/kb/search` | ALL（跳过权限校验） | 200/min | 混合检索 |
 
-**请求体**：`{query: str, category?: str, top_k: int=5}`；**入参边界**：top_k∈[1,100]、category 四值、query 非空（非法→B0001，HTTP 422）
+**请求体**：`{query: str, category?: str, top_k: int=5}`；**入参边界**：top_k∈[1,20]、category 四值、query 非空（非法→B0001，HTTP 422）
 **响应体**：`{results:[{doc_id,title,chunk_index,content,score,rerank_score}], degraded, query_original, message, trace_id}`
 
 **双闸门兜底（对齐 step1/01 全局阈值 + V1 实现）**：
@@ -307,17 +317,17 @@ POST /search → 限流 → embed(query) → 并行召回(Milvus+ES, 各 top20, 
 
 ### 6.4 降级矩阵（5 重 + 扩展，对齐 step6/01、step3/03）
 
-| 故障场景                 | 降级路径             | 响应/错误码              | 告警       |
-| :----------------------- | :------------------- | :----------------------- | :--------- |
-| Milvus 宕机              | ES-only 检索         | degraded=true            | Warning    |
-| ES 宕机                  | Milvus-only 检索     | degraded=true            | Warning    |
-| 双侧宕机                 | 不检索               | A3005                    | Critical   |
-| Rerank 宕机              | RRF score 排序       | degraded=true            | Warning    |
-| Embedding 宕机（入库侧） | 中止入库             | A3003, status=failed     | Critical   |
-| Embedding 宕机（检索侧） | 中止检索             | A3003                    | Critical   |
-| Redis 故障（缓存/限流）  | 静默绕过             | 正常返回                 | Warning    |
-| 检索融合分 < 0.6         | 判定无匹配（闸门 1） | 标记 degraded（V1 待补） | 命中率指标 |
-| rerank_score < 0.35      | 兜底文案（闸门 2）   | code=0, results=[]       | —          |
+| 故障场景                 | 降级路径             | 响应/错误码                                                  | 告警       |
+| :----------------------- | :------------------- | :----------------------------------------------------------- | :--------- |
+| Milvus 宕机              | ES-only 检索         | degraded=true                                                | Warning    |
+| ES 宕机                  | Milvus-only 检索     | degraded=true                                                | Warning    |
+| 双侧宕机                 | 不检索               | A3005                                                        | Critical   |
+| Rerank 宕机              | RRF score 排序       | degraded=true                                                | Warning    |
+| Embedding 宕机（入库侧） | 中止入库             | A3003, status=failed                                         | Critical   |
+| Embedding 宕机（检索侧） | 中止检索             | A3003                                                        | Critical   |
+| Redis 故障（缓存/限流）  | 静默绕过             | 正常返回                                                     | Warning    |
+| 检索融合分 < 0.6         | 判定无匹配（闸门 1） | degraded 保持 false（业务判定非基础设施降级，V1-T17 已接入） | 命中率指标 |
+| rerank_score < 0.35      | 兜底文案（闸门 2）   | code=0, results=[]                                           | —          |
 
 降级总原则（对齐 step3/03）：检索为空/失败**禁止抛异常给终端**，调用方（call-service）走 FAQ 兜底。
 
@@ -357,12 +367,13 @@ POST /search → 限流 → embed(query) → 并行召回(Milvus+ES, 各 top20, 
 | KB_CACHE_ENABLED               | true       | 查询缓存开关                                             |
 | KB_MAX_FILE_SIZE               | 20MB       | 上传大小上限                                             |
 | KB_PARSE_TIMEOUT               | 30s        | 解析超时                                                 |
+| KB_HEALTH_DEGRADED_MODE        | false      | /health 降级模式：true 时依赖探活失败只告警，status=degraded 不判 unhealthy（不触发容器重启） |
 | KB_EMBED_TIMEOUT/RETRIES/BREAK | 5s / 3 / 3 | 对齐 step6/01 通用外部调用参数                           |
 | RAG_P95_TARGET                 | 3s         | 检索 P95 时延目标（对齐 step6/02 全局 3s）               |
 
 ---
 
-## 9. 独立测试方案（已落地，77 用例全通过）
+## 9. 独立测试方案（已落地，240 passed / 1 skipped）
 
 ### 9.1 依赖矩阵
 
@@ -453,15 +464,15 @@ V1（本期·已实现）                 V2（多模态+智能检索+规范整�
 
 ### 10.3 版本迁移兼容策略
 
-| 维度         | 策略                                                                                                                                                         |
-| :----------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **数据库**   | 只加列/加表，不改既有列语义；status 扩展走 Alembic 增量迁移；kb_search_logs BOOLEAN→VARCHAR 提供默认值，不强制回填；kb_document_versions 新增表              |
-| **接口**     | 对外契约（路径/响应包/错误码）向后兼容；新能力新增端点或可选字段（缺省=V1 行为）；分页字段 page/size→page_size 兼容期双字段支持；top_k/category 边界永不收紧 |
-| **索引**     | Milvus/ES 只增字段不删字段；version/source 增列在发布窗口一次性重建，且校验 kb_documents.status 与索引一致                                                   |
-| **缓存**     | 缓存 key 引入版本段（`rag:cache:query:v2:{md5}`），旧 key 自然过期不迁移                                                                                     |
-| **检索行为** | Query 改写/动态路由/业务加权/双闸门 0.6 均以开关引入（KB_QUERY_REWRITE_ENABLED 等），关闭时行为与 V1 完全一致，灰度期可一键回退                              |
-| **数据**     | 业务加权/行级权限元数据由 data-platform 推送增量回填，不要求存量一次补齐                                                                                     |
-| **敏感词**   | V2 切换 DB 表数据源时，以 seed 迁移同步 .dict 文件内容 → sensitive_words 表，保持 50 词基线不漂移                                                            |
+| 维度         | 策略                                                                                                                                                                                            |
+| :----------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **数据库**   | 只加列/加表，不改既有列语义；status 扩展走 Alembic 增量迁移；kb_search_logs BOOLEAN→VARCHAR 提供默认值，不强制回填；kb_document_versions 新增表                                                 |
+| **接口**     | 对外契约（路径/响应包/错误码）向后兼容；新能力新增端点或可选字段（缺省=V1 行为）；分页字段 page/size→page_size 兼容期双字段支持；top_k 上界定稿为 20（不随版本放宽）；category 四值边界永不收紧 |
+| **索引**     | Milvus/ES 只增字段不删字段；version/source 增列在发布窗口一次性重建，且校验 kb_documents.status 与索引一致                                                                                      |
+| **缓存**     | 缓存 key 引入版本段（`rag:cache:query:v2:{md5}`），旧 key 自然过期不迁移                                                                                                                        |
+| **检索行为** | Query 改写/动态路由/业务加权/双闸门 0.6 均以开关引入（KB_QUERY_REWRITE_ENABLED 等），关闭时行为与 V1 完全一致，灰度期可一键回退                                                                 |
+| **数据**     | 业务加权/行级权限元数据由 data-platform 推送增量回填，不要求存量一次补齐                                                                                                                        |
+| **敏感词**   | V2 切换 DB 表数据源时，以 seed 迁移同步 .dict 文件内容 → sensitive_words 表，保持 50 词基线不漂移                                                                                               |
 
 ---
 

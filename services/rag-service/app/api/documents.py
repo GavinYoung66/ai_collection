@@ -5,7 +5,7 @@ import structlog
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, get_embed_client, get_es_client, get_milvus_client, save_upload_file, success_response
+from app.api.deps import get_db, get_embed_client, get_es_client, get_milvus_client, get_redis, save_upload_file, success_response
 from app.models.document import SummaryUpdateRequest
 from app.parsers import ParserFactory
 from app.repositories.chunk_repo import ChunkRepo
@@ -34,6 +34,7 @@ def _get_ingest_service(
     milvus: MilvusClient,
     es: ESClient,
     embed: EmbedClient,
+    redis=None,
 ) -> IngestService:
     return IngestService(
         doc_repo=DocRepo(db),
@@ -41,6 +42,7 @@ def _get_ingest_service(
         milvus_client=milvus,
         es_client=es,
         embed_client=embed,
+        redis=redis,
     )
 
 
@@ -78,7 +80,9 @@ async def upload_document(
         )
 
     file_path = await save_upload_file(file)
-    ingest = _get_ingest_service(db, milvus, es, embed)
+    # 补索引持久化需要 Redis（rag-service-final-fix 5.9）
+    redis = await get_redis()
+    ingest = _get_ingest_service(db, milvus, es, embed, redis)
     try:
         result = await ingest.ingest(
             file_path, file.filename, category, summary=summary or None
@@ -94,6 +98,12 @@ async def upload_document(
         await db.rollback()
         logger.error("upload_failed", error=str(e))
         raise BizException(ErrorCode.B0007, f"文档上传失败: {e}")
+    finally:
+        # 临时文件兜底清理：无论成功/失败均删除，避免 /tmp 残留（rag-service-final-fix 5.1）
+        try:
+            file_path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("upload_temp_cleanup_failed", path=str(file_path), error=str(e))
 
 
 @router.get("")
@@ -268,6 +278,8 @@ async def reindex_document(
                 "content": c["content"],
                 "doc_id": c["doc_id"],
                 "category": c["category"],
+                # V4：重建 ES 时回读 PG 权威源 doc.summary，保持两端摘要一致（rag-service-final-fix 4.1）
+                "doc_summary": doc.summary or "",
             }
             for c in chunks
         ]

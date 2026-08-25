@@ -1,4 +1,5 @@
 """FastAPI 依赖注入 + 统一响应助手。"""
+import os
 import tempfile
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -12,6 +13,8 @@ from starlette.requests import Request
 
 from common.config.settings import settings
 from common.db.session import async_session_factory
+from common.errors.codes import ErrorCode
+from common.errors.exceptions import BizException
 from common.trace.middleware import get_trace_id
 from app.services.asr_client import ASRClient
 from app.services.ocr_client import OCRClient
@@ -189,9 +192,63 @@ def success_response(data, message: str = "success") -> dict:
 
 
 async def save_upload_file(file: UploadFile) -> Path:
+    """保存上传文件到临时路径（先大小校验、后落盘，出错不残留）。
+
+    - 大小校验：优先使用 Content-Length（UploadFile.size），缺失则 read 后按字节校验；
+      超 `KB_MAX_FILE_SIZE`（默认 20MB）抛 B0001，校验先于任何解析/落库；
+    - 临时文件保留 delete=False（兼容 Windows 二次打开限制），
+      读取/写入/校验失败时由本函数兜底 unlink，不向 /tmp 泄漏；
+    - 正常返回后由调用方（upload 端点 finally）负责删除。
+    """
     suffix = Path(file.filename or "").suffix
+    max_size = settings.KB_MAX_FILE_SIZE
+    filename = file.filename or ""
+    declared_size = getattr(file, "size", None)
+    # 请求进入：记录文件名与 Content-Length（无头时为 None）
+    logger.info(
+        "upload_received",
+        filename=filename,
+        declared_size=declared_size,
+        max_size=max_size,
+    )
+    if isinstance(declared_size, int) and declared_size > max_size:
+        logger.info(
+            "upload_size_check_rejected",
+            filename=filename,
+            max_size=max_size,
+            actual_size=declared_size,
+            check_source="content_length",
+        )
+        raise BizException(
+            ErrorCode.B0001,
+            f"上传文件超过大小上限 {max_size // (1024 * 1024)}MB",
+        )
+
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    content = await file.read()
-    tmp.write(content)
-    tmp.close()
+    try:
+        content = await file.read()
+        if len(content) > max_size:
+            logger.info(
+                "upload_size_check_rejected",
+                filename=filename,
+                max_size=max_size,
+                actual_size=len(content),
+                check_source="read_bytes",
+            )
+            raise BizException(
+                ErrorCode.B0001,
+                f"上传文件超过大小上限 {max_size // (1024 * 1024)}MB",
+            )
+        logger.info(
+            "upload_size_check_passed",
+            filename=filename,
+            max_size=max_size,
+            actual_size=len(content),
+        )
+        tmp.write(content)
+        tmp.close()
+    except Exception:
+        tmp.close()
+        os.unlink(tmp.name)
+        raise
     return Path(tmp.name)

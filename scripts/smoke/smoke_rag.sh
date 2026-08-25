@@ -2,7 +2,7 @@
 set -e
 
 # RAG Service Smoke Test
-# Tests: health → upload TXT → list → search → delete
+# Tests: health(依赖探活) → upload TXT → list → search → delete → 上传大小校验(B0001) → reindex 摘要保持
 
 BASE_URL="http://localhost:8002/api/v1"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -29,12 +29,18 @@ fi
 
 echo "=== RAG Service Smoke Test ==="
 
-# 1. Health check
-echo "1. Health check..."
+# 1. Health check（依赖探活：PG/Milvus/Redis/Embedding）
+echo "1. Health check（依赖探活）..."
 HEALTH=$(curl -sf "$BASE_URL/../health" 2>/dev/null || curl -sf "http://localhost:8002/health")
 echo "   Health: $HEALTH"
-echo "$HEALTH" | grep -q "healthy" || { echo "   FAIL: health check"; exit 1; }
-echo "   PASS"
+HEALTH_STATUS=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','__MISSING__'))" 2>/dev/null || echo "__ERROR__")
+HEALTH_CHECKS=$(echo "$HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); print('OK' if {'database','milvus','redis','embedding'} <= set(d.get('checks',{})) else 'MISSING_CHECKS')" 2>/dev/null || echo "__ERROR__")
+if [ "$HEALTH_STATUS" = "healthy" ] && [ "$HEALTH_CHECKS" = "OK" ]; then
+  echo "   PASS"
+else
+  echo "   FAIL: health check（status=$HEALTH_STATUS checks=$HEALTH_CHECKS）"
+  exit 1
+fi
 
 # 2. Upload TXT document
 echo "2. Upload TXT document..."
@@ -76,6 +82,50 @@ DELETE_RESP=$(curl -sf -X DELETE "$BASE_URL/kb/documents/$DOC_ID" \
   -H "Authorization: Bearer $ADMIN_TOKEN")
 echo "   Delete response: $DELETE_RESP"
 echo "   PASS"
+
+# 6. Upload size validation（>KB_MAX_FILE_SIZE=20MB → B0001）
+echo "6. Upload size validation（超 20MB → B0001）..."
+TMP_BIG=$(mktemp /tmp/smoke_XXXX.bin)
+python3 -c "open('$TMP_BIG','wb').write(b'0' * (20*1024*1024 + 1))"
+BIG_RESP=$(curl -s -X POST "$BASE_URL/kb/documents" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -F "file=@$TMP_BIG" \
+  -F "category=regulation" || echo "")
+rm -f "$TMP_BIG"
+BIG_CODE=$(echo "$BIG_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('code','__MISSING__'))" 2>/dev/null || echo "__ERROR__")
+if [ "$BIG_CODE" = "B0001" ]; then
+  echo "   PASS（超限返回 B0001）"
+else
+  echo "   FAIL: 超限上传 code=$BIG_CODE"
+  exit 1
+fi
+
+# 7. Reindex summary preservation（reindex 后详情 summary 与上传一致）
+echo "7. Reindex summary preservation..."
+FIX_SUM="smoke 摘要：reindex 摘要保持验证"
+FIX_UPLOAD_RESP=$(curl -sf -X POST "$BASE_URL/kb/documents" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -F "file=@$SAMPLE_FILE" \
+  -F "category=regulation" \
+  -F "summary=$FIX_SUM")
+FIX_DOC_ID=$(echo "$FIX_UPLOAD_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['doc_id'])" 2>/dev/null || echo "")
+if [ -z "$FIX_DOC_ID" ]; then
+  echo "   FAIL: reindex 前置上传失败"
+  exit 1
+fi
+curl -sf -X POST "$BASE_URL/kb/documents/$FIX_DOC_ID/reindex" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
+FIX_DETAIL=$(curl -sf "$BASE_URL/kb/documents/$FIX_DOC_ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN")
+FIX_DETAIL_SUMMARY=$(echo "$FIX_DETAIL" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'].get('summary','__MISSING__'))" 2>/dev/null || echo "__ERROR__")
+if [ "$FIX_DETAIL_SUMMARY" = "$FIX_SUM" ]; then
+  echo "   PASS（reindex 后 summary 一致）"
+else
+  echo "   FAIL: reindex 后 summary='$FIX_DETAIL_SUMMARY'"
+  exit 1
+fi
+curl -sf -X DELETE "$BASE_URL/kb/documents/$FIX_DOC_ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null 2>&1 || true
 
 echo ""
 echo "=== RAG Smoke Test PASSED ==="

@@ -5,18 +5,20 @@
 - 7.2 补全接口成功（两端同步 + 缓存失效）；doc_id 不存在 → B0004；ES 写失败重试后返回失败且 PG 不写（无半状态）
 - 7.3 检索增强开关开启 → ES 摘要加权生效、响应 results[].summary 填充摘要值；开关关闭 → 检索行为与 V3 一致且 summary 恒为 null
 - 7.4 入库时摘要写失败（ES 不可用模拟）→ 正文 active、PG summary 为 NULL、warning 日志含 trace_id、无 A3003
+- 4.1 reindex 重建 ES 时回读 PG doc.summary，两端摘要一致（rag-service-final-fix 组4）
 """
 import uuid
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from starlette.requests import Request
 from starlette.responses import Response
 
-from app.api.documents import update_document_summary, upload_document
+from app.api.documents import reindex_document, update_document_summary, upload_document
 from app.api.search import hybrid_search
 from app.models.document import SummaryUpdateRequest
+from app.models.orm import KBDocument
 from app.models.search import SearchRequest
 from app.parsers import ParserFactory
 from app.services import query_cache
@@ -446,3 +448,105 @@ class TestSummaryCacheIsolation:
         monkeypatch.setattr(settings, "KB_SUMMARY_ENABLED", True)
         key_on = query_cache.make_cache_key("逾期协商", "regulation", 5)
         assert key_off != key_on
+
+
+# ============ 4.1：reindex 摘要一致性（rag-service-final-fix） ============
+
+class _ReindexMockMilvus:
+    def __init__(self) -> None:
+        self.delete_by_doc = AsyncMock()
+        self.insert = AsyncMock(return_value=["v1", "v2"])
+
+
+class _ReindexMockES:
+    def __init__(self) -> None:
+        self.delete_by_doc = AsyncMock()
+        self.index_docs = AsyncMock()
+
+
+class _ReindexMockEmbed:
+    async def batch_embed(self, texts):
+        return [[0.1] * 1024 for _ in texts]
+
+
+def _reindex_mock_db(doc: KBDocument) -> MagicMock:
+    db = MagicMock()
+    db.execute = AsyncMock()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = doc
+    db.execute.return_value = result
+    db.rollback = AsyncMock()
+    db.commit = AsyncMock()
+    db.add_all = MagicMock()
+    return db
+
+
+class TestReindexSummaryPreserved:
+    @pytest.mark.asyncio
+    async def test_reindex_preserves_summary_both_ends(self):
+        """reindex 重建 ES 时回读 PG 权威源 doc.summary 写入 doc_summary，两端摘要一致。"""
+        uid = uuid.uuid4()
+        doc = KBDocument(
+            id=uid,
+            title="催收合规制度",
+            category="regulation",
+            content="第一条：催收人员不得使用威胁手段。\n\n第二条：逾期超过90天可申请协商还款。",
+            summary="合规催收与协商还款流程摘要",
+            status="active",
+        )
+        db = _reindex_mock_db(doc)
+        milvus = _ReindexMockMilvus()
+        es = _ReindexMockES()
+        embed = _ReindexMockEmbed()
+        with (
+            patch(
+                "app.api.documents.query_cache.invalidate_category",
+                new=AsyncMock(),
+            ) as invalidate,
+            patch("app.api.documents.ChunkRepo") as chunk_repo_cls,
+        ):
+            chunk_repo = chunk_repo_cls.return_value
+            chunk_repo.delete_by_doc = AsyncMock()
+            chunk_repo.batch_create = AsyncMock()
+            resp = await reindex_document(
+                doc_id=str(uid), db=db, milvus=milvus, es=es, embed=embed
+            )
+
+        assert resp["code"] == "0"
+        # ES 重建写入的 chunk 均携带 doc_summary（回读 PG summary）
+        es_docs = es.index_docs.call_args.args[0]
+        assert len(es_docs) == 2
+        assert all(d["doc_summary"] == "合规催收与协商还款流程摘要" for d in es_docs)
+        invalidate.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_reindex_no_summary_doc_no_error(self):
+        """无摘要文档 reindex → doc_summary 为空串，流程正常不报错（存量行为）。"""
+        uid = uuid.uuid4()
+        doc = KBDocument(
+            id=uid,
+            title="存量文档",
+            category="regulation",
+            content="第一条：催收人员不得使用威胁手段。\n\n第二条：逾期超过90天可申请协商还款。",
+            summary=None,
+            status="active",
+        )
+        db = _reindex_mock_db(doc)
+        milvus = _ReindexMockMilvus()
+        es = _ReindexMockES()
+        embed = _ReindexMockEmbed()
+        with (
+            patch("app.api.documents.query_cache.invalidate_category", new=AsyncMock()),
+            patch("app.api.documents.ChunkRepo") as chunk_repo_cls,
+        ):
+            chunk_repo = chunk_repo_cls.return_value
+            chunk_repo.delete_by_doc = AsyncMock()
+            chunk_repo.batch_create = AsyncMock()
+            resp = await reindex_document(
+                doc_id=str(uid), db=db, milvus=milvus, es=es, embed=embed
+            )
+
+        assert resp["code"] == "0"
+        es_docs = es.index_docs.call_args.args[0]
+        assert len(es_docs) == 2
+        assert all(d["doc_summary"] == "" for d in es_docs)

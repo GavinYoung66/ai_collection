@@ -3,8 +3,11 @@ import asyncio
 import time
 import uuid
 from pathlib import Path
+from typing import Any, cast
 
 import structlog
+from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from app.parsers import ParserFactory
 from app.parsers.audio_parser import AudioParser
@@ -21,6 +24,14 @@ from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
 
 logger = structlog.get_logger()
+
+# ES 降级补索引的待补集合（rag-service-final-fix 5.9：重启后由 main.py startup 扫描恢复）
+_BACKFILL_PENDING_KEY = "rag:backfill:pending"
+_BACKFILL_PENDING_TTL = 30 * 60
+
+
+class ParseTimeoutError(Exception):
+    """文档解析超时（KB_PARSE_TIMEOUT，默认 30s），按既有解析失败路径处理。"""
 
 
 def _detect_source(parser) -> str:
@@ -46,6 +57,7 @@ class IngestService:
         es_client: ESClient,
         embed_client: EmbedClient,
         chunk_service: ChunkService | None = None,
+        redis: Redis | None = None,
     ):
         self.doc_repo = doc_repo
         self.chunk_repo = chunk_repo
@@ -53,6 +65,8 @@ class IngestService:
         self.es = es_client
         self.embed = embed_client
         self.chunk_service = chunk_service or ChunkService()
+        # V5 增量：补索引持久化（可选，缺省 None = 不持久化，存量行为不变）
+        self._redis = redis
 
     async def ingest(
         self, file_path: Path, filename: str, category: str,
@@ -64,7 +78,33 @@ class IngestService:
 
         try:
             parser = ParserFactory.get_parser(file_path)
-            raw_text = await parser.extract_text(file_path)
+            parse_start = time.time()
+            logger.info(
+                "ingest_parse_start",
+                filename=filename,
+                timeout=settings.KB_PARSE_TIMEOUT,
+                parse_start_ts=parse_start,
+            )
+            try:
+                raw_text = await asyncio.wait_for(
+                    parser.extract_text(file_path), timeout=settings.KB_PARSE_TIMEOUT
+                )
+            except asyncio.TimeoutError as te:
+                logger.info(
+                    "ingest_parse_timeout",
+                    filename=filename,
+                    timeout=settings.KB_PARSE_TIMEOUT,
+                    elapsed_s=round(time.time() - parse_start, 3),
+                )
+                raise ParseTimeoutError(
+                    f"解析超时（>{settings.KB_PARSE_TIMEOUT}s）"
+                ) from te
+            logger.info(
+                "ingest_parse_done",
+                filename=filename,
+                elapsed_s=round(time.time() - parse_start, 3),
+                text_len=len(raw_text or ""),
+            )
         except BizException:
             raise
         except Exception as e:
@@ -269,33 +309,42 @@ class IngestService:
         await self.doc_repo.update_status(doc_id, "active")
 
     async def _backfill_es_index(self, es_docs: list[dict], doc_id: uuid.UUID) -> None:
-        """ES 降级后的异步补索引：指数退避 1s/2s/4s…，30min 窗口内重试。
+        """兼容入口：委托模块级 backfill_es_index_task（5.9 补索引持久化逻辑统一）。"""
+        return await backfill_es_index_task(self.es, self._redis, es_docs, doc_id)
 
-        成功即返回；超窗或持续失败仅日志，由后续 reindex 兜底（document-ingest spec）。
+    async def _delete_with_retry(self, op, doc_id: str, target: str) -> None:
+        """删除外部索引失败重试 2 次（退避 1s/3s），仍失败记录告警日志。
+
+        PG 软删除与业务返回不受影响（降级路径由后续 reindex 兜底）。
         """
-        delay = 1.0
-        deadline = time.monotonic() + 30 * 60
-        while time.monotonic() < deadline:
-            await asyncio.sleep(delay)
+        delays = (1.0, 3.0)
+        for attempt in range(3):
             try:
-                await self.es.index_docs(es_docs)
-                logger.info("es_backfill_success", doc_id=str(doc_id))
+                await op(doc_id)
                 return
             except Exception as e:
-                logger.warning(
-                    "es_backfill_retry_failed",
-                    doc_id=str(doc_id),
-                    delay=delay,
-                    error=str(e),
-                )
-            delay = min(delay * 2, 60.0)
-        logger.error("es_backfill_give_up", doc_id=str(doc_id))
+                if attempt < len(delays):
+                    logger.warning(
+                        "delete_retry_failed",
+                        target=target,
+                        doc_id=doc_id,
+                        attempt=attempt + 1,
+                        error=str(e),
+                    )
+                    await asyncio.sleep(delays[attempt])
+                else:
+                    logger.error(
+                        "delete_retry_give_up",
+                        target=target,
+                        doc_id=doc_id,
+                        error=str(e),
+                    )
 
     async def delete_by_doc(self, doc_id: str) -> None:
         uid = uuid.UUID(doc_id)
         await self.chunk_repo.delete_by_doc(uid)
-        await self.milvus.delete_by_doc(doc_id)
-        await self.es.delete_by_doc(doc_id)
+        await self._delete_with_retry(self.milvus.delete_by_doc, doc_id, "milvus")
+        await self._delete_with_retry(self.es.delete_by_doc, doc_id, "es")
         await self.doc_repo.soft_delete(uid)
 
     async def reindex(
@@ -318,4 +367,61 @@ class IngestService:
 
         await self.doc_repo.update_status(uid, "processing")
 
-        return await self.ingest(file_path, filename, category)
+        # V4：从 PG 回读 doc.summary，随 ingest 入库路径保持 ES doc_summary 与 PG summary 两端一致
+        return await self.ingest(
+            file_path, filename, category, summary=doc.summary or None
+        )
+
+
+async def backfill_es_index_task(
+    es_client: ESClient,
+    redis: Redis | None,
+    es_docs: list[dict],
+    doc_id: uuid.UUID,
+) -> None:
+    """ES 降级后的异步补索引：指数退避 1s/2s/4s…，30min 窗口内重试（模块级，main.py 启动恢复复用）。
+
+    - 待补 doc_id 持久化到 Redis 集合 `rag:backfill:pending`（TTL 30min），
+      进程重启后由 main.py startup 扫描恢复并重新调度（rag-service-final-fix 5.9）；
+    - 成功或放弃后从集合移除；Redis 不可用仅 warning，不阻断补索引主流程；
+    - 超窗或持续失败仅日志，由后续 reindex 兜底（document-ingest spec）。
+    """
+    if redis is not None:
+        try:
+            # redis.asyncio 方法桩返回 Awaitable|T 联合类型，cast 消除 union（与 query_cache 同因）
+            await cast(Any, redis).sadd(_BACKFILL_PENDING_KEY, str(doc_id))
+            await cast(Any, redis).expire(_BACKFILL_PENDING_KEY, _BACKFILL_PENDING_TTL)
+        except (RedisError, OSError) as e:
+            logger.warning(
+                "backfill_pending_persist_failed",
+                doc_id=str(doc_id),
+                error=str(e),
+            )
+    delay = 1.0
+    deadline = time.monotonic() + 30 * 60
+    try:
+        while time.monotonic() < deadline:
+            await asyncio.sleep(delay)
+            try:
+                await es_client.index_docs(es_docs)
+                logger.info("es_backfill_success", doc_id=str(doc_id))
+                return
+            except Exception as e:
+                logger.warning(
+                    "es_backfill_retry_failed",
+                    doc_id=str(doc_id),
+                    delay=delay,
+                    error=str(e),
+                )
+            delay = min(delay * 2, 60.0)
+        logger.error("es_backfill_give_up", doc_id=str(doc_id))
+    finally:
+        if redis is not None:
+            try:
+                await cast(Any, redis).srem(_BACKFILL_PENDING_KEY, str(doc_id))
+            except (RedisError, OSError) as e:
+                logger.warning(
+                    "backfill_pending_remove_failed",
+                    doc_id=str(doc_id),
+                    error=str(e),
+                )

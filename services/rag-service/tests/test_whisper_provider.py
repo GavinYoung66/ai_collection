@@ -1,8 +1,10 @@
 """Whisper Provider 单元测试（L5 / D5）。
 
 覆盖：转写成功、模型懒加载复用、模型加载失败、转写异常、依赖缺失、
-RuntimeError 契约、返回字符串类型、转写内容正确拼接。
+RuntimeError 契约、返回字符串类型、转写内容正确拼接；
+5.4 并发首次转写只加载一次模型（threading.Lock + 双重检查）。
 """
+import asyncio
 import sys
 from unittest.mock import MagicMock
 
@@ -114,3 +116,18 @@ class TestWhisperTranscribe:
         provider = WhisperASRProvider()
         for fmt in ("wav", "mp3", "m4a"):
             assert await provider.transcribe(b"audio", fmt) == "你好世界"
+
+    @pytest.mark.asyncio
+    async def test_whisper_model_loaded_once_concurrent(self, fake_whisper_module):
+        """并发首次转写 → 模型只加载一次（threading.Lock + 双重检查，rag-service-final-fix 5.4）。"""
+        model = FakeModel()
+        fake_whisper_module.WhisperModel = MagicMock(return_value=model)
+        provider = WhisperASRProvider()
+        results = await asyncio.gather(
+            provider.transcribe(b"a", "wav"),
+            provider.transcribe(b"b", "wav"),
+            provider.transcribe(b"c", "wav"),
+        )
+        fake_whisper_module.WhisperModel.assert_called_once()
+        assert model.calls == 3
+        assert results == ["你好世界", "你好世界", "你好世界"]

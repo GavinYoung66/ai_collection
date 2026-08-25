@@ -179,3 +179,12 @@ class MilvusClient:
             col.flush()
 
         await asyncio.to_thread(_delete)
+
+    async def close(self) -> None:
+        """幂等断开 Milvus 连接（shutdown 时调用；未连接则空操作）。"""
+        if not self._connected:
+            return
+        try:
+            await asyncio.to_thread(connections.disconnect, "default")
+        finally:
+            self._connected = False

@@ -5,9 +5,11 @@ import base64
 import httpx
 import structlog
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from app.services.asr_providers.base import ASRProvider
 from common.config.settings import settings
+from common.trace.middleware import get_trace_id
 
 logger = structlog.get_logger()
 
@@ -39,7 +41,16 @@ class DashScopeASRProvider(ASRProvider):
     async def _is_degraded(self) -> bool:
         if self._redis is None:
             return False
-        return await self._redis.exists(_DEGRADED_KEY) > 0
+        try:
+            return await self._redis.exists(_DEGRADED_KEY) > 0
+        except (RedisError, OSError) as e:
+            # 熔断探测失败按未熔断处理：Redis 抖动不应阻断正常 ASR 链路（rag-service-final-fix 5.5）
+            logger.warning(
+                "asr_degraded_probe_failed",
+                error=str(e),
+                trace_id=get_trace_id(),
+            )
+            return False
 
     async def _on_success(self) -> None:
         self._failure_count = 0

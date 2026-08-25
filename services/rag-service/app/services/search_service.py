@@ -37,6 +37,14 @@ _FALLBACK_MESSAGE = (
 )
 
 
+def _safe_uuid(value: str) -> uuid.UUID | None:
+    """解析 UUID；非法值返回 None（召回脏数据跳过，不中断检索，rag-service-final-fix 5.13）。"""
+    try:
+        return uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
 class SearchService:
     def __init__(
         self,
@@ -240,23 +248,37 @@ class SearchService:
         if missing_ids and self.doc_repo is not None:
             from sqlalchemy import select as sa_select
             from app.models.orm import KBChunk
-            uid_list = [uuid.UUID(cid) for cid in missing_ids]
-            result = await self.doc_repo.db.execute(
-                sa_select(KBChunk).where(KBChunk.id.in_(uid_list))
-            )
-            for chunk in result.scalars().all():
-                content_map[str(chunk.id)] = chunk.content
+            uid_list = []
+            for cid in missing_ids:
+                uid = _safe_uuid(cid)
+                if uid is None:
+                    logger.warning("recall_invalid_uuid_skipped", chunk_id=cid)
+                    continue
+                uid_list.append(uid)
+            if uid_list:
+                result = await self.doc_repo.db.execute(
+                    sa_select(KBChunk).where(KBChunk.id.in_(uid_list))
+                )
+                for chunk in result.scalars().all():
+                    content_map[str(chunk.id)] = chunk.content
 
         # 从 KBChunk 表补齐 chunk_index（ES/Milvus 未存储该字段）
         if self.doc_repo is not None and chunk_ids:
             from sqlalchemy import select as sa_select
             from app.models.orm import KBChunk
-            uid_list = [uuid.UUID(cid) for cid in chunk_ids]
-            result = await self.doc_repo.db.execute(
-                sa_select(KBChunk).where(KBChunk.id.in_(uid_list))
-            )
-            for chunk in result.scalars().all():
-                chunk_index_map[str(chunk.id)] = chunk.chunk_index
+            uid_list = []
+            for cid in chunk_ids:
+                uid = _safe_uuid(cid)
+                if uid is None:
+                    logger.warning("recall_invalid_uuid_skipped", chunk_id=cid)
+                    continue
+                uid_list.append(uid)
+            if uid_list:
+                result = await self.doc_repo.db.execute(
+                    sa_select(KBChunk).where(KBChunk.id.in_(uid_list))
+                )
+                for chunk in result.scalars().all():
+                    chunk_index_map[str(chunk.id)] = chunk.chunk_index
 
         fused_with_content = []
         for f in fused:
@@ -275,7 +297,7 @@ class SearchService:
         ):
             try:
                 meta_dict = await self.doc_repo.get_meta_dict(
-                    [uuid.UUID(d) for d in doc_ids if d]
+                    [u for d in doc_ids if (u := _safe_uuid(d)) is not None]
                 )
                 fused_with_content = self._weighting_svc.apply(
                     fused_with_content, meta_dict
@@ -398,7 +420,7 @@ class SearchService:
         titles_map: dict[str, str] = {}
         meta_map: dict[str, dict] = {}
         if self.doc_repo and doc_ids:
-            uid_list = [uuid.UUID(d) for d in doc_ids]
+            uid_list = [u for d in doc_ids if (u := _safe_uuid(d)) is not None]
             titles_map = await self.doc_repo.get_titles_map(uid_list)
             # V2: 批量获取元数据用于溯源回填（version/source）
             meta_map = await self.doc_repo.get_meta_dict(uid_list)
