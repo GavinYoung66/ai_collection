@@ -2,20 +2,15 @@
 
 断言 DB sensitive_words status='active' count=50，且与 data/sensitive_words.dict
 集合完全一致（word 集合相等，顺序无关）。
+
+依赖 conftest.py 的 `async_db_session` fixture（受 RAG_DB_TESTS 控制，
+未设置时 fixture 内部 skip，回归不红）。
 """
-import os
 from pathlib import Path
 
 import pytest
 
 DICT_FILE = Path(__file__).resolve().parents[1] / "data" / "sensitive_words.dict"
-
-# 存量缺陷：async_db_session fixture 全仓未定义，该用例自创建起即 setup ERROR 无法运行
-# 默认跳过；如需启用，先补齐 DB-backed fixture 并设 RAG_DB_TESTS=1（V3 修复，见 tasks §19.6）
-pytestmark = pytest.mark.skipif(
-    os.getenv("RAG_DB_TESTS") != "1",
-    reason="依赖未实现的 async_db_session fixture（tasks §19.6，V3 修复）",
-)
 
 
 def _load_dict_words() -> set[str]:

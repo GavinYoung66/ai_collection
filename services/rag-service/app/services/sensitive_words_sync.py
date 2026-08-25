@@ -119,22 +119,7 @@ class SensitiveWordsSyncService:
 
         # Step3: Redis PUBLISH 失效广播（失败仅 warning，不阻断）
         trace_id = get_trace_id() or "startup"
-        payload = json.dumps(
-            {
-                "version": new_version,
-                "trace_id": trace_id,
-                "ts": int(time.time()),
-            },
-            ensure_ascii=False,
-        )
-        try:
-            await self.redis.publish(_PUBLISH_CHANNEL, payload)
-        except Exception as e:
-            logger.warning(
-                "sensitive_refresh_publish_failed",
-                version=new_version,
-                error=str(e),
-            )
+        await self.publish_version(self.redis, new_version, trace_id)
 
         logger.info(
             "sensitive_refreshed",
@@ -143,3 +128,28 @@ class SensitiveWordsSyncService:
             trace_id=trace_id,
         )
         return new_version
+
+    @staticmethod
+    async def publish_version(redis: Redis, version: int, trace_id: str) -> None:
+        """发布版本号变更事件到 Redis Pub-Sub（失败仅 warning，不阻断）。
+
+        V4 D7 修复：改为静态方法显式接收 redis 参数，不依赖 DB session——
+        startup seed 分支不再复用已关闭的旧 DB session 构造服务实例即可 PUBLISH。
+        payload 严格为 JSON ``{"version":int,"trace_id":str,"ts":int}``。
+        """
+        payload = json.dumps(
+            {
+                "version": version,
+                "trace_id": trace_id,
+                "ts": int(time.time()),
+            },
+            ensure_ascii=False,
+        )
+        try:
+            await redis.publish(_PUBLISH_CHANNEL, payload)
+        except Exception as e:
+            logger.warning(
+                "sensitive_publish_version_failed",
+                version=version,
+                error=str(e),
+            )

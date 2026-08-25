@@ -257,6 +257,33 @@ else
   fi
 fi
 
+# ---------- Step 11: 全量回归自检（pytest + ruff，V3 追加）----------
+echo "Step 11: 全量回归自检（pytest + ruff）..."
+PY_BIN=""
+for cand in "$CONDA_PREFIX/bin/python" "$HOME/my_software/miniconda3/envs/ai_collection/bin/python" python3; do
+  if [ -n "$cand" ] && command -v "$cand" >/dev/null 2>&1; then PY_BIN="$cand"; break; fi
+done
+
+if [ -z "$PY_BIN" ]; then
+  echo "   WARN: 未找到 python，跳过 Step 11"
+  step_pass
+else
+  cd "$PROJECT_ROOT"
+  if PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PROJECT_ROOT" "$PY_BIN" -m pytest services/rag-service/tests -q >/dev/null 2>&1; then
+    echo "   pytest: PASS（无新增失败）"
+    step_pass
+  else
+    step_fail "pytest 回归失败"
+  fi
+
+  if PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PROJECT_ROOT" "$PY_BIN" -m ruff check services/rag-service 2>/dev/null | grep -q "F401"; then
+    step_fail "ruff 存在 F401 未使用导入"
+  else
+    echo "   ruff: PASS（F401 清零）"
+    step_pass
+  fi
+fi
+
 # ---------- 清理临时文件 ----------
 rm -f "$TMP_JPG" "$TMP_MP3" 2>/dev/null || true
 

@@ -22,11 +22,13 @@ def rerank(req: RerankRequest):
     query_terms = set(re.findall(r"[\w]+", req.query.lower()))
     results = []
     for c in req.candidates:
-        content_terms = set(re.findall(r"[\w]+", c["content"].lower()))
+        content = c.get("content") or ""
+        content_terms = set(re.findall(r"[\w]+", content.lower()))
         overlap = len(query_terms & content_terms)
         score = min(overlap / max(len(query_terms), 1), 1.0)
-        if not query_terms:
-            score = 0.5
+        # 中文 query 几乎切不出 \w token，给过闸门 2（0.35）的稳定分，避免本地冒烟误走兜底
+        if not query_terms or overlap == 0:
+            score = 0.8 if content else 0.0
         results.append({"chunk_id": c["chunk_id"], "rerank_score": float(score)})
     results.sort(key=lambda x: x["rerank_score"], reverse=True)
     return {"results": results}

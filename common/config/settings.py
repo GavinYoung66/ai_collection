@@ -84,6 +84,16 @@ class Settings(BaseSettings):
     KB_EMBED_DEGRADED_KEEP_TEXT: bool = False    # Embedding 失败降级入库（仅 ES，无向量）
     ES_DUAL_WRITE: bool = False                  # ES 双写过渡（kb_bm25 + kb_chunks_bm25）
 
+    # === RAG V3 功能开关（默认全 false = V2 行为） ===
+    KB_OCR_ASR_DEGRADED_KEEP_TEXT: bool = False  # OCR/ASR 解析失败降级入库（跳过解析/占位入库）
+    KB_ES_DEGRADED_KEEP_MILVUS: bool = False     # ES 索引失败降级（保留 Milvus + 异步补索引）
+
+    # === RAG V4 功能开关（默认全 false = V3 行为） ===
+    KB_SUMMARY_ENABLED: bool = False       # 摘要元数据检索增强（ES doc_summary 加权 + 响应 summary 填充）
+    KB_SUMMARY_ES_BOOST: float = 1.0       # 摘要字段 BM25 加权分（默认 1.0 = 与正文同权）
+    KB_SUMMARY_MAX_LEN: int = 200          # 摘要长度上限（字符），超限返回 B0001
+    KB_ASR_OPENING_TRIM_ENABLED: bool = False  # ASR 通话开场白规则裁剪（转写文本开头，规则见 conf/asr_opening_rules.yaml）
+
     # === RAG V2 OCR/ASR/LLM 配置 ===
     OCR_ENDPOINT: str = "http://ocr-service:8200/ocr"
     OCR_TIMEOUT: int = 30

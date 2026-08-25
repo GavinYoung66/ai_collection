@@ -132,6 +132,15 @@ class RowAccessService:
             return set(self._matrix[key])
         return set(_ALL_CATEGORIES)
 
+    def get_default_matrix(self) -> dict[tuple, list[str]]:
+        """返回 fail-closed 保底矩阵：``(default, default) → 全量 4 类放行``。
+
+        与运行时加载的 YAML 矩阵无关，始终可用；供行级权限过滤异常时的
+        fail-closed 重放过滤兜底（对齐 search-enhancements spec「矩阵异常→
+        降级 (default,default) 全量放行，与 V1 兼容」）。
+        """
+        return {("default", "default"): sorted(_ALL_CATEGORIES)}
+
     def filter(
         self,
         items: list[dict],

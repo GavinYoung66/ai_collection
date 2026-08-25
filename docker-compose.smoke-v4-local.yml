@@ -1,0 +1,218 @@
+# RAG 多模态知识库 V4 —— 本地冒烟验证编排（standalone，单文件，无需 override）
+# 一键启动：docker compose -f docker-compose.smoke-v4-local.yml up -d --build
+#
+# 服务构成：
+#   - 必选 4 服务：postgres / elasticsearch / milvus / rag-service
+#   - 硬依赖：redis（rag-service 缓存/熔断/敏感词版本号）、etcd + minio（Milvus standalone 强依赖）
+#   - 检索链路：embedding / rerank-service（deploy/ 下 mock 镜像，免下载大模型，
+#     保证场景③④检索走 happy-path；如需验证降级路径可临时停止这两个容器）
+#
+# 中间件就绪等待（双保险）：
+#   - compose 层面：rag-service 用 depends_on: condition: service_healthy 门控 6 个中间件，
+#     未 healthy 前不启动 rag-service（避免 entrypoint 的 es_init/alembic 连不上报错）；
+#   - 脚本层面：smoke_rag_v4_local.sh 内置轮询 /health 等待逻辑（SMOKE_WAIT_*，默认 60x5s）。
+#
+# V4 开关：注入全部 KB_SUMMARY_* 配置，默认 KB_SUMMARY_ENABLED=true（本地冒烟目标）。
+#   场景④（关闭开关验证 summary=null）：把 rag-service 环境块 KB_SUMMARY_ENABLED 改为 "false"，
+#   再执行 docker compose -f docker-compose.smoke-v4-local.yml up -d rag-service，
+#   然后 KB_SUMMARY_ENABLED=false bash scripts/smoke/smoke_rag_v4_local.sh
+
+name: rag-smoke-v4
+
+services:
+  # ========== 必选服务 1/4：PostgreSQL 15（kb_documents.summary 权威源） ==========
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"                 # 宿主机本地调试用（psql / DBeaver）
+    environment:
+      POSTGRES_USER: ai_collection
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-change_me}
+      POSTGRES_DB: ai_collection
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./scripts/seed/init_pg.sql:/docker-entrypoint-initdb.d/01_init.sql:ro   # uuid-ossp + dw schema
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_collection"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ========== 硬依赖：Redis 7（rag 查询缓存/熔断键/敏感词版本号） ==========
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 2gb --maxmemory-policy allkeys-lru --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # ========== 硬依赖：etcd + MinIO（Milvus standalone 强依赖） ==========
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.16
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      HTTP_PROXY: ""                # 必须清空代理，否则 Milvus gRPC 连 etcd 异常（项目已知坑）
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls=http://0.0.0.0:2379 --data-dir /etcd
+
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"                 # S3 API（宿主机调试）
+      - "9001:9001"                 # 控制台
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    command: minio server /data
+    volumes:
+      - minio_data:/data
+
+  # ========== 必选服务 2/4：Milvus 2.4（kb_vectors，V3 schema 不变，不含摘要） ==========
+  milvus:
+    image: milvusdb/milvus:v2.4.13
+    command: ["milvus", "run", "standalone"]
+    ports:
+      - "19530:19530"               # gRPC（宿主机调试）
+      - "9091:9091"                 # 健康端口
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      HTTP_PROXY: ""                # 必须清空代理（项目已知坑）
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
+    depends_on:
+      - etcd
+      - minio
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
+
+  # ========== 必选服务 3/4：Elasticsearch 8.11.3 + IK 分词（kb_bm25 含 doc_summary 检索副本） ==========
+  elasticsearch:
+    image: ai_collection/elasticsearch-ik:8.11.3
+    build:
+      context: ./deploy/elasticsearch
+    ports:
+      - "9200:9200"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+  # ========== 检索链路：mock embedding（8100）/ mock rerank（8101），免下载大模型 ==========
+  embedding:
+    build:
+      context: ./deploy/embedding
+      dockerfile: Dockerfile.mock
+    ports:
+      - "8100:8100"
+    healthcheck:
+      # python-slim 镜像无 curl，用 python urllib 探活（等价于 GET /health）
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8100/health', timeout=2).status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  rerank-service:
+    build:
+      context: ./deploy/rerank
+      dockerfile: Dockerfile.mock
+    ports:
+      - "8101:8101"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8101/health', timeout=2).status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # ========== 必选服务 4/4：rag-service（冒烟被测对象） ==========
+  rag-service:
+    # Dockerfile 为项目根视角（COPY common/ scripts/rag/ migrations/ 等根路径），context 必须是项目根
+    build:
+      context: .
+      dockerfile: services/rag-service/Dockerfile
+    image: ai_collection/rag-service:v4-smoke
+    ports:
+      - "8002:8000"                 # 宿主机 8002 → 容器 8000（冒烟脚本默认地址）
+    env_file: .env                  # 注入 JWT_SECRET / PG_PASSWORD 等；environment 块优先级更高，覆盖其中宿主机视角地址
+    environment:
+      # —— 中间件地址：容器网络内走服务名（.env 是宿主机视角 localhost，必须在此覆盖）——
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      MILVUS_HOST: milvus
+      MILVUS_PORT: "19530"
+      ES_HOST: elasticsearch
+      ES_PORT: "9200"
+      EMBEDDING_SERVICE_URL: http://embedding:8100
+      RERANK_SERVICE_URL: http://rerank-service:8101
+      # —— 中间件就绪/初始化：entrypoint 启动前幂等执行 ES 索引初始化与 Alembic 迁移，
+      #    失败即容器退出（不健康），冒烟脚本再以 /health 轮询兜底等待 ——
+      SKIP_ES_INIT: "0"             # 0=执行 es_init_v4.py（确保 kb_bm25 含 doc_summary 字段）
+      SKIP_MIGRATE: "0"             # 0=执行 alembic upgrade head（确保 kb_documents.summary 列）
+      # —— V4 全部 KB_SUMMARY_* 配置（本地冒烟默认开启；场景④把 ENABLED 改 "false" 后重建本服务）——
+      KB_SUMMARY_ENABLED: "true"
+      KB_SUMMARY_ES_BOOST: "1.0"
+      KB_SUMMARY_MAX_LEN: "200"
+      KB_ASR_OPENING_TRIM_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      embedding:
+        condition: service_healthy
+      rerank-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+volumes:
+  pg_data:
+  redis_data:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  es_data:

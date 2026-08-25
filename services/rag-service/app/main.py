@@ -49,13 +49,17 @@ async def _ensure_sensitive_words_baseline() -> None:
     from app.api.deps import get_redis
     from app.models.orm import SensitiveWord
     from app.services.sensitive_words_sync import (
+        SensitiveWordsSyncService,
         _DICT_FILE,
         _MIN_DICT_SIZE,
         _VERSION_KEY,
     )
     from common.db.session import async_session_factory
+    from common.trace.middleware import get_trace_id
 
+    seeded = False
     count = 0
+    redis = None
     async with async_session_factory() as session:
         # ① 查活跃敏感词数
         try:
@@ -113,8 +117,9 @@ async def _ensure_sensitive_words_baseline() -> None:
                 logger.warning(
                     "sensitive_baseline_recount_failed", error=str(e)
                 )
+            seeded = count >= _MIN_DICT_SIZE
             logger.info(
-                "sensitive_baseline_seeded",
+                "sensitive_baseline_seed_success",
                 path=str(_DICT_FILE),
                 count=count,
             )
@@ -130,6 +135,19 @@ async def _ensure_sensitive_words_baseline() -> None:
         logger.warning(
             "sensitive_baseline_version_init_failed", error=str(e)
         )
+
+    # ③+ seed 实际执行了 INSERT（count 由 <50 → ≥50）→ 发布版本事件（B2）
+    if seeded and redis is not None and version is not None:
+        try:
+            # D7 修复：seed 分支不再复用已关闭的旧 DB session 构造服务实例，
+            # 改走不依赖 session 的静态方法路径（publish_version 仅需 Redis）
+            await SensitiveWordsSyncService.publish_version(
+                redis, int(version), get_trace_id() or "startup"
+            )
+        except Exception as e:
+            logger.warning(
+                "sensitive_baseline_publish_failed", error=str(e)
+            )
 
     # ④ count < 50 告警（不阻塞启动），否则 info 记录最终 version
     if count < _MIN_DICT_SIZE:

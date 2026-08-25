@@ -1,6 +1,7 @@
 """混合检索 API。"""
 import asyncio
 import time
+import uuid
 
 import structlog
 from fastapi import APIRouter, Depends, Request, Response
@@ -63,6 +64,15 @@ async def hybrid_search(
     row_access_svc: RowAccessService = Depends(get_row_access_service),
     session_svc: SessionService = Depends(get_session_service),
 ):
+    """混合检索（V4 新增响应字段 `results[].summary`，检索逻辑与 V3 完全一致）。
+
+    - 存量行为不变：query/category/top_k/rewrite 入参、Milvus+ES 双路召回、
+      RRF 融合、Rerank、双闸门兜底、降级/缓存/日志/多轮会话全部保持 V3 行为；
+    - **新增（V4）**：`results[]` 每项新增 `summary` 字段（str，可空，永远存在）——
+      `KB_SUMMARY_ENABLED=true` 时取 PG 文档级摘要（缺失为 null），开关关闭时恒为 null；
+    - **新增（V4）**：`KB_SUMMARY_ENABLED=true` 时 ES 路对 `doc_summary` 字段 BM25 加权
+      （权重 `KB_SUMMARY_ES_BOOST`），开关关闭时 ES query 与 V3 完全一致。
+    """
     # V2: 从请求头提取 session_id + jwt_payload
     session_id = get_session_id(request)
     jwt_payload = get_jwt_payload(request)
@@ -93,18 +103,22 @@ async def hybrid_search(
                 degraded=False,
                 is_fallback=False,
                 cache_hit="1",
+                query_original=req.query,
+                query_rewritten=None,
+                intent_tag=None,
                 session_id=session_id,
             )
             return cached
 
     log_service = LogService(db)
+    doc_repo = DocRepo(db)
     search_svc = SearchService(
         milvus_client=milvus,
         es_client=es,
         embed_client=embed,
         rerank_client=rerank,
         log_service=log_service,
-        doc_repo=DocRepo(db),
+        doc_repo=doc_repo,
         # V2 服务（开关关闭时 SearchService 内部不调用）
         rewrite_service=rewrite_svc,
         routing_service=routing_svc,
@@ -128,6 +142,19 @@ async def hybrid_search(
     except asyncio.TimeoutError:
         logger.error("search_timeout", query=req.query, timeout=settings.KB_SEARCH_TIMEOUT)
         raise BizException(ErrorCode.A3005, "检索超时，请稍后重试")
+
+    # V4: 响应组装填充各结果项 summary（字段永远存在）。
+    # 开关开启时取 PG 文档级摘要（缺失为 null）；关闭时恒为 null，不改变既有检索逻辑。
+    results = result.get("results") or []
+    if results:
+        if settings.KB_SUMMARY_ENABLED:
+            doc_ids = [uuid.UUID(d) for d in {r["doc_id"] for r in results if r.get("doc_id")}]
+            summaries = await doc_repo.get_summaries_map(doc_ids) if doc_ids else {}
+            for item in results:
+                item["summary"] = summaries.get(item.get("doc_id", ""))
+        else:
+            for item in results:
+                item["summary"] = None
 
     resp = success_response(result)
     # 兜底/降级响应不写缓存（V1-T19），避免故障/无匹配结果被缓存 1 小时

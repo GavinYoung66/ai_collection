@@ -139,3 +139,31 @@ class DocRepo:
                 "version": version,
             }
         return meta
+
+    async def get_summary(self, doc_id: uuid.UUID) -> str | None:
+        """V4：查询单个文档的摘要（PG 权威源）；无摘要/文档不存在返回 None。"""
+        result = await self.db.execute(
+            select(KBDocument.summary).where(
+                KBDocument.id == doc_id, KBDocument.is_delete == "0"
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_summaries_map(self, doc_ids: list[uuid.UUID]) -> dict[str, str | None]:
+        """V4：批量查询文档摘要，返回 {doc_id_str: summary}（缺失文档不含键）。"""
+        if not doc_ids:
+            return {}
+        result = await self.db.execute(
+            select(KBDocument.id, KBDocument.summary).where(
+                KBDocument.id.in_(doc_ids), KBDocument.is_delete == "0"
+            )
+        )
+        return {str(row[0]): row[1] for row in result.all()}
+
+    async def update_summary(self, doc_id: uuid.UUID, summary: str) -> None:
+        """V4：更新文档摘要（PG 权威源收口，仅在 ES doc_summary 写成功后调用）。"""
+        await self.db.execute(
+            update(KBDocument)
+            .where(KBDocument.id == doc_id, KBDocument.is_delete == "0")
+            .values(summary=summary)
+        )

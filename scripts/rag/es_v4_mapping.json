@@ -1,0 +1,29 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "analysis": {
+      "analyzer": {
+        "ik_analyzer": {"type": "ik_max_word"},
+        "ik_search_analyzer": {"type": "ik_smart"}
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "chunk_id": {"type": "keyword"},
+      "content": {
+        "type": "text",
+        "analyzer": "ik_analyzer",
+        "search_analyzer": "ik_search_analyzer"
+      },
+      "doc_id": {"type": "keyword"},
+      "category": {"type": "keyword"},
+      "doc_summary": {
+        "type": "text",
+        "analyzer": "ik_analyzer",
+        "search_analyzer": "ik_search_analyzer"
+      }
+    }
+  }
+}

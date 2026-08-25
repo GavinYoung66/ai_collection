@@ -1,5 +1,7 @@
 """rag-service 测试 fixtures。"""
 
+import os
+
 import pytest
 
 from app.services.chunk_service import ChunkService
@@ -88,3 +90,19 @@ def mock_search_service():
         rerank_client=MockRerank(),
         log_service=MockLogService(),
     )
+
+
+@pytest.fixture
+async def async_db_session():
+    """DB-backed AsyncSession fixture（受 `RAG_DB_TESTS` 环境变量控制，对齐 V2 skipif 约定）。
+
+    - 未设置 `RAG_DB_TESTS=1` 时 `pytest.skip`（保持 seed 一致性用例默认跳过，回归不红）；
+    - 设置后连接真实 PG 测试库，注入 AsyncSession 供用例使用，用完自动关闭。
+    """
+    if os.getenv("RAG_DB_TESTS") != "1":
+        pytest.skip("RAG_DB_TESTS != 1，跳过需要真实 PG 的用例")
+
+    from common.db.session import async_session_factory
+
+    async with async_session_factory() as session:
+        yield session

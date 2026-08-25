@@ -2,7 +2,7 @@
 
 V2 增量：若 kb_vectors_v2 collection 存在则自动切换到 v2 schema
 （含 version INT64 / source VARCHAR(255) 字段），否则保持 V1 行为。
-v2 collection 由 scripts/rag/rebuild_milvus_v2.py 创建并 alias 切换。
+v2 collection 由 scripts/rag/rebuild_milvus_v2.py 创建并 collection 名探测自动切换。
 """
 import asyncio
 import uuid as uuid_module

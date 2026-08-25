@@ -149,7 +149,15 @@ class SearchService:
         tasks = []
         if query_vector is not None:
             tasks.append(self.milvus.search(query_vector, top_n=top_n, category=category))
-        tasks.append(self.es.search(query=effective_query, top_n=top_n, category=category))
+        # V4: 摘要增强开关开启时对 doc_summary 字段 BM25 加权（权重 KB_SUMMARY_ES_BOOST）；
+        # 开关关闭时 summary_boost=None → 不传该 kwarg，ES 调用签名与 V3 完全一致（向后兼容既有调用方）
+        es_kwargs = {}
+        if settings.KB_SUMMARY_ENABLED:
+            es_kwargs["summary_boost"] = settings.KB_SUMMARY_ES_BOOST
+        tasks.append(self.es.search(
+            query=effective_query, top_n=top_n, category=category,
+            **es_kwargs,
+        ))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         dense_hits: list[dict] = []
@@ -285,7 +293,12 @@ class SearchService:
             for f in fused_with_content
             if f.get("content")
         ]
-        rerank_pre_degraded = await self.rerank.is_degraded()
+        rerank_pre_degraded = False
+        try:
+            rerank_pre_degraded = await self.rerank.is_degraded()
+        except Exception as e:
+            # V3 容错：熔断探测失败（Redis 不可用）按"未熔断"处理，避免连锁 500
+            logger.warning("rerank_is_degraded_failed", error=str(e))
         if candidates and rerank_pre_degraded:
             # 熔断断开期：跳过 rerank 用 RRF score 排序，标记降级
             degraded = True
@@ -296,10 +309,22 @@ class SearchService:
                 score_map = {r["chunk_id"]: r["rerank_score"] for r in rerank_results}
                 for item in fused_with_content:
                     item["rerank_score"] = score_map.get(item["chunk_id"], 0.0)
+                # D2 修复：业务加权在 rerank 主路径生效——排序分 = rerank_score × weight；
+                # D-1 修复：max_rerank_score 取全局最大原始 rerank_score（不乘权重），
+                # 使闸门 2 的 0.35 兜底阈值语义不被加权排序污染（加权项居首≠原始分最高）。
                 reranked = sorted(
-                    fused_with_content, key=lambda x: x.get("rerank_score", 0), reverse=True
+                    fused_with_content,
+                    key=lambda x: x.get("rerank_score", 0) * x.get("weight", 1.0),
+                    reverse=True,
                 )
-                max_rerank_score = reranked[0]["rerank_score"] if reranked else None
+                max_rerank_score = (
+                    max(
+                        item.get("rerank_score", 0.0)
+                        for item in fused_with_content
+                    )
+                    if fused_with_content
+                    else None
+                )
                 rerank_ok = True
         except Exception as e:
             # Rerank 宕机：按 DD-03 降级矩阵用 RRF score 排序返回结果（degraded），
@@ -319,7 +344,31 @@ class SearchService:
                     reranked, jwt_payload, category
                 )
             except Exception as e:
-                logger.warning("row_access_unexpected_error", error=str(e))
+                # V3 fail-closed：行级权限过滤异常不得静默放行（消除 fail-open 越权风险）
+                logger.error(
+                    "row_access_unexpected_error",
+                    error=str(e),
+                    trace_id=trace_id,
+                )
+                try:
+                    default_matrix = self._row_access_svc.get_default_matrix()
+                    allowed = set(
+                        default_matrix.get(("default", "default"), [])
+                    )
+                    if category is not None:
+                        allowed = allowed & {category}
+                    reranked = [
+                        item for item in reranked
+                        if item.get("category") in allowed
+                    ]
+                except Exception as e2:
+                    # 保底矩阵也不可用 → 置空走下游兜底闸门，绝不返回越权数据
+                    logger.error(
+                        "row_access_fail_closed_failed",
+                        error=str(e2),
+                        trace_id=trace_id,
+                    )
+                    reranked = []
 
         # 闸门 2（rerank 0.35 兜底）
         threshold = settings.KB_RERANK_THRESHOLD
@@ -390,12 +439,16 @@ class SearchService:
 
         # V2: 多轮会话记录（开关）
         if settings.KB_MULTITURN_ENABLED and self._session_svc and session_id:
-            await self._session_svc.record(
-                session_id=session_id,
-                query=query,
-                rewritten_query=query_rewritten,
-                top_doc_ids=hit_doc_ids,
-            )
+            try:
+                await self._session_svc.record(
+                    session_id=session_id,
+                    query=query,
+                    rewritten_query=query_rewritten,
+                    top_doc_ids=hit_doc_ids,
+                )
+            except Exception as e:
+                # V3 容错：会话记录失败仅 warning，不阻断检索返回（消除 Redis 故障连锁 500）
+                logger.warning("session_record_unexpected_error", error=str(e))
 
         return {
             "results": results_list,

@@ -3,6 +3,16 @@ import asyncio
 
 import pytest
 
+from app.models.search import SearchRequest
+
+
+def test_search_request_ignores_session_id():
+    """移除 session_id 字段后，请求体携带 session_id 被 Pydantic 忽略（L15）。"""
+    req = SearchRequest(query="逾期协商", session_id="01JZTESTSESSIONID0001")
+    assert not hasattr(req, "session_id")
+    assert req.query == "逾期协商"
+    assert req.category is None
+    assert req.top_k == 5
 
 
 class TestRRFFusion:

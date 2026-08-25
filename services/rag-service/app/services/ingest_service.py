@@ -1,4 +1,6 @@
 """文档入库编排：解析 → 清洗 → 分块 → 向量化 → 双索引写入。"""
+import asyncio
+import time
 import uuid
 from pathlib import Path
 
@@ -10,6 +12,7 @@ from app.parsers.image_parser import ImageParser
 from app.repositories.chunk_repo import ChunkRepo
 from app.repositories.doc_repo import DocRepo
 from app.services.chunk_service import ChunkService
+from app.services.summary_service import SummaryService
 from app.vectorstore.embed_client import EmbedClient
 from app.vectorstore.es_client import ESClient
 from app.vectorstore.milvus_client import MilvusClient
@@ -54,6 +57,7 @@ class IngestService:
     async def ingest(
         self, file_path: Path, filename: str, category: str,
         created_by: uuid.UUID | None = None,
+        summary: str | None = None,
     ) -> dict:
         if not ParserFactory.is_supported(filename):
             raise BizException(ErrorCode.A3001, f"不支持的文件格式: {Path(filename).suffix}")
@@ -65,6 +69,24 @@ class IngestService:
             raise
         except Exception as e:
             logger.error("parse_failed", filename=filename, error=str(e))
+            if settings.KB_OCR_ASR_DEGRADED_KEEP_TEXT:
+                # 降级：上传接口未附带纯文本，按「占位入库」处理——status=failed + degraded=true
+                doc_id = await self.doc_repo.create(
+                    title=filename, category=category, content="", created_by=created_by
+                )
+                await self.doc_repo.update_status(doc_id, "failed")
+                logger.warning(
+                    "ingest_degraded_parse_failed",
+                    filename=filename,
+                    doc_id=str(doc_id),
+                    error=str(e),
+                )
+                return {
+                    "doc_id": str(doc_id),
+                    "chunks_count": 0,
+                    "status": "failed",
+                    "degraded": True,
+                }
             raise BizException(ErrorCode.A3001, f"文档解析失败: {e}")
 
         # V2: 根据 Parser 类型记录文档来源标签（§6.6 / §15.1）
@@ -141,6 +163,34 @@ class IngestService:
             await self.es.index_docs(es_docs)
         except Exception as e:
             logger.error("es_index_failed", doc_id=str(doc_id), error=str(e))
+            if settings.KB_ES_DEGRADED_KEEP_MILVUS:
+                # 降级：保留 Milvus + kb_chunks，status=active，异步补索引（指数退避 1s/2s/4s…，30min 窗口）
+                chunk_entities = [
+                    {
+                        "id": uuid.UUID(c["id"]),
+                        "doc_id": doc_id,
+                        "chunk_index": c["chunk_index"],
+                        "content": c["content"],
+                        "vector_id": c["vector_id"],
+                        "category": c["category"],
+                    }
+                    for c in chunks
+                ]
+                await self.chunk_repo.batch_create(chunk_entities)
+                await self.doc_repo.update_status(doc_id, "active")
+                logger.warning(
+                    "ingest_degraded_es_fallback",
+                    doc_id=str(doc_id),
+                    chunks=len(chunks),
+                    error=str(e),
+                )
+                asyncio.create_task(self._backfill_es_index(es_docs, doc_id))
+                return {
+                    "doc_id": str(doc_id),
+                    "chunks_count": len(chunks),
+                    "status": "active",
+                    "degraded": True,
+                }
             await self.doc_repo.update_status(doc_id, "failed")
             raise BizException(ErrorCode.A3003, f"ES 索引写入失败: {e}")
 
@@ -158,6 +208,13 @@ class IngestService:
         await self.chunk_repo.batch_create(chunk_entities)
 
         await self.doc_repo.update_status(doc_id, "active")
+
+        # V4: 正文入库成功后，若携带摘要则按 ES → PG 顺序写入（design.md D3）；
+        # ES 写失败仅 warning（含 trace_id）+ PG summary 不写，正文已 active 不回滚、不返回错误
+        if summary:
+            await SummaryService(self.doc_repo, self.es).write_summary(
+                doc_id, summary, retries=0, raise_on_failure=False
+            )
 
         return {
             "doc_id": str(doc_id),
@@ -210,6 +267,29 @@ class IngestService:
         ]
         await self.chunk_repo.batch_create(chunk_entities)
         await self.doc_repo.update_status(doc_id, "active")
+
+    async def _backfill_es_index(self, es_docs: list[dict], doc_id: uuid.UUID) -> None:
+        """ES 降级后的异步补索引：指数退避 1s/2s/4s…，30min 窗口内重试。
+
+        成功即返回；超窗或持续失败仅日志，由后续 reindex 兜底（document-ingest spec）。
+        """
+        delay = 1.0
+        deadline = time.monotonic() + 30 * 60
+        while time.monotonic() < deadline:
+            await asyncio.sleep(delay)
+            try:
+                await self.es.index_docs(es_docs)
+                logger.info("es_backfill_success", doc_id=str(doc_id))
+                return
+            except Exception as e:
+                logger.warning(
+                    "es_backfill_retry_failed",
+                    doc_id=str(doc_id),
+                    delay=delay,
+                    error=str(e),
+                )
+            delay = min(delay * 2, 60.0)
+        logger.error("es_backfill_give_up", doc_id=str(doc_id))
 
     async def delete_by_doc(self, doc_id: str) -> None:
         uid = uuid.UUID(doc_id)

@@ -1,0 +1,104 @@
+# RAG 多模态知识库 V4 本地冒烟编排（override docker-compose.yml，纯本地开发调试用）
+#
+# 一键命令（构建 + 启动 + 服务就绪后自动跑 smoke_rag_v4.sh + 结束后自动清理）：
+#   docker compose -f docker-compose.yml -f docker-compose.smoke-v4.yml \
+#     up --build --abort-on-container-exit --exit-code-from smoke-v4
+#
+# 说明：
+#   - 复用 docker-compose.yml 的 6 个基础设施（PG/Redis/Milvus/etcd/MinIO/ES）+ ocr-service
+#   - embedding/rerank 用 Cursor 准备的 mock 镜像（Dockerfile.mock），免下载大模型
+#   - rag-service 启动时由 entrypoint 幂等初始化 ES kb_bm25（含 doc_summary）+ Alembic 迁移到 0007
+#   - smoke-v4 容器等 rag-service healthy 后执行 scripts/smoke/smoke_rag_v4.sh，
+#     输出全打印控制台；退出码 = 冒烟结果（0=全 PASS），--abort-on-container-exit 自动停止全部容器
+#   - 环境变量：KB_SUMMARY_ENABLED=true（V4 摘要增强开），其余 V4/V3/V2 开关默认 false = V3 行为
+
+services:
+  embedding:
+    build:
+      context: ./deploy/embedding
+      dockerfile: Dockerfile.mock
+    ports: ["8100:8100"]
+    healthcheck:
+      # mock 镜像为 python-slim 无 curl，改用 python urllib 探活
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8100/health', timeout=2).status==200 else 1)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  rerank-service:
+    build:
+      context: ./deploy/rerank
+      dockerfile: Dockerfile.mock
+    ports: ["8101:8101"]
+    healthcheck:
+      # mock 镜像为 python-slim 无 curl，改用 python urllib 探活
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8101/health', timeout=2).status==200 else 1)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  rag-service:
+    # Dockerfile 为项目根视角（COPY common/ scripts/rag/ migrations/ 等根路径），context 必须是项目根
+    build:
+      context: .
+      dockerfile: services/rag-service/Dockerfile
+    ports: ["8002:8000"]
+    env_file: .env
+    environment:
+      # 容器网络内改用服务名（.env 中为宿主机视角 localhost）
+      PG_HOST: postgres
+      REDIS_HOST: redis
+      MILVUS_HOST: milvus
+      ES_HOST: elasticsearch
+      EMBEDDING_SERVICE_URL: http://embedding:8100
+      RERANK_SERVICE_URL: http://rerank-service:8101
+      # V4 摘要增强开关：默认开启（冒烟验证目标），其余 V4 开关保持默认 false
+      KB_SUMMARY_ENABLED: "true"
+      KB_SUMMARY_ES_BOOST: "1.0"
+      KB_SUMMARY_MAX_LEN: "200"
+      KB_ASR_OPENING_TRIM_ENABLED: "false"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      milvus: { condition: service_healthy }
+      elasticsearch: { condition: service_healthy }
+      embedding: { condition: service_healthy }
+      rerank-service: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  smoke-v4:
+    build: ./deploy/smoke
+    env_file: .env
+    environment:
+      # 容器内访问 rag-service（经 compose 网络 + 服务名）
+      SMOKE_BASE_URL: http://rag-service:8000/api/v1
+      SMOKE_HEALTH_URL: http://rag-service:8000/health
+      SMOKE_REDIS_HOST: redis
+      SMOKE_SKIP_REGRESSION: "1"
+      PYTHONPATH: /workspace
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - .:/workspace:ro
+    working_dir: /workspace
+    command: ["bash", "scripts/smoke/smoke_rag_v4.sh"]
+    depends_on:
+      rag-service: { condition: service_healthy }

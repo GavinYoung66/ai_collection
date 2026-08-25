@@ -1,0 +1,153 @@
+# 6 个业务服务（data-platform/qc/call/case/complaint/review）本地冒烟编排
+# 复用已在运行的主栈 infra（postgres/redis 等），仅新增 6 个业务服务容器。
+#
+# 用法：
+#   构建+启动：docker compose -f docker-compose.yml -f docker-compose.smoke-services.yml up -d --build \
+#                data-platform qc-service call-service case-service complaint-service review-service
+#   （显式列出服务避免拉起 base 中的 ocr-service，其基础镜像 paddlepaddle 在本机网络拉不动）
+#   跑冒烟：bash scripts/smoke/smoke_data_platform.sh && bash scripts/smoke/smoke_qc_service.sh ...
+#
+# 说明：
+#   - Dockerfile 为项目根视角（COPY common/ requirements.lock 等根路径），context 必须是项目根，
+#     不能像 docker-compose.dev.yml 那样用 build: ./services/<svc>（会因 context 缺文件而构建失败）；
+#   - 容器网络内必须用服务名连 PG/Redis（.env 里是宿主机视角 localhost，故在此覆盖）；
+#   - healthcheck 用 curl（各服务镜像已 apt 安装 curl）。
+
+services:
+  data-platform:
+    build:
+      context: .
+      dockerfile: services/data-platform/Dockerfile
+    image: ai_collection-data-platform:latest
+    ports:
+      - "8001:8000"
+    env_file: .env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  qc-service:
+    build:
+      context: .
+      dockerfile: services/qc-service/Dockerfile
+    image: ai_collection-qc-service:latest
+    ports:
+      - "8003:8000"
+    env_file: .env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  call-service:
+    build:
+      context: .
+      dockerfile: services/call-service/Dockerfile
+    image: ai_collection-call-service:latest
+    ports:
+      - "8004:8000"
+    env_file: .env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  case-service:
+    build:
+      context: .
+      dockerfile: services/case-service/Dockerfile
+    image: ai_collection-case-service:latest
+    ports:
+      - "8005:8000"
+    env_file: .env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  complaint-service:
+    build:
+      context: .
+      dockerfile: services/complaint-service/Dockerfile
+    image: ai_collection-complaint-service:latest
+    ports:
+      - "8006:8000"
+    env_file: .env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  review-service:
+    build:
+      context: .
+      dockerfile: services/review-service/Dockerfile
+    image: ai_collection-review-service:latest
+    ports:
+      - "8007:8000"
+    env_file: .env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s

@@ -3,6 +3,7 @@ fastapi==0.104.1
 uvicorn==0.24.0
 pydantic==2.5.3
 pydantic-settings==2.1.0
+python-multipart==0.0.6
 
 # === 数据库与 ORM ===
 sqlalchemy==2.0.23
@@ -21,6 +22,12 @@ rank-bm25==0.2.2
 
 # === HTTP 客户端 ===
 httpx==0.25.2
+aiohttp==3.9.1
+aiosignal==1.3.1
+attrs==23.2.0
+frozenlist==1.4.0
+multidict==6.0.4
+yarl==1.9.3
 
 # === 文档解析 ===
 # unstructured==0.11.6       # 依赖回溯严重
@@ -37,6 +44,9 @@ marshmallow<4               # environs (pymilvus 依赖) 需要 marshmallow 3.x
 PyYAML==6.0.1               # 路由/行级权限 YAML 配置解析
 ulid-py==1.1.0              # Session ID 生成（ULID）
 # httpx==0.27.0             # 已存在 0.25.2，不升级避免冲突
+
+# === RAG V3 增量依赖 ===
+faster-whisper==1.0.3       # Whisper 本地转写（ASR_PROVIDER=whisper，懒加载 tiny 模型）
 
 # === 调度、熔断与限流 ===
 apscheduler==3.10.4

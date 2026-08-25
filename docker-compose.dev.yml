@@ -1,9 +1,37 @@
+# RAG 多模态知识库 —— 本地开发调试编排（docker-compose.yml 的 override，仅本地开发用，不纳入 openspec 归档）
+#
+# 用法：
+#   构建+启动全部 7 个服务（+ embedding/rerank mock）：docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build \
+#       embedding rerank-service data-platform rag-service qc-service call-service case-service complaint-service review-service
+#   只起某个服务：docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build <svc>
+#   看日志：       docker compose -f docker-compose.yml -f docker-compose.dev.yml logs -f <svc>
+#   跑冒烟：       bash scripts/smoke/smoke_all.sh
+#   停止：         docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+#
+# 存量缺陷已修（对齐 smoke 版已验证通过的编排）：
+#   1. build 上下文：7 个服务由 build: ./services/<svc>（context 缺根路径 requirements.lock/common，
+#      构建必失败）改为 context: . + dockerfile: services/<svc>/Dockerfile；
+#   2. embedding/rerank 健康检查由 curl 改为 python urllib（mock 镜像是 python-slim，无 curl）；
+#   3. 容器内必须用服务名连 PG/Redis/Milvus/ES（.env 是宿主机视角 localhost），显式覆盖；
+#   4. rag-service 不再 depends_on ocr-service（paddlepaddle 基础镜像本机网络拉不动，
+#      且无服务强依赖它，OCR 冒烟步骤 WARN 放行）；
+#   5. 7 个服务补 curl 健康检查（镜像已 apt 安装 curl）。
+#
+# dev 习惯：代码卷挂载（改宿主机代码即生效）+ uvicorn --reload 热重载。
+# 架构：全部镜像多架构可用，M 系列 arm64 直接构建/运行；pyahocorasick 等 C 扩展由
+#       Dockerfile 内 gcc+libc6-dev 本地编译（arm64 无预编译 wheel），apt/pip 均已走阿里云镜像。
+
 services:
+  # ========== 检索链路 mock（真实服务地址可在 .env 切换） ==========
   embedding:
     build: ./deploy/embedding
     ports: ["8100:8100"]
+    volumes:
+      - ./deploy/embedding:/app
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8100", "--reload"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
+      # mock 镜像为 python-slim 无 curl，改用 python urllib 探活
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8100/health', timeout=2).status==200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -11,69 +39,211 @@ services:
   rerank-service:
     build: ./deploy/rerank
     ports: ["8101:8101"]
+    volumes:
+      - ./deploy/rerank:/app
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8101", "--reload"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8101/health"]
+      # mock 镜像为 python-slim 无 curl，改用 python urllib 探活
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8101/health', timeout=2).status==200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3
 
+  # ========== 7 个业务服务（build 均改用根上下文，与 smoke 编排一致） ==========
   data-platform:
-    build: ./services/data-platform
+    build:
+      context: .
+      dockerfile: services/data-platform/Dockerfile
     ports: ["8001:8000"]
     env_file: .env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    volumes:
+      - ./services/data-platform/app:/app/app
+      - ./common:/app/common
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
 
   rag-service:
-    build: ./services/rag-service
+    build:
+      context: .
+      dockerfile: services/rag-service/Dockerfile
     ports: ["8002:8000"]
     env_file: .env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      MILVUS_HOST: milvus
+      MILVUS_PORT: "19530"
+      ES_HOST: elasticsearch
+      ES_PORT: "9200"
+      EMBEDDING_SERVICE_URL: http://embedding:8100
+      RERANK_SERVICE_URL: http://rerank-service:8101
+      # V4 摘要能力开关（默认开启，与 smoke-v4 一致；关掉则行为回退 V3）
+      KB_SUMMARY_ENABLED: "true"
+      KB_SUMMARY_ES_BOOST: "1.0"
+      KB_SUMMARY_MAX_LEN: "200"
+      KB_ASR_OPENING_TRIM_ENABLED: "false"
+      # 启动前幂等执行 ES 索引初始化 + Alembic 迁移（下方 entrypoint 覆盖实现，语义与 entrypoint.sh 一致）
+      SKIP_ES_INIT: "0"
+      SKIP_MIGRATE: "0"
+    volumes:
+      - ./services/rag-service/app:/app/app
+      - ./common:/app/common
+      - ./scripts/rag:/app/scripts/rag
+      - ./migrations:/app/migrations
+      - ./alembic.ini:/app/alembic.ini
+    # entrypoint 覆盖：保留 es_init_v4 + alembic 初始化，仅给 uvicorn 加 --reload 热重载
+    entrypoint: ["/bin/sh", "-c", "if [ \"${SKIP_ES_INIT:-0}\" != \"1\" ]; then echo '[dev] es_init_v4'; python scripts/rag/es_init_v4.py; fi; if [ \"${SKIP_MIGRATE:-0}\" != \"1\" ]; then echo '[dev] alembic upgrade head'; alembic upgrade head; fi; exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"]
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
       milvus: {condition: service_healthy}
-      embedding: {condition: service_healthy}
       elasticsearch: {condition: service_healthy}
+      embedding: {condition: service_healthy}
       rerank-service: {condition: service_healthy}
-      ocr-service: {condition: service_healthy}
+      # ocr-service 依赖已移除（paddlepaddle 基础镜像本机拉不动，OCR 冒烟步骤 WARN 放行）
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
 
   qc-service:
-    build: ./services/qc-service
+    build:
+      context: .
+      dockerfile: services/qc-service/Dockerfile
     ports: ["8003:8000"]
     env_file: .env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    volumes:
+      - ./services/qc-service/app:/app/app
+      - ./common:/app/common
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
 
   call-service:
-    build: ./services/call-service
+    build:
+      context: .
+      dockerfile: services/call-service/Dockerfile
     ports: ["8004:8000"]
     env_file: .env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    volumes:
+      - ./services/call-service/app:/app/app
+      - ./common:/app/common
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
 
   case-service:
-    build: ./services/case-service
+    build:
+      context: .
+      dockerfile: services/case-service/Dockerfile
     ports: ["8005:8000"]
     env_file: .env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    volumes:
+      - ./services/case-service/app:/app/app
+      - ./common:/app/common
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
 
   complaint-service:
-    build: ./services/complaint-service
+    build:
+      context: .
+      dockerfile: services/complaint-service/Dockerfile
     ports: ["8006:8000"]
     env_file: .env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    volumes:
+      - ./services/complaint-service/app:/app/app
+      - ./common:/app/common
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
 
   review-service:
-    build: ./services/review-service
+    build:
+      context: .
+      dockerfile: services/review-service/Dockerfile
     ports: ["8007:8000"]
     env_file: .env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    volumes:
+      - ./services/review-service/app:/app/app
+      - ./common:/app/common
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s

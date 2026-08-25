@@ -107,3 +107,21 @@ async def test_v2_fields_default_none(mock_db, base_kwargs):
     assert entry.intent_tag is None
     assert entry.session_id is None
     assert entry.cache_hit == "0"
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_logs_three_fields(mock_db, base_kwargs):
+    """缓存命中（cache_hit='1'）时 query_original/query_rewritten/intent_tag 三字段写入。"""
+    base_kwargs.update(
+        cache_hit="1",
+        query_original="逾期协商还款",
+        query_rewritten="协商还款方案",
+        intent_tag="negotiate",
+    )
+    svc = LogService(mock_db)
+    await svc.log(**base_kwargs)
+    entry = mock_db.add.call_args[0][0]
+    assert entry.cache_hit == "1"
+    assert entry.query_original == "逾期协商还款"
+    assert entry.query_rewritten == "协商还款方案"
+    assert entry.intent_tag == "negotiate"

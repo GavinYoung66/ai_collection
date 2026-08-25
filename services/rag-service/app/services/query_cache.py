@@ -1,7 +1,8 @@
 """检索查询缓存切面：读/写/按 category 失效，全部静默容错。
 
 - V2 cache key: rag:cache:query:v2:{md5(query+category+top_k+flags_hash)}
-  flags_hash 为 7 个 V2 开关状态 hash，开关变化时缓存隔离，避免 V1 旧 key 冲突。
+  flags_hash 为功能开关状态 hash（V2 收录 7 个开关，V4 追加 KB_SUMMARY_ENABLED），
+  开关变化时缓存隔离，避免 V1 旧 key 冲突。
   V1 旧 key（rag:cache:query:{md5}）不做任何读写，自然过期。
 - 每个 category 用 Redis Set（rag:cache:keys:{category}）维护关联 cache key，
   失效时遍历 Set 删除，禁止使用 KEYS 通配扫描。
@@ -39,7 +40,12 @@ def _client() -> Redis:
 
 
 def _flags_hash() -> str:
-    """7 个 V2 开关状态 hash（8 字符），开关变化时缓存隔离。"""
+    """功能开关状态 hash（8 字符），开关变化时缓存隔离。
+
+    V2 收录 7 个开关；V4 追加 KB_SUMMARY_ENABLED：摘要增强影响 ES doc_summary 加权与
+    响应 results[].summary 填充，开关切换若不隔离缓存，旧缓存（summary=null/已填充）
+    会在 1h TTL 内违反"开关开启填充摘要/关闭恒为 null"契约（spec summary-metadata 3.6/3.7）。
+    """
     flags = "|".join([
         str(settings.KB_QUERY_REWRITE_ENABLED),
         str(settings.KB_ROUTING_ENABLED),
@@ -48,6 +54,8 @@ def _flags_hash() -> str:
         str(settings.KB_MULTITURN_ENABLED),
         str(settings.KB_EMBED_DEGRADED_KEEP_TEXT),
         str(settings.ES_DUAL_WRITE),
+        # V4: 摘要元数据检索增强开关
+        str(settings.KB_SUMMARY_ENABLED),
     ])
     return hashlib.md5(flags.encode("utf-8")).hexdigest()[:8]
 
@@ -55,7 +63,7 @@ def _flags_hash() -> str:
 def make_cache_key(query: str, category: str | None, top_k: int) -> str:
     """V2 cache key: rag:cache:query:v2:{md5(query+category+top_k+flags_hash)}。
 
-    flags_hash 随 7 个开关状态变化，开关切换后旧缓存自动隔离不命中。
+    flags_hash 随功能开关状态变化（V2 7 个 + V4 1 个），开关切换后旧缓存自动隔离不命中。
     """
     raw = f"{query}{category or ''}{top_k}{_flags_hash()}"
     return _CACHE_KEY_PREFIX + hashlib.md5(raw.encode("utf-8")).hexdigest()
