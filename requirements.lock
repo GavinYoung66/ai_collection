@@ -33,7 +33,14 @@ yarl==1.9.3
 # unstructured==0.11.6       # 依赖回溯严重
 pdfplumber==0.11.10
 python-docx==1.1.0
-# openpyxl==3.1.2
+openpyxl==3.1.2             # Excel 解析（V5）
+python-pptx==0.6.23         # PPT 解析（V5）
+PyMuPDF==1.24.9             # PDF 内嵌图片抽取（V5，自带二进制）
+pymupdfb==1.24.9            # PyMuPDF 二进制后端 wheel（编译期依赖，随包拉取）
+et-xmlfile==2.0.0           # openpyxl 依赖
+lxml==6.1.2                 # python-pptx 依赖
+xlsxwriter==3.2.9           # python-pptx 依赖
+pillow==12.3.0              # pdfplumber(Pillow>=12.2.0) 与 python-pptx 共用
 # paddleocr==2.7.0.3
 
 # === 工具 ===
@@ -47,6 +54,11 @@ ulid-py==1.1.0              # Session ID 生成（ULID）
 
 # === RAG V3 增量依赖 ===
 faster-whisper==1.0.3       # Whisper 本地转写（ASR_PROVIDER=whisper，懒加载 tiny 模型）
+
+# === RAG V5 增量依赖 ===
+# gradio 不进全局锁：与既有 fastapi==0.104.1 等 V4 锁定硬冲突，独立锁定于 deploy/gradio/requirements.txt
+langsmith==0.1.147          # 可选链路追踪（LANGSMITH_ENABLED=true 时生效）
+pydub==0.25.1               # ffmpeg 封装（AMR/WMA 解码）
 
 # === 调度、熔断与限流 ===
 apscheduler==3.10.4

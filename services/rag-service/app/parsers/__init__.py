@@ -7,9 +7,14 @@ from app.parsers.docx_parser import DocxParser
 from app.parsers.image_parser import ImageParser
 from app.parsers.md_parser import MDParser
 from app.parsers.pdf_parser import PDFParser
+from app.parsers.pptx_parser import PptxParser
 from app.parsers.text_parser import TextParser
+from app.parsers.xlsx_parser import XlsxParser
 
-SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx", ".png", ".jpg", ".jpeg", ".mp3", ".wav", ".m4a"}
+SUPPORTED_EXTENSIONS = {
+    ".txt", ".md", ".pdf", ".docx", ".png", ".jpg", ".jpeg",
+    ".mp3", ".wav", ".m4a", ".xlsx", ".pptx", ".amr", ".wma",
+}
 
 
 class ParserFactory:
@@ -27,6 +32,10 @@ class ParserFactory:
             ".mp3": AudioParser,
             ".wav": AudioParser,
             ".m4a": AudioParser,
+            ".xlsx": XlsxParser,
+            ".pptx": PptxParser,
+            ".amr": AudioParser,
+            ".wma": AudioParser,
         }
         parser_cls = parsers.get(ext)
         if parser_cls is None:
@@ -46,6 +55,8 @@ __all__ = [
     "DocxParser",
     "ImageParser",
     "AudioParser",
+    "XlsxParser",
+    "PptxParser",
     "ParserFactory",
     "SUPPORTED_EXTENSIONS",
 ]

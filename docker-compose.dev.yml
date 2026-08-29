@@ -24,27 +24,44 @@
 services:
   # ========== 检索链路 mock（真实服务地址可在 .env 切换） ==========
   embedding:
-    build: ./deploy/embedding
+    # 用 Dockerfile.mock 构建（sentence-transformers 依赖延迟安装，真实版镜像在本机不可用），
+    # 且不挂载宿主机 ./deploy/embedding（真实 app.py 会覆盖 mock 镜像内的 app.py）
+    build:
+      context: ./deploy/embedding
+      dockerfile: Dockerfile.mock
     ports: ["8100:8100"]
-    volumes:
-      - ./deploy/embedding:/app
-    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8100", "--reload"]
+    command:
+      ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8100", "--reload"]
     healthcheck:
       # mock 镜像为 python-slim 无 curl，改用 python urllib 探活
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8100/health', timeout=2).status==200 else 1)"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8100/health', timeout=2).status==200 else 1)",
+        ]
       interval: 30s
       timeout: 5s
       retries: 3
 
   rerank-service:
-    build: ./deploy/rerank
+    # 与 embedding 同理：Dockerfile.mock 构建，不挂载宿主机真实 app.py
+    build:
+      context: ./deploy/rerank
+      dockerfile: Dockerfile.mock
     ports: ["8101:8101"]
-    volumes:
-      - ./deploy/rerank:/app
-    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8101", "--reload"]
+    command:
+      ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8101", "--reload"]
     healthcheck:
       # mock 镜像为 python-slim 无 curl，改用 python urllib 探活
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8101/health', timeout=2).status==200 else 1)"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8101/health', timeout=2).status==200 else 1)",
+        ]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -64,10 +81,19 @@ services:
     volumes:
       - ./services/data-platform/app:/app/app
       - ./common:/app/common
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command:
+      [
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+      ]
     depends_on:
-      postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -97,7 +123,20 @@ services:
       KB_SUMMARY_ES_BOOST: "1.0"
       KB_SUMMARY_MAX_LEN: "200"
       KB_ASR_OPENING_TRIM_ENABLED: "false"
-      # 启动前幂等执行 ES 索引初始化 + Alembic 迁移（下方 entrypoint 覆盖实现，语义与 entrypoint.sh 一致）
+      # V5 LLM 回答 + LangSmith 追踪（从 .env 继承，dev 显式透传便于调试）
+      KB_LLM_ANSWER_ENABLED: ${KB_LLM_ANSWER_ENABLED:-true}
+      LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-30}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      LANGSMITH_ENABLED: ${LANGSMITH_ENABLED:-true}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-rag-service}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      # P1：PDF 内嵌图 OCR 文搜图（dev 默认开启，生产可按需关闭）
+      KB_IMAGE_EXTRACT_ENABLED: ${KB_IMAGE_EXTRACT_ENABLED:-true}
+      KB_TABLE_EXTRACT_ENABLED: ${KB_TABLE_EXTRACT_ENABLED:-false}
       SKIP_ES_INIT: "0"
       SKIP_MIGRATE: "0"
     volumes:
@@ -106,15 +145,23 @@ services:
       - ./scripts/rag:/app/scripts/rag
       - ./migrations:/app/migrations
       - ./alembic.ini:/app/alembic.ini
+      # V5：资产预览源目录（镜像内默认 data/assets = /app/data/assets），
+      # dev bind mount 与 gradio 共享同一宿主机目录（覆盖生产命名卷 rag_assets）
+      - ./services/rag-service/data/assets:/app/data/assets
     # entrypoint 覆盖：保留 es_init_v4 + alembic 初始化，仅给 uvicorn 加 --reload 热重载
-    entrypoint: ["/bin/sh", "-c", "if [ \"${SKIP_ES_INIT:-0}\" != \"1\" ]; then echo '[dev] es_init_v4'; python scripts/rag/es_init_v4.py; fi; if [ \"${SKIP_MIGRATE:-0}\" != \"1\" ]; then echo '[dev] alembic upgrade head'; alembic upgrade head; fi; exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"]
+    entrypoint:
+      [
+        "/bin/sh",
+        "-c",
+        'if [ "${SKIP_ES_INIT:-0}" != "1" ]; then echo ''[dev] es_init_v4''; python scripts/rag/es_init_v4.py; fi; if [ "${SKIP_MIGRATE:-0}" != "1" ]; then echo ''[dev] alembic upgrade head''; alembic upgrade head; fi; exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload',
+      ]
     depends_on:
-      postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
-      milvus: {condition: service_healthy}
-      elasticsearch: {condition: service_healthy}
-      embedding: {condition: service_healthy}
-      rerank-service: {condition: service_healthy}
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      milvus: { condition: service_healthy }
+      elasticsearch: { condition: service_healthy }
+      embedding: { condition: service_healthy }
+      rerank-service: { condition: service_healthy }
       # ocr-service 依赖已移除（paddlepaddle 基础镜像本机拉不动，OCR 冒烟步骤 WARN 放行）
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -137,10 +184,19 @@ services:
     volumes:
       - ./services/qc-service/app:/app/app
       - ./common:/app/common
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command:
+      [
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+      ]
     depends_on:
-      postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -162,10 +218,19 @@ services:
     volumes:
       - ./services/call-service/app:/app/app
       - ./common:/app/common
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command:
+      [
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+      ]
     depends_on:
-      postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -187,10 +252,19 @@ services:
     volumes:
       - ./services/case-service/app:/app/app
       - ./common:/app/common
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command:
+      [
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+      ]
     depends_on:
-      postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -212,10 +286,19 @@ services:
     volumes:
       - ./services/complaint-service/app:/app/app
       - ./common:/app/common
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command:
+      [
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+      ]
     depends_on:
-      postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -237,13 +320,31 @@ services:
     volumes:
       - ./services/review-service/app:/app/app
       - ./common:/app/common
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command:
+      [
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+      ]
     depends_on:
-      postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
       timeout: 3s
       retries: 30
       start_period: 30s
+
+  # ===== V5：Gradio 前端 dev 覆盖（build/ports/environment/depends_on 继承 base）=====
+  gradio:
+    # dev 热更新：预览源改 bind mount，与 rag-service 共享同一宿主机目录
+    # （覆盖 base 的命名卷挂载 rag_assets:/app/data/assets）
+    volumes:
+      - ./services/rag-service/data/assets:/app/data/assets
+      # 热更新工作台源码（镜像内路径为 /app/app/app.py）
+      - ./services/rag-service/gradio:/app/app

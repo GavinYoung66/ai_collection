@@ -245,6 +245,9 @@ register_auth_handlers(app)
 
 @app.on_event("startup")
 async def startup():
+    from app.services.search_trace import configure_langsmith_env
+
+    configure_langsmith_env()
     """启动时初始化 Milvus collection + ES index。"""
     from app.api.deps import get_es_client, get_milvus_client
 

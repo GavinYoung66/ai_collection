@@ -1,5 +1,7 @@
 fastapi==0.104.1
 uvicorn==0.24.0
+python-multipart==0.0.9
 paddleocr==2.7.0.3
 pdf2image==1.17.0
 pillow==10.2.0
+numpy<2

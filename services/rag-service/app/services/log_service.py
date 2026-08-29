@@ -33,6 +33,9 @@ class LogService:
         query_rewritten: str | None = None,
         intent_tag: str | None = None,
         session_id: str | None = None,
+        # V5: LLM 回答调用/降级标记（对齐迁移 0008 列，默认 '0'）
+        llm_called: str = "0",
+        llm_degraded: str = "0",
     ) -> None:
         try:
             entry = KBSearchLog(
@@ -57,6 +60,9 @@ class LogService:
                 query_rewritten=query_rewritten,
                 intent_tag=intent_tag,
                 session_id=session_id,
+                # V5 新增 2 字段
+                llm_called=llm_called,
+                llm_degraded=llm_degraded,
             )
             self.db.add(entry)
             await self.db.commit()

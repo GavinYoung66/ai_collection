@@ -130,6 +130,25 @@ bash scripts/smoke/smoke_rag_v2.sh
 | `KB_SUMMARY_MAX_LEN`          | `200`   | 摘要长度上限（字符），超限返回 B0001                                         |
 | `KB_ASR_OPENING_TRIM_ENABLED` | `false` | `true` 启用 ASR 通话开场白规则裁剪（转写文本开头）                           |
 
+#### V5 新增开关与配置（默认全 false = V4 行为）
+
+> `LLM_MODEL` / `LLM_TIMEOUT` 复用既有配置：`LLM_MODEL=qwen-plus`；`LLM_TIMEOUT` 类默认 10，`.env.example` 登记 5 供本地覆盖；Query 改写/LLM Provider 共用。V5 不重复定义、不改默认值。
+
+| 变量                       | 默认值         | 切换效果                                                                                        |
+| -------------------------- | -------------- | ----------------------------------------------------------------------------------------------- |
+| `KB_LLM_ANSWER_ENABLED`    | `false`        | `true` 且请求 `answer=true` 时检索接入在线大模型生成带溯源回答（关闭=V4 行为，零 LLM 调用）     |
+| `LLM_PROVIDER`             | `dashscope`    | LLM Provider：`dashscope` 在线 / `local` 本地 OpenAI 兼容（切换不影响对外契约）                 |
+| `LLM_MAX_CONCURRENCY`      | `4`            | LLM 回答并发上限（信号量，超限排队等待，不降级）                                                |
+| `LLM_LOCAL_BASE_URL`       | 空             | local Provider 基址（未配置按不可用降级）                                                       |
+| `LLM_LOCAL_API_KEY`        | 空             | local Provider 密钥                                                                             |
+| `KB_IMAGE_EXTRACT_ENABLED` | `false`        | `true` 抽取 PDF/DOCX/PPTX 内嵌图片 → OCR 文搜图 + `kb_doc_assets` 元数据（关闭=仅文本 V4 行为） |
+| `KB_TABLE_EXTRACT_ENABLED` | `false`        | `true` 内嵌表格结构化解析（保留行列结构、命中任意单元格；关闭=V4 文本化）                       |
+| `KB_EXCEL_SHEET_ALL`       | `true`         | Excel 全部 sheet 入库（`false`=仅首个 sheet）                                                   |
+| `KB_EXCEL_HEADER_ROW`      | `1`            | Excel 表头行号（首行=表头，行切块列名前缀）                                                     |
+| `KB_ASR_AMR_WMA_ENABLED`   | `false`        | `true` AMR/WMA ffmpeg 解码 → 复用 VAD/ASR 转写（关闭=白名单外 A3001，V4 行为）                  |
+| `KB_ASSETS_DIR`            | `data/assets/` | 内嵌资产本地存储目录（Docker 挂载 volume，与 Gradio 共享预览源）                                |
+| `KB_ASSETS_MAX_SIZE`       | `1024`         | 图片渲染最大边长（px，等比缩放）                                                                |
+
 ### 一键回退方案
 
 发布后 48h 内若出现问题，一键关 7 个开关恢复 V1 行为（无状态副作用，无需 DB rollback）：
@@ -203,3 +222,158 @@ export KB_ASR_OPENING_TRIM_ENABLED=false
 
 1. **reindex 后 ES 摘要副本丢失**：`PUT /kb/documents/{doc_id}/reindex` 走"删除旧分块 → 重建分块"路径，不会重写 `doc_summary`，导致 ES 侧摘要副本被清空、PG 侧 `kb_documents.summary` 保留（出现"PG 有、ES 无"）。影响面：仅开关开启时该文档在 ES 路的摘要加权召回弱化；响应 `results[].summary` 始终从 PG 返回，不产生错误数据。恢复方式：对目标文档重新调用 `PUT /kb/documents/{doc_id}/summary` 补全，或对全库重跑 `scripts/rag/reindex_es_v4.py`。
 2. **降级入库路径丢弃携带摘要**：入库链路触发降级（embedding 不可用且 `KB_EMBED_DEGRADED_KEEP_TEXT` 开启 / ES 写入失败且 `KB_ES_DEGRADED_KEEP_MILVUS` 开启）时提前返回，携带的 `summary` 被静默丢弃且不记 drop 告警。影响面：仅降级场景下该摘要不生效，正文入库与 degraded 语义不受影响；恢复方式：对目标文档调用 `PUT .../summary` 补全。
+
+## §E V5 Gradio 浏览器前端（独立 compose 服务）
+
+> 来源：`openspec/changes/rag-multimodal-kb-v5/design.md`（D10）与 delta spec `gradio-frontend`。
+
+### 功能说明
+
+- 提供**浏览器可视化入口**（独立进程，端口 7860，**仅内部网络，不映射公网**）：上传页 + 问答页。
+- **上传页**：`gr.File`（14 种扩展名白名单 txt/md/pdf/docx/xlsx/pptx/png/jpg/jpeg/mp3/wav/m4a/amr/wma）+ 分类下拉 → 调 `POST /api/v1/kb/documents`（multipart），成功展示 doc_id/status/chunks_count；失败 `gr.Error` 友好提示（错误码/原因），不白屏、不裸 500。
+- **问答页**：问题 + top_k + "生成回答"复选 → 调 `POST /api/v1/kb/search`（复选时传 `answer=true`，后端门控 `KB_LLM_ANSWER_ENABLED` 内部判定）→ 渲染"问题 → 召回 chunk（content/score/source/页码 + 图片 `gr.Image` 预览 + 表格 `gr.Dataframe` 预览）→ LLM 回答（`answer` 有值展示，无值展示"回答暂不可用"提示）"。
+- **预览链路**：Gradio 与 rag-service **共享挂载 `KB_ASSETS_DIR` 数据卷**（compose 卷 `rag_assets`）——图片按 `kb_doc_assets.storage_path` 相对路径读取渲染，表格按 storage_path 指向的 `content_json`（`{"headers","rows"}`）渲染；**不新增后端静态端点、不改动既有 API**。
+- **鉴权**：Gradio 调用 `/kb/*` 时携带 `Authorization: Bearer {RAG_API_TOKEN}`（env 注入，生产由运维配置，**不硬编码进镜像/代码**）；未配置 token 时页面提示"未配置访问凭证"，不发起调用。
+- 所有后端调用 try/except + 超时（30s，connect 5s），后端宕机展示友好提示、不卡死。
+
+### 启动方式（docker compose）
+
+```bash
+# 1) 注入内部访问 token（生产由运维提供 ADMIN/SUPERVISOR 角色的 JWT；开发可用内部直连 token）
+export RAG_API_TOKEN=<your-internal-token>
+# 2) 启动（gradio 依赖 rag-service healthy 后启动；rag-service/gradio 共享 rag_assets 卷）
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d gradio
+```
+
+### 页面地址与访问约束
+
+| 项       | 值                                                                    |
+| -------- | --------------------------------------------------------------------- |
+| 页面地址 | `http://<host>:7860/`（本地 `http://localhost:7860/`）                |
+| 上传接口 | 复用 `POST /api/v1/kb/documents`（不变）                              |
+| 检索接口 | 复用 `POST /api/v1/kb/search`（不变）                                 |
+| 网络约束 | 仅内部网络（compose 内部 DNS + 宿主机端口），**不映射公网**           |
+| 健康检查 | `curl -s -o /dev/null -w "%{http_code}" http://localhost:7860/` = 200 |
+
+### RAG_API_TOKEN 配置说明
+
+- 由 compose 环境注入 `RAG_API_TOKEN`（`docker-compose.yml` 使用 `${RAG_API_TOKEN:?must set internal token}` 强制必填）；Gradio 代码仅从 env 读取，**不落盘、不硬编码**。
+- token 语义为后端既有 JWT 鉴权（上传需 ADMIN/SUPERVISOR 角色；检索接口权限 ALL）。未配置时页面提示"后端服务暂不可用：未配置访问凭证（RAG_API_TOKEN）"。
+- 开发环境内部网络直连时可注入任意内部 token 绕过（仍走后端既有鉴权校验）。
+
+## §F V5 冒烟测试指引（12 步全链路）
+
+V5 冒烟脚本位于 `scripts/smoke/smoke_rag_v5.sh`，覆盖 12 步全链路（含 Gradio 页面检查）：
+
+|  #  | 步骤                           | 预期结果                                                                                      | 依赖/放行                                                                      |
+| :-: | :----------------------------- | :-------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------- |
+|  1  | `/health` 探活                 | `healthy`                                                                                     | PG/Milvus/Redis/embedding                                                      |
+|  2  | TXT 上传→列表→详情→检索→删除   | 全链路成功（V1 基线回归）                                                                     | 无                                                                             |
+|  3  | 上传 `.xlsx`（多 sheet）→ 检索 | 命中具体行，`source=excel`；sheet2 亦命中（`KB_EXCEL_SHEET_ALL=true`）                        | openpyxl（样本生成，缺失 WARN）                                                |
+|  4  | 上传 `.pptx`（含备注）→ 检索   | 命中备注内容，`source=ppt`                                                                    | python-pptx（缺失 WARN）                                                       |
+|  5  | 上传 `.amr` → 转写入库         | `source=asr`                                                                                  | `KB_ASR_AMR_WMA_ENABLED` + ffmpeg + ASR Provider；未入库 WARN（V4 白名单行为） |
+|  6  | 上传损坏音频                   | 业务错误 `code=A3001`，且随后检索正常（worker 不卡死）                                        | 无                                                                             |
+|  7  | PPTX 内嵌图片抽取              | 文搜图命中 + `assets[].asset_type=image` + `storage_path`                                     | `KB_IMAGE_EXTRACT_ENABLED` + OCR；不可用 WARN 放行                             |
+|  8  | DOCX 内嵌表格抽取              | 单元格命中 + `assets[].asset_type=table` + `storage_path` 指向 `.json`（gr.Dataframe 渲染源） | `KB_TABLE_EXTRACT_ENABLED`；未开启 WARN 放行                                   |
+|  9  | 检索 `answer=true`（开关开启） | `answer` 带溯源回答；无 LLM 环境 `answer=null+degraded=true` 降级正确                         | `KB_LLM_ANSWER_ENABLED` + Provider                                             |
+| 10  | 检索 `answer=true`（开关关闭） | 响应与 V4 完全一致：`answer=null` + `degraded=false`（零 LLM 调用），V5 契约字段恒存在        | 默认部署（开关全 false）                                                       |
+| 11  | 删除含资产文档                 | `kb_doc_assets` 计数 0 + 本地资产目录清理                                                     | `docker exec postgres` / `rag-service` 容器；不可用 WARN                       |
+| 12  | Gradio 页面可达性              | `GET http://localhost:7860/` = 200                                                            | gradio 服务 + `RAG_API_TOKEN`；不可达 WARN                                     |
+
+### 运行方式
+
+```bash
+# 方式 1：全量冒烟（自动接入 V5 脚本）
+bash scripts/smoke/smoke_all.sh
+
+# 方式 2：仅 V5 冒烟
+bash scripts/smoke/smoke_rag_v5.sh
+```
+
+### 前置条件
+
+- `docker compose up` 启动 rag-service + PG + Milvus + ES + Redis（OCR service、gradio 可选）
+- `SMOKE_ADMIN_TOKEN` 环境变量或 conda 环境 `ai_collection` 可用（签发测试 JWT）
+- 服务端按需开启 V5 开关（`KB_IMAGE_EXTRACT_ENABLED` / `KB_TABLE_EXTRACT_ENABLED` / `KB_ASR_AMR_WMA_ENABLED` / `KB_LLM_ANSWER_ENABLED`），未开启步骤按 WARN 放行
+- 退出码：0=全 PASS（可选组件按 WARN 放行），1=有 FAIL
+
+## §G V5 多模态知识库能力总览
+
+> 来源：`openspec/changes/rag-multimodal-kb-v5/`（spec `document-ingest` / `multimodal-ingest` / `hybrid-search` / `gradio-frontend` / `llm-answer` 与 design.md D1~D11）。实施原则：**增量开发，零副作用**——新能力全部以开关接入（默认全 false = V4 完全行为），不修改 V1~V4 对外接口契约、错误码全集 84 条不新增、Milvus/ES schema 不新增字段不重建索引。
+
+### 功能说明（能力清单）
+
+| 能力                       | 说明                                                                                                                                                  | 开关门控                   | design |
+| :------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------- | :----- |
+| Excel（.xlsx）入库         | 全部 sheet（`KB_EXCEL_SHEET_ALL`）/ 首行表头（`KB_EXCEL_HEADER_ROW`）/ 行切块序列化 `"sheet名: 列名1:值1,..."` / 损坏或加密 → A3001                   | 无（白名单内格式即启用）   | D2     |
+| PPT（.pptx）入库           | 标题+正文+文本框+演讲者备注并入页文本 / 页码与版式占位保守过滤 / 多页按序拼接                                                                         | 无                         | D3     |
+| AMR/WMA 音频转写           | ffmpeg 解码 → 16kHz WAV → 复用既有 VAD 裁剪 + ≤60s 分片 + ASR Provider 转写（source=asr）                                                             | `KB_ASR_AMR_WMA_ENABLED`   | D6     |
+| 内嵌图片抽取（文搜图）     | PDF（PyMuPDF）/DOCX/PPTX 内嵌图片 → Pillow 缩放（`KB_ASSETS_MAX_SIZE`）→ OCR（ocr-service:8200）→ 文本以 chunk 入库（source=asset_image）+ 资产元数据 | `KB_IMAGE_EXTRACT_ENABLED` | D4     |
+| 内嵌表格结构化解析         | PDF（pdfplumber）/DOCX/PPTX 表格保留行列结构、任意单元格命中、`content_json` 结构化预览                                                               | `KB_TABLE_EXTRACT_ENABLED` | D5     |
+| 在线大模型回答（LLM 问答） | Provider 抽象（dashscope 默认 / local OpenAI 兼容）+ 检索召回注入 + 溯源引用 + 合规脱敏/前置拦截/后置校验 + 熔断降级                                  | `KB_LLM_ANSWER_ENABLED`    | D8     |
+| Gradio 浏览器前端          | 独立 compose 服务（端口 7860）：上传页 + 问答页 + 图片/表格结构化预览（共享 `KB_ASSETS_DIR` 数据卷）                                                  | 独立服务（不依赖开关）     | D10    |
+
+### API 变更表（纯增量，V4 契约零改动）
+
+| 接口                                                 | 变更类型             | 说明                                                                                                                                                                                          |
+| :--------------------------------------------------- | :------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /kb/documents`                                 | 扩展名白名单增       | 新增 `.xlsx/.pptx/.amr/.wma`（共 14 种）；白名单外（含 .exe）→ A3001 逻辑不变                                                                                                                 |
+| `POST /kb/search`                                    | 请求新增字段         | `answer: bool = false`——`true` 且 `KB_LLM_ANSWER_ENABLED` 时生成回答；`true` 时**跳过查询缓存读取且不写缓存**（其余请求缓存语义与 V4 一致）                                                   |
+| `POST /kb/search`                                    | 响应新增字段         | `answer: str \| null`（LLM 回答，降级/未开启恒为 null）；`citations: []`（回答引用的命中文档 doc_id，缺省空数组）；`results[].assets: []`（资产预览，缺省空数组）；`degraded=true` 仅降级场景 |
+| 其余接口（DELETE/reindex/sensitive-words/health 等） | **完全保持原有不变** | 路径、请求/响应包、错误码零改动                                                                                                                                                               |
+
+### 数据模型变更
+
+| 存储                        | 变更                                                                                                                                                                                                                                                                                                                                                                                                                                   | 说明                                                       |
+| :-------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------- |
+| PostgreSQL `kb_doc_assets`  | **新表**（迁移 `0008_kb_doc_assets.py`，版本号接续 0007）：`id BIGSERIAL PK` / `doc_id UUID FK kb_documents ON DELETE CASCADE` / `asset_type VARCHAR(10) CHECK IN ('image','table')` / `page INT` / `storage_path VARCHAR(500)` / `ocr_text TEXT` / `mime_type VARCHAR(100)` / **`content_json TEXT`（表格行列结构 JSON `{"headers","rows"}`，gr.Dataframe 渲染源；图片为 NULL）** / 公共字段，索引 `(doc_id)`、`(doc_id, asset_type)` | 已同步 step4/01 全局 DDL 单一事实源；ORM `KbDocAsset` 对齐 |
+| PostgreSQL `kb_search_logs` | 迁移 0008 增列：`llm_called CHAR(1) DEFAULT '0'` / `llm_degraded CHAR(1) DEFAULT '0'`（VARCHAR+CHECK 对齐类型规范，存量行默认 '0' 不强制回填）                                                                                                                                                                                                                                                                                         | 检索日志记录 LLM 回答调用与降级标记                        |
+| Milvus `kb_vectors`         | **无变更**                                                                                                                                                                                                                                                                                                                                                                                                                             | 不新增字段、不重建索引                                     |
+| Elasticsearch `kb_bm25`     | **无变更**                                                                                                                                                                                                                                                                                                                                                                                                                             | 资产 OCR 文本以正文 chunk 双索引入库（source=asset_image） |
+
+### 开关清单（14 项）
+
+> 12 项 V5 新增 + `LLM_MODEL`/`LLM_TIMEOUT` 复用既有配置（Query 改写/LLM Provider 共用，不重复定义）。完整说明见 §C「V5 新增开关与配置」。
+
+| 变量                                       | 默认值         | 语义                                           |
+| :----------------------------------------- | :------------- | :--------------------------------------------- |
+| `KB_LLM_ANSWER_ENABLED`                    | `false`        | LLM 回答总门控（关闭 = 零 LLM 调用，V4 行为）  |
+| `LLM_PROVIDER`                             | `dashscope`    | `dashscope` 在线 / `local` 本地 OpenAI 兼容    |
+| `LLM_MODEL`                                | `qwen-plus`    | 复用既有（Query 改写/LLM 回答共用）            |
+| `LLM_TIMEOUT`                              | 10（本地 5）   | 复用既有，LLM 调用超时                         |
+| `LLM_MAX_CONCURRENCY`                      | `4`            | 并发信号量上限，超限排队等待（不降级）         |
+| `LLM_LOCAL_BASE_URL` / `LLM_LOCAL_API_KEY` | 空             | local Provider 配置，未配置按不可用降级        |
+| `KB_IMAGE_EXTRACT_ENABLED`                 | `false`        | 内嵌图片抽取 + OCR 文搜图                      |
+| `KB_TABLE_EXTRACT_ENABLED`                 | `false`        | 内嵌表格结构化解析（content_json 预览）        |
+| `KB_EXCEL_SHEET_ALL`                       | `true`         | Excel 全部 sheet 入库（false=仅首个）          |
+| `KB_EXCEL_HEADER_ROW`                      | `1`            | Excel 表头行号                                 |
+| `KB_ASR_AMR_WMA_ENABLED`                   | `false`        | AMR/WMA ffmpeg 解码转写（关闭=白名单外 A3001） |
+| `KB_ASSETS_DIR`                            | `data/assets/` | 资产本地存储目录（与 Gradio 共享 volume）      |
+| `KB_ASSETS_MAX_SIZE`                       | `1024`         | 图片渲染最大边长（px，等比缩放）               |
+
+### Gradio 使用与 RAG_API_TOKEN 配置
+
+- 启动/页面地址/访问约束/`RAG_API_TOKEN` 注入见 **§E**（Gradio 浏览器前端）；12 步全链路验证见 **§F**。
+- 要点：Gradio 为独立 compose 服务（`docker compose up -d gradio`，依赖 rag-service healthy），`RAG_API_TOKEN` 由环境注入（`${RAG_API_TOKEN:?must set internal token}` 强制必填），前端不硬编码；图片预览按 `storage_path` 从共享 `rag_assets` 卷读取，表格按 `content_json` 渲染 `gr.Dataframe`。
+
+### V5 Migrate Runbook
+
+1. **数据库**：跑 Alembic `0008_kb_doc_assets.py`（新表 + kb_search_logs 两列）；全局 DDL 单一事实源 step4/01 已收录 `kb_doc_assets`（v1.1），无需二次同步。
+2. **CI 双向校验**：`python scripts/rag/check_orm_ddl.py`（DDL ↔ ORM 类型/列/nullable/索引对齐，kb_doc_assets 全维度严格校验，退出码 0=通过）。
+3. **部署**：部署 rag-service:v5 容器（新开关 ENV 默认全 false = V4 行为）；`docker compose up -d gradio`（compose base/dev 增量，共享 `rag_assets` 卷 + `RAG_API_TOKEN` 注入）。
+4. **灰度开启**：先 `KB_EXCEL_SHEET_ALL/KB_TABLE_EXTRACT_ENABLED` 等无外部依赖能力 → 观察入库/检索 2h；再按需 `KB_IMAGE_EXTRACT_ENABLED`（依赖 OCR）/ `KB_ASR_AMR_WMA_ENABLED`（依赖 ffmpeg+ASR）/ `KB_LLM_ANSWER_ENABLED`（依赖 Provider）。
+5. **回归**：全量单测（基线 240 不回退）+ `scripts/smoke/smoke_rag_v5.sh`（12 步，可选组件 WARN 放行）+ 既有 `smoke_rag_v2.sh`（V1~V4 基线不变）。
+
+### 回滚说明
+
+- **行为回滚零成本**：全部能力以开关隔离，关闭 `KB_LLM_ANSWER_ENABLED` / `KB_IMAGE_EXTRACT_ENABLED` / `KB_TABLE_EXTRACT_ENABLED` / `KB_ASR_AMR_WMA_ENABLED` 即恢复 V4 行为（无状态副作用，无需 DB rollback）。
+- **数据回滚零成本**：`kb_doc_assets` 为新表（不参与检索主链路）、`kb_search_logs` 新列默认 '0' 可空——schema 无需回退；存量数据不受影响。
+- **Gradio 下线**：`docker compose stop gradio` 即可，不参与 rag-service 主链路（页面不可达不影响 API）。
+- 一键回退（docker env / k8s ConfigMap）：
+
+```bash
+export KB_LLM_ANSWER_ENABLED=false
+export KB_IMAGE_EXTRACT_ENABLED=false
+export KB_TABLE_EXTRACT_ENABLED=false
+export KB_ASR_AMR_WMA_ENABLED=false
+```

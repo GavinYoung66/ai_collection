@@ -6,17 +6,18 @@
 > 里程碑归属：**M1（最小闭环 RAG 流程跑通）**
 > 上游约束：step1/01~03 全局口径、step3/01~03 架构与降级、step4/01~04 数据设计、step5/01~04 技术规范、step6/01~02 异常容错与可观测性
 > 复杂版参考：DD-03-RAG-MULTIMODAL-KB.md（V2.0，含多模态/复杂路由/Query改写/LangSmith，本期不实现）
-> 本文档状态：**与 rag-service-v1 已实现代码对齐**（缓存/限流/权限/敏感词/降级均已落地并通过全量测试）
+> 本文档状态：**与 rag-service V1~V4 已实现代码对齐**（缓存/限流/权限/敏感词/降级/多模态 OCR-ASR/摘要均已落地并通过全量测试）；**V5 为本期规划**（新增 Excel/PPT 格式、内嵌图片/表格抽取、AMR/WMA 音频、Gradio 浏览器前端、在线大模型回答开关）
 
 ---
 
 ## 0. 文档修订记录
 
-| 版本 | 日期       | 修订人        | 修订内容                                                                                                                                                                                                                                                            |
-| :--- | :--------- | :------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| V1.0 | 2026-08-20 | 规范优化      | 对齐项目实际技术栈重写：PG+Milvus+ES+Redis；补充完整目录结构、业务流程、函数签名；明确 V1 范围与延后清单                                                                                                                                                            |
-| V1.1 | 2026-08-21 | AI 产品架构师 | 评审优化：删除代码骨架冗余；补齐边界契约；修正敏感词契约（text/plain）；深化 §10 V1→V2 演进与 §11 任务拆分                                                                                                                                                          |
-| V1.2 | 2026-08-21 | AI 产品架构师 | **全局规范对齐版**：逐条核对 step1/03/04/05/06 规范，修正 B0001 状态码、双阈值闸门（0.6/0.35）、Milvus/ES schema 差异、敏感词数据源差异、Redis key 收录状态、kb_search_logs 类型规范冲突、数据中台对接与监控；全部差异以"规范契约 / V1 实现 / 差异与演进"三段式标注 |
+| 版本 | 日期       | 修订人        | 修订内容                                                                                                                                                                                                                                                                                |
+| :--- | :--------- | :------------ | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| V1.0 | 2026-08-20 | 规范优化      | 对齐项目实际技术栈重写：PG+Milvus+ES+Redis；补充完整目录结构、业务流程、函数签名；明确 V1 范围与延后清单                                                                                                                                                                                |
+| V1.1 | 2026-08-21 | AI 产品架构师 | 评审优化：删除代码骨架冗余；补齐边界契约；修正敏感词契约（text/plain）；深化 §10 V1→V2 演进与 §11 任务拆分                                                                                                                                                                              |
+| V1.2 | 2026-08-21 | AI 产品架构师 | **全局规范对齐版**：逐条核对 step1/03/04/05/06 规范，修正 B0001 状态码、双阈值闸门（0.6/0.35）、Milvus/ES schema 差异、敏感词数据源差异、Redis key 收录状态、kb_search_logs 类型规范冲突、数据中台对接与监控；全部差异以"规范契约 / V1 实现 / 差异与演进"三段式标注                     |
+| V1.3 | 2026-08-25 | AI 产品架构师 | **V5 需求合并版**：新增 V5 多模态混合检索增强（Excel/PPT 格式、PDF/PPT/Word 内嵌图片与表格抽取、AMR/WMA 音频扩展）、Gradio 浏览器前端入口、RAG 检索接入在线大模型（开关门控）；同步融入 §1.4 边界、§2 技术栈、§3 目录、§4 存储、§5 接口、§6 流程、§8 配置、§10 演进路线、§11.5 任务清单 |
 
 ### 0.1 规范对齐声明（单一事实源）
 
@@ -37,7 +38,7 @@
 
 ### 1.1 定位
 
-面向电话催收业务的**轻量企业级 RAG 后端服务**。坐席输入业务问题，系统从私有合规文档中检索相关知识片段，返回带溯源引用的检索结果（不生成话术，由 call-service 消费片段）。
+面向电话催收业务的**轻量企业级 RAG 后端服务**。坐席输入业务问题，系统从私有合规文档中检索相关知识片段，返回带溯源引用的检索结果（不生成话术，由 call-service 消费片段）。**V5 起**：新增 Gradio 浏览器前端入口（上传/问答可视化），并支持经开关接入在线大模型生成带溯源的回答（默认关闭，关闭时行为与 V4 完全一致）。
 
 ### 1.2 V1 能力边界（已实现，验收基线）
 
@@ -65,25 +66,28 @@
 
 - rag-service **只提供被动检索**，不主动向外调用服务（不调 case-service / data-platform）
 - 不修改案件状态（归 case-service）；不做质检打分（归 qc-service）
-- **不生成话术**：V1 返回检索片段 + 溯源，不接 LLM（`include_answer` 已移除）
+- **不生成话术（V5 起开关门控）**：V1~V4 返回检索片段 + 溯源，不接 LLM（`include_answer` 已移除）；**V5 新增 `KB_LLM_ANSWER_ENABLED`（默认 false）**：开启时检索后接入在线大模型生成回答（带溯源引用，供前端展示），关闭时行为与 V4 完全一致；LLM Provider 抽象支持在线/本地切换，LLM 调用超时/熔断/不可用一律降级为纯检索结果（不抛错）
 - 接口调用顺序：**先权限校验 → 再限流 → 再执行业务逻辑**
 
 ---
 
 ## 2. 技术栈（已落地，对齐 step1/01、step4/02）
 
-| 组件           | 选型                         | 说明                                                                                 |
-| :------------- | :--------------------------- | :----------------------------------------------------------------------------------- |
-| Web 框架       | FastAPI + Uvicorn            | 已有骨架                                                                             |
-| 业务数据库     | PostgreSQL 15                | kb_documents / kb_chunks / kb_search_logs / sensitive_words                          |
-| 向量数据库     | Milvus 2.4.13                | collection `kb_vectors`（BGE-M3 1024dim，IVF_FLAT nlist=1024，metric=IP，nprobe=16） |
-| 关键词检索     | Elasticsearch 8.11.3         | index `kb_bm25`（ik_max_word；规范名为 kb_chunks_bm25，差异见 §4.3）                 |
-| 缓存/限流/熔断 | Redis 7（DB 2，前缀 `rag:`） | 查询缓存 + 限流计数 + 熔断标识                                                       |
-| Embedding      | embedding-service:8100       | BGE-M3 1024dim，5s 超时/3 次退避/3 连失败熔断                                        |
-| Reranker       | rerank-service:8101          | bge-reranker-large，score∈[0,1]                                                      |
-| LLM            | **V1 不接入**                | 兜底直接返回文案，不送 LLM                                                           |
-| 追踪           | X-Trace-Id                   | common/trace/middleware.py，`trace_<ulid>`                                           |
-| 错误码         | A3001~A3006 + B0001~B0006    | 对齐 step6/01，不新增                                                                |
+| 组件           | 选型                                                                      | 说明                                                                                                                                    |
+| :------------- | :------------------------------------------------------------------------ | :-------------------------------------------------------------------------------------------------------------------------------------- |
+| Web 框架       | FastAPI + Uvicorn                                                         | 已有骨架                                                                                                                                |
+| 业务数据库     | PostgreSQL 15                                                             | kb_documents / kb_chunks / kb_search_logs / sensitive_words                                                                             |
+| 向量数据库     | Milvus 2.4.13                                                             | collection `kb_vectors`（BGE-M3 1024dim，IVF_FLAT nlist=1024，metric=IP，nprobe=16）                                                    |
+| 关键词检索     | Elasticsearch 8.11.3                                                      | index `kb_bm25`（ik_max_word；规范名为 kb_chunks_bm25，差异见 §4.3）                                                                    |
+| 缓存/限流/熔断 | Redis 7（DB 2，前缀 `rag:`）                                              | 查询缓存 + 限流计数 + 熔断标识                                                                                                          |
+| Embedding      | embedding-service:8100                                                    | BGE-M3 1024dim，5s 超时/3 次退避/3 连失败熔断                                                                                           |
+| Reranker       | rerank-service:8101                                                       | bge-reranker-large，score∈[0,1]                                                                                                         |
+| LLM            | **V5 开关门控接入**                                                       | `KB_LLM_ANSWER_ENABLED=false` 默认不接入；开启后经 LLM Provider 抽象（在线 DashScope / 本地 OpenAI 兼容）生成带溯源回答，失败降级纯检索 |
+| Gradio 前端    | Gradio（独立进程）                                                        | V5 浏览器入口：上传页 + 问答页，全链路可视化（问题/召回 chunk/图片表格预览/LLM 回答）                                                   |
+| 文档解析       | pdfplumber / python-docx / **openpyxl / python-pptx** / **PyMuPDF(fitz)** | V5 新增 .xlsx/.pptx 解析；PDF/DOCX/PPTX 内嵌图片抽取（含矢量图渲染位图）与内嵌表格结构化解析                                            |
+| 音频解码       | ASR Provider + **ffmpeg/pydub**                                           | V5 新增 AMR/WMA 电话录音格式解码，兼容既有 MP3/WAV/M4A                                                                                  |
+| 追踪           | X-Trace-Id                                                                | common/trace/middleware.py，`trace_<ulid>`                                                                                              |
+| 错误码         | A3001~A3006 + B0001~B0006                                                 | 对齐 step6/01，不新增                                                                                                                   |
 
 **健康检查依赖矩阵**（对齐 step1/01）：`GET /health` 依赖 PostgreSQL、Milvus、Redis、embedding-service 四者探活。
 
@@ -112,7 +116,10 @@ services/rag-service/
 │   │   ├── pdf_parser.py         # PDF：pdfplumber，页文本>4 行去首尾各 2 行（页眉页脚）
 │   │   ├── docx_parser.py        # DOCX：python-docx 段落提取，空段过滤
 │   │   ├── image_parser.py       # 图片→OCR（PaddleOCR sidecar ocr-service:8200）
-│   │   └── audio_parser.py       # 音视频→ASR（Provider 抽象：DashScope/Whisper；VAD 静音裁剪 + 60s 分片 + 开场白裁剪）
+│   │   ├── audio_parser.py       # 音视频→ASR（Provider 抽象：DashScope/Whisper；VAD 静音裁剪 + 60s 分片 + 开场白裁剪）
+│   │   ├── xlsx_parser.py        # Excel：全部 sheet，首行=表头，行切块（列名:值 序列化），sheet 名前缀（V5）
+│   │   ├── pptx_parser.py        # PPT：每页 标题+正文+演讲者备注（备注并入页文本），过滤页码/版式占位文字（V5）
+│   │   └── asset_extractor.py    # PDF/DOCX/PPTX 内嵌图片抽取（PNG/JPEG/位图/矢量图渲染）+ 内嵌表格结构解析（V5）
 │   ├── repositories/             # 数据访问层（Repository）
 │   │   ├── doc_repo.py           # kb_documents：create/get/list（分组聚合计数，无 N+1）/update_status/soft_delete/summary 读写
 │   │   └── chunk_repo.py         # kb_chunks：batch_create/delete_by_doc/get_by_ids
@@ -128,6 +135,7 @@ services/rag-service/
 │   │   ├── asr_providers/        # ASR Provider 抽象：base/factory/dashscope_provider/whisper_provider（并发加锁懒加载）
 │   │   ├── ocr_client.py         # OCR 客户端（ocr-service:8200）
 │   │   ├── summary_service.py    # V4 摘要：ES doc_summary → PG summary 写入顺序（ES→PG 防脏状态）
+│   │   ├── llm_service.py        # V5 LLM 回答：Provider 抽象（在线 DashScope / 本地 OpenAI 兼容）+ KB_LLM_ANSWER_ENABLED 门控 + 超时/熔断降级
 │   │   ├── sensitive_words_sync.py # 敏感词版本号 + Pub-Sub 热刷新（kb.sensitive_updated）
 │   │   ├── query_rewrite_service.py # V2 Query 改写（KB_QUERY_REWRITE_ENABLED）
 │   │   ├── routing_service.py    # V2 动态路由（KB_ROUTING_ENABLED）
@@ -153,6 +161,7 @@ services/rag-service/
 │   ├── V3：test_multimodal_parsers / test_asr_vad / test_asr_opening_trim / test_row_access_fail_closed
 │   └── V4/fix：test_summary_metadata / test_api_health / test_api_upload / test_api_deps / test_ingest_service /
 │               test_whisper_provider / test_asr_client / test_doc_repo / test_search_service / test_main
+├── gradio/                       # V5 Gradio 浏览器前端：上传页 + 问答页 + 图片/表格预览 + 异常友好提示
 └── Dockerfile                    # 镜像：公共基础镜像 + 全局 requirements 安装 + conf/ + 功能开关 ENV（V2 起）
 ```
 
@@ -172,6 +181,7 @@ services/rag-service/
   - ▶ **V1 实现**：15 字段（trace_id/query/category/五个计数/max_rerank_score/hit_doc_ids/hit_chunk_ids/latency_ms/degraded/is_fallback/时间/is_delete），其中 degraded/is_fallback 用 BOOLEAN
   - ▶ **差异与演进**：BOOLEAN 违反全局类型规范，建议 V2 迁移改 VARCHAR('0','1') + CHECK；表定义待 step4/01 收录避免双源漂移
 - **sensitive_words**（规范表）：word(VARCHAR100 UNIQUE)/category(threat/abuse/induce)/severity(high/medium/low)/status(active/disabled)/description —— V1 只读接口数据源为文件而非本表，见 §5.3
+- **kb_doc_assets**（V5 新增表）：id / doc_id(FK CASCADE) / asset_type(image|table) / page(INT) / storage_path / ocr_text / mime_type / created_at —— PDF/DOCX/PPTX 内嵌图片/表格抽取的元数据与存储定位：图片文件落本地磁盘/对象存储（供预览），OCR 文本以 chunk 走既有双索引（文搜图），检索命中 chunk 时按 doc_id+asset 关联返回预览元数据
 
 ### 4.2 Milvus `kb_vectors`
 
@@ -241,7 +251,7 @@ services/rag-service/
 
 **边界契约**：
 
-- 格式白名单：`.pdf/.docx/.md/.txt`；其他（含 .exe）→ A3001；空文件/损坏加密 PDF → A3001，status=failed
+- 格式白名单：`.pdf/.docx/.md/.txt`（V1）+ `.png/.jpg/.jpeg`（V2 OCR）+ `.mp3/.wav/.m4a`（V2 ASR）+ `.xlsx/.pptx`（V5 表格/演示）+ `.amr/.wma`（V5 电话录音）；其他（含 .exe）→ A3001；空文件/损坏加密 PDF → A3001，status=failed
 - 同名策略：每次上传生成新 doc_id，不覆盖
 - 删除不存在/已 archived 的 doc_id → B0004（非幂等：重复删除返回资源不存在）
 - reindex 对 failed/archived 文档 → B0004（状态机约束）
@@ -252,8 +262,8 @@ services/rag-service/
 | :--- | :----------- | :------------------ | :------ | :------- |
 | POST | `/kb/search` | ALL（跳过权限校验） | 200/min | 混合检索 |
 
-**请求体**：`{query: str, category?: str, top_k: int=5}`；**入参边界**：top_k∈[1,20]、category 四值、query 非空（非法→B0001，HTTP 422）
-**响应体**：`{results:[{doc_id,title,chunk_index,content,score,rerank_score}], degraded, query_original, message, trace_id}`
+**请求体**：`{query: str, category?: str, top_k: int=5, answer?: bool}`；**入参边界**：top_k∈[1,20]、category 四值、query 非空（非法→B0001，HTTP 422）；`answer`（V5）缺省 false，仅当 `KB_LLM_ANSWER_ENABLED=true` 且请求显式开启时生成 LLM 回答
+**响应体**：`{results:[{doc_id,title,chunk_index,content,score,rerank_score,summary?,assets?}], answer?, degraded, query_original, message, trace_id}`——`answer`（V5，LLM 开关开启时生成，含溯源引用）、`results[].assets`（V5，命中 chunk 关联的内嵌图片/表格预览元数据，缺省为空）
 
 **双闸门兜底（对齐 step1/01 全局阈值 + V1 实现）**：
 
@@ -296,6 +306,8 @@ services/rag-service/
 2. 禁止"PG=active 但向量库无索引"脏状态
 3. 仅 PG 失败 → 不执行 Milvus/ES 写入
 
+**V5 扩展**：新增 .xlsx/.pptx 解析走同一七步流水线（source 打标 excel/ppt）；PDF/DOCX/PPTX 内嵌图片经抽取 → OCR 文本以 chunk 入库（source=asset_image）+ 元数据落 kb_doc_assets（文搜图）；内嵌表格结构化解析（保留行列结构）后入库。**回滚契约与 V1 完全一致**（PG 成功但索引失败 → 回滚 + status=failed + A3003）。
+
 - ▶ **与 step6/01 §6.1 差异**：规范口径为"Embedding 失败 → 跳过向量化 + 告警"（降级入库）；V1 采用"失败置 failed + A3003"（防无向量脏数据）。V2 可选支持降级跳过向量化（仅文本索引）
 
 ### 6.2 增量删除
@@ -331,6 +343,19 @@ POST /search → 限流 → embed(query) → 并行召回(Milvus+ES, 各 top20, 
 
 降级总原则（对齐 step3/03）：检索为空/失败**禁止抛异常给终端**，调用方（call-service）走 FAQ 兜底。
 
+### 6.5 在线大模型回答（V5，开关门控）
+
+```
+POST /search (answer=true) → 检索（§6.3）→ 若 KB_LLM_ANSWER_ENABLED=true 且未触发兜底
+→ 组装上下文（top_k chunk 文本 + 溯源）→ LLM Provider.generate()
+→ 返回 answer（含引用 doc_id）→ 落 kb_search_logs（llm 调用标记）
+→ LLM 超时/熔断/不可用 → answer=null + degraded=true，仅返回检索结果
+```
+
+- 开关关闭或请求未开启 answer → 行为与 V4 完全一致，不产生任何 LLM 调用（零成本回退）
+- LLM 失败（超时/熔断/Provider 不可用）→ 降级为纯检索结果，禁止抛错给前端（对齐降级总原则）
+- §1.4 边界：仅当 `KB_LLM_ANSWER_ENABLED=true` 时 rag-service 才向外调用 LLM，属显式放开的受控例外；LLM Provider 抽象（在线/本地）为后续本地部署预留
+
 ---
 
 ## 7. 错误码（对齐 step6/01，禁止新增）
@@ -348,28 +373,36 @@ POST /search → 限流 → embed(query) → 并行召回(Milvus+ES, 各 top20, 
 | B0006  | 请求频率超限 | 429     | 超过接口阈值                           | —                 |
 
 - ▶ A3004（相关性不足）与 A3006（rerank 失败）不作为对外返回码：兜底走 code=0+message（对齐 step6-01"业务错误统一 200 封装"），rerank 失败走降级（degraded=true）
+- ▶ V5：LLM 回答失败**不引入新错误码**——超时/熔断/不可用一律降级为纯检索结果（answer=null + degraded=true），与 V4 行为一致（对齐"业务错误统一 200 封装"）
 - ▶ 系统异常（B0007/B0008/B0009）由全局 handler 统一处理，本服务不自行返回
 
 ---
 
 ## 8. 可配置项（对齐 step6/01 重试超时、step5/01 环境）
 
-| 键                             | 默认值     | 说明                                                     |
-| :----------------------------- | :--------- | :------------------------------------------------------- |
-| KB_CHUNK_SIZE                  | 500        | 分块大小                                                 |
-| KB_CHUNK_OVERLAP               | 50         | 分块重叠                                                 |
-| KB_CHUNK_MIN_LENGTH            | 10         | 最短分块长度                                             |
-| KB_RETRIEVAL_TOP_N             | 20         | 每路召回条数                                             |
-| KB_RRF_K                       | 60         | RRF 融合参数                                             |
-| KB_RERANK_THRESHOLD            | 0.35       | 兜底闸门 2 阈值（rerank 分）                             |
-| RAG_SCORE_THRESHOLD            | 0.6        | **全局检索阈值**（闸门 1，对齐 step1/01，V1 待接入流程） |
-| KB_CACHE_TTL                   | 3600       | 查询缓存 TTL（秒）                                       |
-| KB_CACHE_ENABLED               | true       | 查询缓存开关                                             |
-| KB_MAX_FILE_SIZE               | 20MB       | 上传大小上限                                             |
-| KB_PARSE_TIMEOUT               | 30s        | 解析超时                                                 |
+| 键                             | 默认值     | 说明                                                                                          |
+| :----------------------------- | :--------- | :-------------------------------------------------------------------------------------------- |
+| KB_CHUNK_SIZE                  | 500        | 分块大小                                                                                      |
+| KB_CHUNK_OVERLAP               | 50         | 分块重叠                                                                                      |
+| KB_CHUNK_MIN_LENGTH            | 10         | 最短分块长度                                                                                  |
+| KB_RETRIEVAL_TOP_N             | 20         | 每路召回条数                                                                                  |
+| KB_RRF_K                       | 60         | RRF 融合参数                                                                                  |
+| KB_RERANK_THRESHOLD            | 0.35       | 兜底闸门 2 阈值（rerank 分）                                                                  |
+| RAG_SCORE_THRESHOLD            | 0.6        | **全局检索阈值**（闸门 1，对齐 step1/01，V1 待接入流程）                                      |
+| KB_CACHE_TTL                   | 3600       | 查询缓存 TTL（秒）                                                                            |
+| KB_CACHE_ENABLED               | true       | 查询缓存开关                                                                                  |
+| KB_MAX_FILE_SIZE               | 20MB       | 上传大小上限                                                                                  |
+| KB_PARSE_TIMEOUT               | 30s        | 解析超时                                                                                      |
 | KB_HEALTH_DEGRADED_MODE        | false      | /health 降级模式：true 时依赖探活失败只告警，status=degraded 不判 unhealthy（不触发容器重启） |
-| KB_EMBED_TIMEOUT/RETRIES/BREAK | 5s / 3 / 3 | 对齐 step6/01 通用外部调用参数                           |
-| RAG_P95_TARGET                 | 3s         | 检索 P95 时延目标（对齐 step6/02 全局 3s）               |
+| KB_EMBED_TIMEOUT/RETRIES/BREAK | 5s / 3 / 3 | 对齐 step6/01 通用外部调用参数                                                                |
+| RAG_P95_TARGET                 | 3s         | 检索 P95 时延目标（对齐 step6/02 全局 3s）                                                    |
+| KB_LLM_ANSWER_ENABLED          | false      | V5：检索接入在线大模型回答开关（关闭=V4 行为，零 LLM 调用）                                   |
+| LLM_PROVIDER                   | dashscope  | V5：LLM Provider（dashscope 在线 / local 本地 OpenAI 兼容）                                   |
+| LLM_TIMEOUT                    | 5s         | V5：LLM 回答超时（超时→降级纯检索，不抛错）                                                   |
+| KB_IMAGE_EXTRACT_ENABLED       | false      | V5：PDF/DOCX/PPTX 内嵌图片抽取开关（关闭=仅文本，V4 行为）                                    |
+| KB_TABLE_EXTRACT_ENABLED       | false      | V5：内嵌表格结构化解析开关（关闭=表格文本化，V4 行为）                                        |
+| KB_EXCEL_SHEET_ALL             | true       | V5：Excel 全部 sheet 入库（false=仅首个 sheet）                                               |
+| KB_EXCEL_HEADER_ROW            | 1          | V5：Excel 表头行号（约定首行为表头，行切块列名前缀）                                          |
 
 ---
 
@@ -408,20 +441,20 @@ POST /search → 限流 → embed(query) → 并行召回(Milvus+ES, 各 top20, 
 
 ---
 
-## 10. V1 → V2 演进路线
+## 10. 版本演进路线（V1 → V5）
 
 ### 10.1 版本能力边界总览
 
 ```
-V1（本期·已实现）                 V2（多模态+智能检索+规范整改）      V3（可观测+治理）          V4
-┌───────────────────┐    ┌────────────────────────┐   ┌──────────────────┐   ┌──────────────┐
-│ 4格式解析入库       │    │ 图片OCR / 音频ASR        │   │ LangSmith 追踪    │   │ 对齐 DD-03    │
-│ 混合检索+RRF+Rerank │──▶│ Query改写 / 动态路由     │──▶│ 评估模块           │──▶│ V2.0 复杂版    │
-│ 兜底/溯源/日志      │    │ 业务加权 / 行级权限      │   │ 版本管理+灰度      │   │ 全部能力       │
-│ 缓存/限流/权限      │    │ 多轮对话               │   │ Prompt 动态配置    │   │              │
-│ 降级矩阵（5重）     │    │ 敏感词DB表+热刷新        │   │ 敏感词 CRUD       │   │              │
-│ 敏感词只读(文件)    │    │ 双闸门0.6接入/同doc去重  │   │                  │   │              │
-└───────────────────┘    └────────────────────────┘   └──────────────────┘   └──────────────┘
+V1（已实现基础）             V2（多模态+智能检索）       V3（多模态深化）         V4（摘要+收口）          V5（本期规划）
+┌───────────────────┐    ┌────────────────────────┐   ┌──────────────────┐   ┌──────────────┐   ┌────────────────────┐
+│ 4格式解析入库       │    │ 图片OCR / 音频ASR        │   │ VAD静音裁剪       │   │ 文档级摘要      │   │ Excel/PPT 新格式    │
+│ 混合检索+RRF+Rerank │──▶│ Query改写 / 动态路由     │──▶│ 开场白规则裁剪     │──▶│ ES摘要加权检索   │──▶│ 内嵌图片/表格抽取   │
+│ 兜底/溯源/日志      │    │ 业务加权 / 行级权限      │   │ 解析失败降级       │   │ 遗留修复(D7/D8) │   │ AMR/WMA 音频扩展    │
+│ 缓存/限流/权限      │    │ 多轮对话               │   │ Embed/ES降级      │   │               │   │ Gradio 前端入口     │
+│ 降级矩阵（5重）     │    │ 敏感词DB表+热刷新        │   │ 摘要元数据        │   │               │   │ 在线大模型(开关)    │
+│ 敏感词只读(文件)    │    │ 双闸门0.6接入/同doc去重  │   │                  │   │               │   │                    │
+└───────────────────┘    └────────────────────────┘   └──────────────────┘   └──────────────┘   └────────────────────┘
 ```
 
 ### 10.2 迭代明细
@@ -451,28 +484,66 @@ V1（本期·已实现）                 V2（多模态+智能检索+规范整�
 - **风险点**：PaddleOCR 体积大/CPU 慢 → 独立服务 + 异步入库 + 队列削峰；LLM 改写不确定性 → 置信度降级；索引重建窗口 → 发布窗口内全量 reindex（接受短时不可用）；多轮无状态 → Redis session + 超时清理
 - **不做**（推 V3）：LangSmith、评估模块、版本灰度
 
-#### V3 — 可观测与治理
+#### V3 — 多模态深化（已实现）
 
-- **核心目标**：RAG 效果可衡量、可回滚、可治理
-- **新增能力**：LangSmith 追踪（与 PG 日志并存）；评估模块（召回率/命中率/幻觉率，离线评测集）；文档版本管理+灰度（kb_document_versions 新表，不改原表）；Prompt 动态配置；敏感词 CRUD
-- **技术取舍**：LangSmith 与自建日志并存（内部审计 + 效果分析）；版本管理新增表避免 V1 数据迁移
-- **风险点**：评估集人工标注成本高；灰度需检索路由版本分流；LangSmith 外部依赖
+- **核心目标**：强化多模态解析链路的质量与容错
+- **新增能力**：VAD 静音裁剪（RMS 阈值）+ ≤60s 分片逐片转写拼接；通话开场白规则裁剪（`KB_ASR_OPENING_TRIM_ENABLED`，纯规则零 LLM）；OCR/ASR 解析失败降级（`KB_OCR_ASR_DEGRADED_KEEP_TEXT`，占位入库 degraded=true）；ASR Provider 切换（DashScope/Whisper）
+- **技术取舍**：开场白裁剪用纯规则（不引入 LLM，保证确定性）；分片转写拼接复用既有 ASR 熔断（`rag:asr:degraded` TTL 60s）
+- **风险点**：规则裁剪误伤正文 → 开关门控 + 关闭保留原样
 
-#### V4 — 对齐复杂版
+#### V4 — 摘要元数据 + 遗留收口（已实现）
 
-- **核心目标**：仅当业务确需，补齐 DD-03 复杂版剩余能力（知识图谱等），按需裁剪
+- **核心目标**：提升多模态检索命中率 + 关闭历史债务
+- **新增能力**：文档级摘要元数据（上传携带/PUT 补全；PG 权威 + ES `doc_summary` 检索副本 + `KB_SUMMARY_ENABLED` 加权检索；响应 `summary` 字段契约）；ASR 开场白规则版落地（D8）；main.py 敏感词 seed 重构（D7）；历史文档漂移修正（W4/W5/W6）
+- **技术取舍**：摘要写入顺序 ES→PG 防脏状态；摘要仅作检索加权，不替换 chunk 内容
+- **风险点**：摘要来源分散 → 以 PG 为单一权威 + ES 副本可重建
+
+#### V5 — 多模态混合检索增强 + 浏览器前端 + 在线大模型（本期规划）
+
+- **核心目标**：补齐真实数据源缺口（Excel/PPT/AMR/WMA）、提升多模态检索质量（内嵌图片文搜图、内嵌表格结构化）、提供 Gradio 浏览器前端入口、检索经开关接入在线大模型回答
+- **新增能力与验收标准**：
+
+1. **Gradio 浏览器前端入口**
+   - 页面：上传页（全部支持格式）+ 问答页（问题 → 召回 chunk → LLM 回答全链路展示）
+   - 召回片段含图片/表格预览与溯源元数据（doc_id/来源/页码）
+   - 异常友好提示（后端宕机/LLM 熔断不白屏、不 500）
+   - 【验收：浏览器打开无报错；上传成功返回 doc_id、失败页面提示；问答完整展示全链路结果】
+2. **文档格式新增 Excel、PPT，兼容 PDF/Word**
+   - .xlsx：全部 sheet 入库、首行=表头、行切块（每行序列化"列名1:值1, 列名2:值2,..."）、sheet 名作前缀冗余进每行
+   - .pptx：每页抽取 标题+正文+演讲者备注（备注并入页文本），过滤页码/版式占位文字（防误删正文）
+   - 老格式解析与 V4 完全一致，无回归
+   - 【验收：Excel/PPT 正常入库可检索；存量格式全量回归通过】
+3. **PDF/PPT/Word 内嵌图片与表格解析**
+   - 内嵌 PNG/JPEG、位图、矢量图（渲染为位图）抽取 → OCR 文本索引入库 → 支持文搜图；记录文档、页码元数据
+   - 内嵌表格完整解析，保留行列结构（不打散表格）→ 问答可命中任意单元格
+   - 表格/图片在检索结果中可预览（对应 §1.3 Gradio 展示）
+   - 【验收：抽取图片可被文本查询命中并返回；问答命中表格任意单元格；结果含文档/页码元数据与预览】
+4. **音频格式扩展：AMR、WMA（兼容 MP3/WAV/M4A）**
+   - AMR/WMA 电话录音正常转写、分块、入库、检索（VAD/分片策略对齐既有 ASR 抽象）
+   - 损坏音频返回业务错误（A3001 或降级占位），不卡死 worker
+   - 【验收：AMR/MP3/WMA/WAV 四种格式可转写入库检索；损坏音频业务错误返回且 worker 不卡死】
+5. **RAG 检索接入在线大模型（开关门控）**
+   - `KB_LLM_ANSWER_ENABLED=false` 默认关闭；开启时检索后生成带溯源的 LLM 回答，关闭时行为与 V4 完全一致
+   - LLM Provider 抽象（在线 DashScope / 本地 OpenAI 兼容），为后续本地部署预留
+   - LLM 超时/熔断/不可用 → 降级为纯检索结果（degraded=true），不抛错
+   - 【验收：开关开启返回 answer+召回片段；关闭与 V4 行为一致；停 LLM 服务检索仍正常】
+
+- **技术取舍**：图片入库先走「OCR 文本索引 + 图片文件存储 + kb_doc_assets 元数据」实现文搜图（图片向量/CLIP 推后）；Gradio 独立进程，复用现有 /kb/\* API；AMR/WMA 解码走 ffmpeg（服务端依赖），解码失败按既有解析失败路径处理
+- **风险点**：内嵌图片/表格抽取的格式多样性（矢量图渲染、合并单元格）→ 开关门控 + 解析失败按既有 A3001 路径；LLM 回答不确定性 → 开关默认关 + 超时/熔断降级；Gradio 仅内部使用不接公网
+- **不做**（推后续）：图片向量检索（CLIP）、扫描件 PDF 整本 OCR、知识图谱、治理能力（LangSmith/评估/版本灰度/敏感词 CRUD）
 
 ### 10.3 版本迁移兼容策略
 
-| 维度         | 策略                                                                                                                                                                                            |
-| :----------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **数据库**   | 只加列/加表，不改既有列语义；status 扩展走 Alembic 增量迁移；kb_search_logs BOOLEAN→VARCHAR 提供默认值，不强制回填；kb_document_versions 新增表                                                 |
-| **接口**     | 对外契约（路径/响应包/错误码）向后兼容；新能力新增端点或可选字段（缺省=V1 行为）；分页字段 page/size→page_size 兼容期双字段支持；top_k 上界定稿为 20（不随版本放宽）；category 四值边界永不收紧 |
-| **索引**     | Milvus/ES 只增字段不删字段；version/source 增列在发布窗口一次性重建，且校验 kb_documents.status 与索引一致                                                                                      |
-| **缓存**     | 缓存 key 引入版本段（`rag:cache:query:v2:{md5}`），旧 key 自然过期不迁移                                                                                                                        |
-| **检索行为** | Query 改写/动态路由/业务加权/双闸门 0.6 均以开关引入（KB_QUERY_REWRITE_ENABLED 等），关闭时行为与 V1 完全一致，灰度期可一键回退                                                                 |
-| **数据**     | 业务加权/行级权限元数据由 data-platform 推送增量回填，不要求存量一次补齐                                                                                                                        |
-| **敏感词**   | V2 切换 DB 表数据源时，以 seed 迁移同步 .dict 文件内容 → sensitive_words 表，保持 50 词基线不漂移                                                                                               |
+| 维度            | 策略                                                                                                                                                                                                                                                                          |
+| :-------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **数据库**      | 只加列/加表，不改既有列语义；status 扩展走 Alembic 增量迁移；kb_search_logs BOOLEAN→VARCHAR 提供默认值，不强制回填；kb_document_versions 新增表                                                                                                                               |
+| **接口**        | 对外契约（路径/响应包/错误码）向后兼容；新能力新增端点或可选字段（缺省=V1 行为）；分页字段 page/size→page_size 兼容期双字段支持；top_k 上界定稿为 20（不随版本放宽）；category 四值边界永不收紧                                                                               |
+| **索引**        | Milvus/ES 只增字段不删字段；version/source 增列在发布窗口一次性重建，且校验 kb_documents.status 与索引一致                                                                                                                                                                    |
+| **缓存**        | 缓存 key 引入版本段（`rag:cache:query:v2:{md5}`），旧 key 自然过期不迁移                                                                                                                                                                                                      |
+| **检索行为**    | Query 改写/动态路由/业务加权/双闸门 0.6 均以开关引入（KB_QUERY_REWRITE_ENABLED 等），关闭时行为与 V1 完全一致，灰度期可一键回退                                                                                                                                               |
+| **数据**        | 业务加权/行级权限元数据由 data-platform 推送增量回填，不要求存量一次补齐                                                                                                                                                                                                      |
+| **敏感词**      | V2 切换 DB 表数据源时，以 seed 迁移同步 .dict 文件内容 → sensitive_words 表，保持 50 词基线不漂移                                                                                                                                                                             |
+| **V5 新增能力** | Excel/PPT 解析、内嵌图片/表格抽取、AMR/WMA 音频、LLM 回答全部以开关引入（KB_LLM_ANSWER_ENABLED 等），关闭时行为与 V4 完全一致；图片存储 + kb_doc_assets 为新增表/目录，不影响存量；检索响应新增 answer/assets 可选字段，缺省=V4 行为；Gradio 复用既有 /kb/\* API 不动后端契约 |
 
 ---
 
@@ -480,7 +551,7 @@ V1（本期·已实现）                 V2（多模态+智能检索+规范整�
 
 ### 11.1 任务卡说明
 
-优先级：P0=链路阻断/验收必过；P1=生产必需非阻断；P2=增强项。依赖：前置任务。交付物：独立可验收产出。版本归属：V1 必做（已全部完成 ✅）/ V2 / V3。
+优先级：P0=链路阻断/验收必过；P1=生产必需非阻断；P2=增强项。依赖：前置任务。交付物：独立可验收产出。版本归属：V1 必做（已全部完成 ✅）/ V2 / V3 / V4 / V5。
 
 ### 11.2 V1 任务清单（已完成基线 + 2 项整改待办）
 
@@ -536,6 +607,23 @@ V1（本期·已实现）                 V2（多模态+智能检索+规范整�
 | V3-T3 | 文档版本管理 + 灰度（kb_document_versions 新表） | P1     | V3-T2 |
 | V3-T4 | Prompt 模板动态配置                              | P2     | —     |
 | V3-T5 | 敏感词 CRUD（只读升级全量管理）                  | P2     | V2-T9 |
+
+### 11.5 V5 任务清单（迭代规划）
+
+| #      | 任务                                                                                                                              | 优先级 | 依赖     | 交付物                                                |
+| :----- | :-------------------------------------------------------------------------------------------------------------------------------- | :----- | :------- | :---------------------------------------------------- |
+| V5-T1  | 依赖引入：openpyxl / python-pptx / PyMuPDF(fitz) / ffmpeg+pydub / gradio + 格式白名单扩展（.xlsx/.pptx/.amr/.wma）                | P0     | —        | requirements + parsers 白名单（SUPPORTED_EXTENSIONS） |
+| V5-T2  | Excel 解析：全部 sheet、首行=表头、行切块（列名:值 序列化）、sheet 名前缀、空行/全空值跳过                                        | P0     | V5-T1    | xlsx_parser.py + 测试                                 |
+| V5-T3  | PPT 解析：标题+正文+演讲者备注（备注并入页文本）、页码/版式占位过滤                                                               | P0     | V5-T1    | pptx_parser.py + 测试                                 |
+| V5-T4  | 内嵌图片抽取：PDF/DOCX/PPTX（PNG/JPEG/位图/矢量图渲染）+ OCR 文本 chunk 入库（source=asset_image）+ kb_doc_assets 元数据 + 文搜图 | P0     | V5-T2/T3 | asset_extractor.py + 迁移 + 测试                      |
+| V5-T5  | 内嵌表格结构化解析：保留行列结构不打散，问答命中任意单元格，检索结果可预览                                                        | P1     | V5-T2/T3 | 表格解析器 + 测试                                     |
+| V5-T6  | 音频扩展：AMR/WMA 解码（ffmpeg）+ ASR 接入（VAD/分片策略对齐），损坏音频业务错误不卡 worker                                       | P1     | V5-T1    | 音频解码 + 测试                                       |
+| V5-T7  | Gradio 前端：上传页 + 问答页（问题/召回 chunk/图片表格预览/LLM 回答全链路）+ 异常友好提示                                         | P0     | V5-T2~T6 | gradio/app.py + 冒烟                                  |
+| V5-T8  | LLM Provider 抽象（在线 DashScope / 本地 OpenAI 兼容）+ KB_LLM_ANSWER_ENABLED 门控 + 超时/熔断降级                                | P1     | —        | llm_service.py + 测试                                 |
+| V5-T9  | 检索响应扩展：answer（带溯源）+ results[].assets 可选字段，缺省=V4 行为                                                           | P1     | V5-T8    | api/search.py + models/search.py + 测试               |
+| V5-T10 | 全量回归（存量不回退）+ 冒烟脚本扩展 + V5 验收                                                                                    | P0     | V5-T1~T9 | smoke_rag_v5.sh + 验收                                |
+
+**V5 验收标准**：Excel/PPT 正常入库可检索且存量格式零回归；内嵌图片文搜图命中、内嵌表格命中任意单元格；AMR/MP3/WMA/WAV 四种音频可转写入库、损坏音频业务错误不卡 worker；Gradio 页面全链路展示 + 异常友好提示；`KB_LLM_ANSWER_ENABLED` 开关开启返回 answer、关闭与 V4 行为一致、停 LLM 服务检索仍正常；全量测试 + 冒烟 PASS。
 
 ---
 

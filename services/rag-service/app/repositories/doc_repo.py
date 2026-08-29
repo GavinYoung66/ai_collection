@@ -1,10 +1,10 @@
 """kb_documents 数据访问层。"""
 import uuid
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.orm import KBChunk, KBDocument
+from app.models.orm import KBChunk, KBDocument, KbDocAsset
 
 
 class DocRepo:
@@ -180,3 +180,15 @@ class DocRepo:
             .where(KBDocument.id == doc_id, KBDocument.is_delete == "0")
             .values(summary=summary)
         )
+
+    async def delete_assets_by_doc(self, doc_id: uuid.UUID) -> tuple[int, uuid.UUID]:
+        """V5：级联清理 kb_doc_assets 资产记录（物理删除），返回 (删除行数, doc_id)。
+
+        供删除文档 / reindex 路径调用；doc_id 用于调用方清理本地资产目录
+        KB_ASSETS_DIR/{doc_id}/。删除失败由调用方按既有"删除失败重试与补偿"契约
+        处理（重试 2 次 + 告警标记，同 _delete_with_retry 模式）。
+        """
+        result = await self.db.execute(
+            delete(KbDocAsset).where(KbDocAsset.doc_id == doc_id)
+        )
+        return result.rowcount or 0, doc_id

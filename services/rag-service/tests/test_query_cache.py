@@ -231,6 +231,8 @@ def _route_args(embed):
         "weighting_svc": None,
         "row_access_svc": None,
         "session_svc": None,
+        # V5 服务（开关全关，传 None 不触发调用；缺失时 FastAPI Depends 对象不可调用）
+        "llm_svc": None,
     }
 
 

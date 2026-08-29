@@ -4,7 +4,7 @@ WORKDIR /app
 # gcc + libc6-dev 用于编译 pyahocorasick（arm64 无预编译 wheel，且 slim 镜像缺 stdlib.h）
 RUN sed -i 's|deb.debian.org/debian-security|mirrors.aliyun.com/debian-security|g; s|deb.debian.org/debian|mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
-    && apt-get install -y --no-install-recommends curl gcc libc6-dev \
+    && apt-get install -y --no-install-recommends curl gcc libc6-dev ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.lock ./
 # pip 走阿里云镜像（与上方 apt 镜像一致；官方 PyPI 在本机网络下过慢/易抖动，
@@ -39,6 +39,19 @@ ENV KB_SUMMARY_ENABLED=false \
     KB_SUMMARY_ES_BOOST=1.0 \
     KB_SUMMARY_MAX_LEN=200 \
     KB_ASR_OPENING_TRIM_ENABLED=false
+# V5 功能开关与配置默认（=V4 行为）；LLM_MODEL / LLM_TIMEOUT 复用既有配置不改默认值（query_rewrite 依赖）
+ENV KB_LLM_ANSWER_ENABLED=false \
+    LLM_PROVIDER=dashscope \
+    LLM_MAX_CONCURRENCY=4 \
+    LLM_LOCAL_BASE_URL= \
+    LLM_LOCAL_API_KEY= \
+    KB_IMAGE_EXTRACT_ENABLED=false \
+    KB_TABLE_EXTRACT_ENABLED=false \
+    KB_EXCEL_SHEET_ALL=true \
+    KB_EXCEL_HEADER_ROW=1 \
+    KB_ASR_AMR_WMA_ENABLED=false \
+    KB_ASSETS_DIR=data/assets \
+    KB_ASSETS_MAX_SIZE=1024
 # 文档入库限制（对齐 DD-03 §8）
 ENV KB_MAX_FILE_SIZE=20971520 \
     KB_PARSE_TIMEOUT=30 \

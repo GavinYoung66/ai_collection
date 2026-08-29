@@ -28,6 +28,10 @@ echo "========================================"
 run_smoke "Infrastructure" "smoke_infra.sh"
 run_smoke "Data Platform" "smoke_data_platform.sh"
 run_smoke "RAG Service" "smoke_rag_service.sh"
+# RAG Service V5（存在则并入全量冒烟；V5 组件不可用时脚本内部 WARN 放行）
+if [ -f "$SCRIPT_DIR/smoke_rag_v5.sh" ]; then
+    run_smoke "RAG Service V5" "smoke_rag_v5.sh"
+fi
 run_smoke "QC Service" "smoke_qc_service.sh"
 run_smoke "Call Service" "smoke_call_service.sh"
 run_smoke "Case Service" "smoke_case_service.sh"

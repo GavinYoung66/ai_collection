@@ -98,6 +98,27 @@ class Settings(BaseSettings):
     KB_SUMMARY_MAX_LEN: int = 200          # 摘要长度上限（字符），超限返回 B0001
     KB_ASR_OPENING_TRIM_ENABLED: bool = False  # ASR 通话开场白规则裁剪（转写文本开头，规则见 conf/asr_opening_rules.yaml）
 
+    # === RAG V5 功能开关与配置（默认全 false = V4 行为；LLM_MODEL / LLM_TIMEOUT 复用既有配置，不改默认值） ===
+    KB_LLM_ANSWER_ENABLED: bool = False       # 检索接入在线大模型回答开关（关闭=V4 行为，零 LLM 调用）
+    LLM_PROVIDER: str = "dashscope"           # LLM Provider：dashscope / deepseek / local
+    DEEPSEEK_API_KEY: str = ""                # DeepSeek API Key（亦兼容 .env 中 DeepSeek_API_KEY）
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
+    # LangSmith 链路追踪（可选，与 PG kb_search_logs 并存）
+    LANGSMITH_ENABLED: bool = False
+    LANGSMITH_API_KEY: str = ""
+    LANGSMITH_PROJECT: str = "rag-service"
+    LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
+    LLM_MAX_CONCURRENCY: int = 4              # LLM 回答并发上限（信号量，超限排队等待，不降级）
+    LLM_LOCAL_BASE_URL: str = ""              # local Provider 基址（未配置按不可用降级）
+    LLM_LOCAL_API_KEY: str = ""               # local Provider 密钥
+    KB_IMAGE_EXTRACT_ENABLED: bool = False    # PDF/DOCX/PPTX 内嵌图片抽取 + OCR 文搜图
+    KB_TABLE_EXTRACT_ENABLED: bool = False    # 内嵌表格结构化解析（保留行列结构，命中任意单元格）
+    KB_EXCEL_SHEET_ALL: bool = True           # Excel 全部 sheet 入库（false=仅首个 sheet）
+    KB_EXCEL_HEADER_ROW: int = 1              # Excel 表头行号（首行=表头，行切块列名前缀）
+    KB_ASR_AMR_WMA_ENABLED: bool = False      # AMR/WMA ffmpeg 解码接入开关（关闭=白名单外 A3001，V4 行为）
+    KB_ASSETS_DIR: str = "data/assets"        # 内嵌资产本地存储目录（Docker 挂载 volume，与 Gradio 共享预览源）
+    KB_ASSETS_MAX_SIZE: int = 1024            # 图片渲染最大边长（px，等比缩放）
+
     # === RAG V2 OCR/ASR/LLM 配置 ===
     OCR_ENDPOINT: str = "http://ocr-service:8200/ocr"
     OCR_TIMEOUT: int = 30
@@ -135,6 +156,14 @@ class Settings(BaseSettings):
     @property
     def es_url(self) -> str:
         return f"http://{self.ES_HOST}:{self.ES_PORT}"
+
+    @property
+    def deepseek_api_key_resolved(self) -> str:
+        """DeepSeek Key：优先 DEEPSEEK_API_KEY，兼容 pydantic 未映射的 DeepSeek_API_KEY env。"""
+        if self.DEEPSEEK_API_KEY:
+            return self.DEEPSEEK_API_KEY
+        import os
+        return os.environ.get("DeepSeek_API_KEY", "")
 
 
 settings = Settings()

@@ -70,18 +70,21 @@ class TestAudioParser:
 class TestParserFactoryWhitelist:
     def test_unsupported_format_a3001(self):
         """格式白名单外后缀 → ParserFactory.is_supported 返回 False。"""
-        assert ParserFactory.is_supported("doc.xlsx") is False
+        assert ParserFactory.is_supported("doc.exe") is False
         assert ParserFactory.is_supported("file.gif") is False
         assert ParserFactory.is_supported("noext") is False
 
     def test_supported_formats(self):
-        """支持的格式白名单校验。"""
-        for ext in [".txt", ".md", ".pdf", ".docx", ".png", ".jpg", ".jpeg", ".mp3", ".wav", ".m4a"]:
+        """支持的格式白名单校验（V5 增 .xlsx/.pptx/.amr/.wma）。"""
+        for ext in [
+            ".txt", ".md", ".pdf", ".docx", ".png", ".jpg", ".jpeg",
+            ".mp3", ".wav", ".m4a", ".xlsx", ".pptx", ".amr", ".wma",
+        ]:
             assert ParserFactory.is_supported(f"file{ext}") is True
 
     def test_unsupported_get_parser_raises(self, tmp_path):
         """get_parser 对不支持后缀抛 ValueError。"""
-        f = tmp_path / "file.xlsx"
+        f = tmp_path / "file.exe"
         f.write_bytes(b"x")
         with pytest.raises(ValueError, match="Unsupported"):
             ParserFactory.get_parser(f)

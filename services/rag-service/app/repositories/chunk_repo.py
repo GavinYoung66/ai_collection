@@ -1,7 +1,7 @@
 """kb_chunks 数据访问层。"""
 import uuid
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.orm import KBChunk
@@ -10,6 +10,20 @@ from app.models.orm import KBChunk
 class ChunkRepo:
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    async def next_chunk_index(self, doc_id: uuid.UUID) -> int:
+        """返回该文档下一个可用 chunk_index（max+1；无记录时为 0）。
+
+        资产 chunk 追加入库时使用，避免与正文 chunk_index=0 唯一约束冲突。
+        """
+        result = await self.db.execute(
+            select(func.max(KBChunk.chunk_index)).where(
+                KBChunk.doc_id == doc_id,
+                KBChunk.is_delete == "0",
+            )
+        )
+        current = result.scalar_one_or_none()
+        return 0 if current is None else int(current) + 1
 
     async def batch_create(self, chunks: list[dict]) -> int:
         if not chunks:

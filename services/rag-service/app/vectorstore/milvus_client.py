@@ -159,8 +159,10 @@ class MilvusClient:
                     "score": hit.score,
                 }
                 if self._use_v2:
-                    entry["version"] = hit.entity.get("version", 1)
-                    entry["source"] = hit.entity.get("source", "v1_legacy")
+                    _ver = hit.entity.get("version")
+                    entry["version"] = _ver if _ver is not None else 1
+                    _src = hit.entity.get("source")
+                    entry["source"] = _src if _src else "v1_legacy"
                 hits.append(entry)
             return hits
 

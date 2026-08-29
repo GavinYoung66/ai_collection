@@ -11,7 +11,7 @@ from app.parsers import ParserFactory
 from app.repositories.chunk_repo import ChunkRepo
 from app.repositories.doc_repo import DocRepo
 from app.services import query_cache
-from app.services.ingest_service import IngestService
+from app.services.ingest_service import IngestService, _delete_assets_with_retry
 from app.services.chunk_service import ChunkService
 from app.services.rate_limit import rate_limiter
 from app.services.require_role import require_roles
@@ -232,6 +232,9 @@ async def reindex_document(
         await es.delete_by_doc(doc_id)
     except Exception as e:
         logger.warning("es_delete_failed", doc_id=doc_id, error=str(e))
+
+    # V5: reindex 前级联清理旧资产（kb_doc_assets 记录 + 本地资产目录，重试 2 次 + 告警，不阻断）
+    await _delete_assets_with_retry(doc_id, doc_repo)
 
     await doc_repo.update_status(uid, "processing")
 

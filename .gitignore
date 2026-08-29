@@ -66,6 +66,7 @@ pnpm-debug.log*
 .vscode/
 .idea/
 .trae/
+.cursor/
 *.swp
 *.swo
 *.swn

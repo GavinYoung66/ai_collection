@@ -1,0 +1,6 @@
+# Gradio 浏览器前端独立依赖（仅 gradio 容器使用，不进全局 requirements.lock）
+# 原因：gradio 要求 fastapi>=0.115.2 / python-multipart>=0.0.18 / pillow<13，
+# 与全局锁 fastapi==0.104.1 / python-multipart==0.0.6 / pdfplumber 的 Pillow>=12.2.0 硬冲突；
+# 独立锁定可让 pip 在 gradio 约束内自由解析，对 V4 七个服务零影响。
+gradio==6.10.0
+httpx==0.25.2              # 后端 /kb/* 调用（与全局锁版本一致；gradio 依赖树亦含 httpx）

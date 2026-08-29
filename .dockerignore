@@ -17,6 +17,8 @@ docs/
 .cursor/
 .trae/
 deploy/
+!deploy/gradio/
+!deploy/gradio/requirements.txt
 scripts/smoke/
 scripts/seed/
 Makefile

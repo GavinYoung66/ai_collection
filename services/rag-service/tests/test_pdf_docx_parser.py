@@ -87,3 +87,22 @@ class TestPDFParser:
         assert "Body line three" in text
         assert "Header1" not in text
         assert "Footer2" not in text
+
+    def test_extract_text_preserves_section_page(self, tmp_path):
+        """含 5.2 小节号的章节页不裁切页眉页脚行，避免流程图标题丢失。"""
+        file_path = tmp_path / "flow.pdf"
+        lines = [
+            "Header1",
+            "Header2",
+            "5.2 Flowchart section title",
+            "Step one enter script",
+            "Step two sensitive word check",
+            "Footer1",
+            "Footer2",
+        ]
+        _make_pdf(file_path, [lines])
+        parser = PDFParser()
+        text = asyncio.run(parser.extract_text(file_path))
+        assert "5.2" in text
+        assert "Flowchart section title" in text
+        assert "Step one enter script" in text

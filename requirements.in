@@ -28,7 +28,9 @@ aiohttp==3.9.1              # ES 异步客户端（AsyncElasticsearch 默认 aio
 # unstructured==0.11.6       # 依赖回溯严重
 pdfplumber==0.11.10
 python-docx==1.1.0
-# openpyxl==3.1.2
+openpyxl==3.1.2             # Excel 解析（V5）
+python-pptx==0.6.23         # PPT 解析（V5）
+PyMuPDF==1.24.9             # PDF 内嵌图片抽取（V5，自带二进制）
 # paddleocr==2.7.0.3
 
 # === 工具 ===
@@ -42,6 +44,10 @@ ulid-py==1.1.0              # Session ID 生成（ULID）
 
 # === RAG V3 增量依赖 ===
 faster-whisper==1.0.3       # Whisper 本地转写（ASR_PROVIDER=whisper，懒加载 tiny 模型）
+
+# === RAG V5 增量依赖 ===
+langsmith==0.1.147          # 可选链路追踪（LANGSMITH_ENABLED=true 时生效）
+pydub==0.25.1               # ffmpeg 封装（AMR/WMA 解码）
 
 # === 调度、熔断与限流 ===
 apscheduler==3.10.4

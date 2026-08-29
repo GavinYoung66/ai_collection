@@ -105,6 +105,27 @@ services:
       retries: 3
       start_period: 60s
 
+  # ===== V5 新增：Gradio 浏览器前端（独立进程，仅内部网络，见 services/rag-service/README.md §E）=====
+  gradio:
+    build:
+      context: .
+      dockerfile: deploy/gradio/Dockerfile
+    ports:
+      - "7860:7860"
+    environment:
+      - RAG_API_BASE=http://rag-service:8000/api/v1
+      # 内部访问 token（生产由运维提供 ADMIN/SUPERVISOR 角色的 JWT，前端不硬编码）
+      - RAG_API_TOKEN=${RAG_API_TOKEN:?must set internal token}
+      - GRADIO_SERVER_NAME=0.0.0.0
+      # 与 rag-service 共享资产数据卷（图片/表格预览源），gradio app.py 读取同一 env 名
+      - KB_ASSETS_DIR=/app/data/assets
+    volumes:
+      - rag_assets:/app/data/assets
+    depends_on:
+      rag-service:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   pg_data:
   redis_data:
@@ -112,3 +133,5 @@ volumes:
   minio_data:
   milvus_data:
   es_data:
+  # V5 新增：内嵌资产本地存储（图片/表格预览源），rag-service 与 gradio 共享
+  rag_assets:

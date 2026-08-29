@@ -9,16 +9,21 @@ V2 增量（开关门控，默认全 false = V1 行为）：
 - 多轮会话（KB_MULTITURN_ENABLED）
 """
 import asyncio
+import re
 import time
+import unicodedata
 import uuid
 
 import structlog
 
+from app.repositories.asset_repo import AssetRepo
 from app.repositories.doc_repo import DocRepo
+from app.services.llm_service import LLMService
 from app.services.log_service import LogService
 from app.services.query_rewrite_service import RewriteService
 from app.services.routing_service import RoutingService
 from app.services.row_access_service import RowAccessService
+from app.services.search_trace import SearchTraceCollector
 from app.services.session_service import SessionService
 from app.services.weighting_service import WeightingService
 from app.vectorstore.embed_client import EmbedClient
@@ -35,6 +40,36 @@ logger = structlog.get_logger()
 _FALLBACK_MESSAGE = (
     "知识库暂无该业务的明确指引，请查阅相关制度文件或联系合规部。"
 )
+
+# 业务实体 ID（如 CS20260020）——结构化查询精确加权
+_ENTITY_ID_RE = re.compile(r"CS\d{6,}", re.IGNORECASE)
+
+
+def _extract_entity_ids(query: str) -> list[str]:
+    return list(dict.fromkeys(_ENTITY_ID_RE.findall(query or "")))
+
+
+def _apply_entity_boost(items: list[dict], entity_ids: list[str]) -> list[dict]:
+    """含实体 ID 的查询：命中 ID 的 chunk 强制置顶。"""
+    if not entity_ids or not items:
+        return items
+    boosted = []
+    for item in items:
+        content = item.get("content") or ""
+        if any(eid in content for eid in entity_ids):
+            item = {**item, "entity_match": True}
+            item["rerank_score"] = max(float(item.get("rerank_score", 0.0)), 0.95)
+        else:
+            item = {**item, "entity_match": False}
+        boosted.append(item)
+    return sorted(
+        boosted,
+        key=lambda x: (
+            x.get("entity_match", False),
+            x.get("rerank_score", 0.0) * x.get("weight", 1.0),
+        ),
+        reverse=True,
+    )
 
 
 def _safe_uuid(value: str) -> uuid.UUID | None:
@@ -60,6 +95,9 @@ class SearchService:
         weighting_service: WeightingService | None = None,
         row_access_service: RowAccessService | None = None,
         session_service: SessionService | None = None,
+        # V5 可选依赖（开关关闭时可为 None，零开销）
+        asset_repo: AssetRepo | None = None,
+        llm_service: LLMService | None = None,
     ):
         self.milvus = milvus_client
         self.es = es_client
@@ -73,6 +111,9 @@ class SearchService:
         self._weighting_svc = weighting_service
         self._row_access_svc = row_access_service
         self._session_svc = session_service
+        # V5 服务
+        self._asset_repo = asset_repo
+        self._llm_svc = llm_service
 
     async def hybrid_search(
         self,
@@ -83,10 +124,14 @@ class SearchService:
         session_id: str | None = None,
         rewrite: bool = False,
         jwt_payload: dict | None = None,
+        # V5 参数
+        answer: bool = False,
     ) -> dict:
         start = time.time()
         trace_id = get_trace_id()
         degraded = False
+        trace = SearchTraceCollector(trace_id=trace_id, query=query)
+        entity_ids = _extract_entity_ids(query)
 
         # V2 日志辅助字段
         query_original = query
@@ -141,33 +186,32 @@ class SearchService:
                 logger.warning("routing_unexpected_error", error=str(e))
 
         # --- Embedding（使用 effective_query） ---
-        # 修复：Embedding 失败（熔断/超时/宕机）→ 降级 ES-only（仅 BM25 召回），
-        # 对齐 hybrid-search spec 闸门 1 约定：dense_hits 空、max_dense_score=None 时
-        # 闸门 1 短路跳过，交由闸门 2（rerank 0.35）兜底；双路均不可用才抛 A3005。
         query_vector: list[float] | None = None
-        try:
-            query_vector = await self.embed.embed(effective_query)
-        except Exception as e:
-            degraded = True
-            logger.warning("embed_failed_es_only_degraded", error=str(e))
+        with trace.step("embed", category=category, entity_ids=entity_ids or None):
+            try:
+                query_vector = await self.embed.embed(effective_query)
+            except Exception as e:
+                degraded = True
+                logger.warning("embed_failed_es_only_degraded", error=str(e))
 
         top_n = settings.KB_RETRIEVAL_TOP_N
 
         # --- V2 Step 3: 双路召回（Embedding 失败时仅 ES BM25） ---
-        tasks = []
-        if query_vector is not None:
-            tasks.append(self.milvus.search(query_vector, top_n=top_n, category=category))
-        # V4: 摘要增强开关开启时对 doc_summary 字段 BM25 加权（权重 KB_SUMMARY_ES_BOOST）；
-        # 开关关闭时 summary_boost=None → 不传该 kwarg，ES 调用签名与 V3 完全一致（向后兼容既有调用方）
         es_kwargs = {}
         if settings.KB_SUMMARY_ENABLED:
             es_kwargs["summary_boost"] = settings.KB_SUMMARY_ES_BOOST
-        tasks.append(self.es.search(
-            query=effective_query, top_n=top_n, category=category,
-            **es_kwargs,
-        ))
+        if entity_ids:
+            es_kwargs["entity_ids"] = entity_ids
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        with trace.step("recall", top_n=top_n, category=category):
+            tasks = []
+            if query_vector is not None:
+                tasks.append(self.milvus.search(query_vector, top_n=top_n, category=category))
+            tasks.append(self.es.search(
+                query=effective_query, top_n=top_n, category=category,
+                **es_kwargs,
+            ))
+            results = await asyncio.gather(*tasks, return_exceptions=True)
         dense_hits: list[dict] = []
         sparse_hits: list[dict] = []
 
@@ -188,7 +232,43 @@ class SearchService:
             degraded = True
 
         if not dense_hits and not sparse_hits:
-            raise BizException(ErrorCode.A3005, "Milvus 和 ES 均不可用，检索失败")
+            # 分类过滤过严时双路均为空（服务正常但无命中），自动放宽为全库再试一次
+            if category and milvus_ok and es_ok and query_vector is not None:
+                logger.info(
+                    "category_filter_empty_retry_all",
+                    category=category,
+                    trace_id=trace_id,
+                )
+                degraded = True
+                with trace.step("recall_retry_all", reason="category_empty"):
+                    tasks = [
+                        self.milvus.search(query_vector, top_n=top_n, category=None),
+                        self.es.search(
+                            query=effective_query,
+                            top_n=top_n,
+                            category=None,
+                            **es_kwargs,
+                        ),
+                    ]
+                    retry_results = await asyncio.gather(*tasks, return_exceptions=True)
+                if not isinstance(retry_results[0], Exception):
+                    dense_hits = retry_results[0]
+                if not isinstance(retry_results[1], Exception):
+                    sparse_hits = retry_results[1]
+
+            milvus_failed = query_vector is not None and not milvus_ok
+            es_failed = not es_ok
+            if not dense_hits and not sparse_hits:
+                if milvus_failed and es_failed:
+                    msg = "Milvus 和 ES 均不可用，检索失败"
+                elif category:
+                    msg = (
+                        f"分类「{category}」下无匹配结果；"
+                        "请换「全部」或确认文档入库时的 category 标签"
+                    )
+                else:
+                    msg = "知识库暂无匹配内容，检索无结果"
+                raise BizException(ErrorCode.A3005, msg)
 
         if milvus_ok and not es_ok:
             degraded = True
@@ -196,15 +276,14 @@ class SearchService:
             degraded = True
 
         # --- V2 Step 4: RRF 融合（带路由权重调整 rank） ---
-        fused = self._rrf_fuse(
-            dense_hits,
-            sparse_hits,
-            k=settings.KB_RRF_K,
-            routing_weights=routing_weights,
-        )
-
-        # --- V2 Step 5: 同 doc_id 去重（强制无开关，始终生效） ---
-        fused = self._dedup_by_doc_id(fused)
+        with trace.step("rrf_fuse", dense=len(dense_hits), sparse=len(sparse_hits)):
+            fused = self._rrf_fuse(
+                dense_hits,
+                sparse_hits,
+                k=settings.KB_RRF_K,
+                routing_weights=routing_weights,
+            )
+            fused = self._dedup_by_doc_id(fused)
 
         # 闸门 1（对齐 step1/01、step4/02 §四.1）：召回相似度不足 → 判定无匹配，走兜底
         # 说明：RRF 融合分是排名分（量纲约 1/(k+rank)），不能直接与 0.6 比较，
@@ -216,6 +295,8 @@ class SearchService:
         if max_dense_score is not None and max_dense_score < settings.RAG_SCORE_THRESHOLD:
             latency_ms = int((time.time() - start) * 1000)
             return await self._build_fallback(
+                trace=trace,
+                answer=answer,
                 trace_id=trace_id,
                 query=query,
                 category=category,
@@ -289,6 +370,12 @@ class SearchService:
                 "chunk_index": chunk_index_map.get(f["chunk_id"], 0),
             })
 
+        # --- V2 Step 5.5: 内容级去重（V5 修复：不同 doc_id 相同内容只保留一条） ---
+        # 在既有 doc_id 去重之后、Rerank 之前执行，仅作用于输出去重阶段，不改变 RRF score 计算；
+        # 避免库内多个不同 doc_id 的文档内容一字不差时，检索结果重复返回 5–6 条同内容。
+        fused_with_content = self._dedup_by_content(fused_with_content)
+        doc_ids = list({f["doc_id"] for f in fused_with_content if f.get("doc_id")})
+
         # --- V2 Step 6: 业务加权（开关，RRF→去重之后、Rerank 之前） ---
         if (
             settings.KB_WEIGHTING_ENABLED
@@ -319,45 +406,45 @@ class SearchService:
         try:
             rerank_pre_degraded = await self.rerank.is_degraded()
         except Exception as e:
-            # V3 容错：熔断探测失败（Redis 不可用）按"未熔断"处理，避免连锁 500
             logger.warning("rerank_is_degraded_failed", error=str(e))
         if candidates and rerank_pre_degraded:
-            # 熔断断开期：跳过 rerank 用 RRF score 排序，标记降级
             degraded = True
             logger.warning("rerank_circuit_open_skip")
-        try:
-            if candidates and not rerank_pre_degraded:
-                rerank_results = await self.rerank.rerank(effective_query, candidates)
-                score_map = {r["chunk_id"]: r["rerank_score"] for r in rerank_results}
-                for item in fused_with_content:
-                    item["rerank_score"] = score_map.get(item["chunk_id"], 0.0)
-                # D2 修复：业务加权在 rerank 主路径生效——排序分 = rerank_score × weight；
-                # D-1 修复：max_rerank_score 取全局最大原始 rerank_score（不乘权重），
-                # 使闸门 2 的 0.35 兜底阈值语义不被加权排序污染（加权项居首≠原始分最高）。
-                reranked = sorted(
-                    fused_with_content,
-                    key=lambda x: x.get("rerank_score", 0) * x.get("weight", 1.0),
-                    reverse=True,
-                )
-                max_rerank_score = (
-                    max(
-                        item.get("rerank_score", 0.0)
-                        for item in fused_with_content
+        with trace.step("rerank", candidates=len(candidates), degraded=rerank_pre_degraded):
+            try:
+                if candidates and not rerank_pre_degraded:
+                    rerank_results = await self.rerank.rerank(effective_query, candidates)
+                    score_map = {r["chunk_id"]: r["rerank_score"] for r in rerank_results}
+                    for item in fused_with_content:
+                        item["rerank_score"] = score_map.get(item["chunk_id"], 0.0)
+                    reranked = sorted(
+                        fused_with_content,
+                        key=lambda x: x.get("rerank_score", 0) * x.get("weight", 1.0),
+                        reverse=True,
                     )
-                    if fused_with_content
-                    else None
+                    max_rerank_score = (
+                        max(
+                            item.get("rerank_score", 0.0)
+                            for item in fused_with_content
+                        )
+                        if fused_with_content
+                        else None
+                    )
+                    rerank_ok = True
+            except Exception as e:
+                logger.warning("rerank_failed_degraded", error=str(e))
+                degraded = True
+                for item in fused_with_content:
+                    item["rerank_score"] = item.get("score", 0.0)
+                reranked = sorted(
+                    fused_with_content, key=lambda x: x.get("rerank_score", 0), reverse=True
                 )
-                rerank_ok = True
-        except Exception as e:
-            # Rerank 宕机：按 DD-03 降级矩阵用 RRF score 排序返回结果（degraded），
-            # RRF 分数与 rerank 分数不同量纲，不参与 0.35 兜底阈值判断
-            logger.warning("rerank_failed_degraded", error=str(e))
-            degraded = True
-            for item in fused_with_content:
-                item["rerank_score"] = item.get("score", 0.0)
-            reranked = sorted(
-                fused_with_content, key=lambda x: x.get("rerank_score", 0), reverse=True
-            )
+
+        # 实体 ID 精确匹配后置加权（结构化查询如 CS20260020）
+        if entity_ids:
+            reranked = _apply_entity_boost(reranked, entity_ids)
+            if reranked:
+                max_rerank_score = max(float(x.get("rerank_score", 0.0)) for x in reranked)
 
         # --- V2 Step 7: 行级权限过滤（开关，Rerank 后） ---
         if settings.KB_ROW_LEVEL_ENABLED and self._row_access_svc is not None:
@@ -397,6 +484,8 @@ class SearchService:
         if rerank_ok and max_rerank_score is not None and max_rerank_score < threshold:
             latency_ms = int((time.time() - start) * 1000)
             return await self._build_fallback(
+                trace=trace,
+                answer=answer,
                 trace_id=trace_id,
                 query=query,
                 category=category,
@@ -414,6 +503,16 @@ class SearchService:
                 intent_tag=intent_tag,
                 session_id=session_id,
             )
+
+        # 结构化实体查询（如 CS20260020）：有精确命中时优先只返回命中 chunk，减少制度类噪声
+        if entity_ids:
+            entity_matched = [
+                r for r in reranked
+                if r.get("entity_match")
+                or any(eid in (r.get("content") or "") for eid in entity_ids)
+            ]
+            if entity_matched:
+                reranked = entity_matched
 
         top_results = reranked[:top_k]
 
@@ -445,6 +544,82 @@ class SearchService:
         hit_doc_ids = [r["doc_id"] for r in results_list]
         hit_chunk_ids = [f["chunk_id"] for f in top_results]
 
+        # --- V5: 检索响应扩展（answer / results[].assets，纯增量，缺省与 V4 一致） ---
+        # LLM 回答结果（answer / citations / degraded / llm_called），缺省零调用（V4 行为）。
+        llm_result = {
+            "answer": None,
+            "citations": [],
+            "degraded": False,
+            "llm_called": False,
+            "llm_skip_reason": "no_results" if not results_list else None,
+        }
+        if results_list:
+            # 1) 资产预览元数据：资产抽取开关开启且 asset_repo 可用时按 doc_id 关联填充；
+            #    否则保持空数组（开关关闭零 DB 开销，响应与 V4 完全一致）。
+            if (
+                settings.KB_IMAGE_EXTRACT_ENABLED or settings.KB_TABLE_EXTRACT_ENABLED
+            ) and self._asset_repo is not None:
+                try:
+                    assets_map = await self._get_assets_map(hit_doc_ids)
+                except Exception as e:
+                    logger.warning("assets_fill_failed", error=str(e), trace_id=trace_id)
+                    assets_map = {}
+                for item in results_list:
+                    item["assets"] = assets_map.get(item["doc_id"], [])
+            else:
+                for item in results_list:
+                    item["assets"] = []
+
+            # 2) LLM 回答：llm_service 可用时按门控调用（开关/answer/非兜底三闸门
+            #    由 LLMService 内部判定）；失败一律降级 answer=null 且 degraded=true，不抛错。
+            #    context 项含 content/doc_id（chunk 级无页码数据源，页码仅资产级，不注入）。
+            if self._llm_svc is not None:
+                context = [
+                    {
+                        "content": it.get("content", ""),
+                        "doc_id": it.get("doc_id", ""),
+                        "category": it.get("category"),
+                        "source": (
+                            meta_map.get(it.get("doc_id", ""), {}).get("source")
+                            or it.get("source")
+                        ),
+                    }
+                    for it in top_results
+                ]
+                try:
+                    with trace.step(
+                        "llm_answer",
+                        answer_requested=answer,
+                        enabled=settings.KB_LLM_ANSWER_ENABLED,
+                    ):
+                        llm_result = await self._llm_svc.generate_answer(
+                            query, context, answer_requested=answer
+                        )
+                    if llm_result["degraded"]:
+                        degraded = True
+                except Exception as e:
+                    logger.warning(
+                        "llm_unexpected_error", error=str(e), trace_id=trace_id
+                    )
+                    llm_result = {
+                        "answer": None,
+                        "citations": [],
+                        "degraded": True,
+                        "llm_called": True,
+                        "llm_skip_reason": f"unexpected:{type(e).__name__}",
+                    }
+                    degraded = True
+
+        trace_dict = trace.finish(
+            outputs={
+                "dense_hits": len(dense_hits),
+                "sparse_hits": len(sparse_hits),
+                "results": len(results_list),
+                "max_rerank_score": max_rerank_score,
+                "llm_called": llm_result.get("llm_called"),
+            }
+        )
+
         await self.logger.log(
             trace_id=trace_id, query=query, category=category,
             dense_hit_count=len(dense_hits), sparse_hit_count=len(sparse_hits),
@@ -457,6 +632,9 @@ class SearchService:
             query_rewritten=query_rewritten,
             intent_tag=intent_tag,
             session_id=session_id,
+            # V5: LLM 回答调用/降级标记（缺省 '0'，存量行为不变）
+            llm_called="1" if llm_result["llm_called"] else "0",
+            llm_degraded="1" if llm_result["degraded"] else "0",
         )
 
         # V2: 多轮会话记录（开关）
@@ -478,11 +656,56 @@ class SearchService:
             "query_original": query,
             "message": None,
             "trace_id": trace_id,
+            "answer": llm_result["answer"],
+            "citations": llm_result["citations"],
+            "trace": trace_dict,
+            "llm_meta": {
+                "requested": answer,
+                "enabled": settings.KB_LLM_ANSWER_ENABLED,
+                "provider": settings.LLM_PROVIDER,
+                "called": llm_result.get("llm_called", False),
+                "skip_reason": llm_result.get("llm_skip_reason"),
+            },
         }
+
+    async def _get_assets_map(self, doc_ids: list[str]) -> dict[str, list[dict]]:
+        """按 doc_id 批量关联内嵌资产预览元数据（asset_type/page/storage_path/mime_type）。
+
+        - 非法 UUID 跳过（召回脏数据不阻断，对齐 _safe_uuid 既有语义）；
+        - 无资产的 doc_id 不写入映射，调用方缺省取空数组。
+        """
+        assets_map: dict[str, list[dict]] = {}
+        for doc_id in doc_ids:
+            uid = _safe_uuid(doc_id)
+            if uid is None:
+                continue
+            try:
+                assets = await self._asset_repo.get_by_doc(uid)
+            except Exception as e:
+                logger.warning(
+                    "assets_get_by_doc_failed",
+                    doc_id=doc_id,
+                    error=str(e),
+                    trace_id=get_trace_id(),
+                )
+                continue
+            if assets:
+                assets_map[doc_id] = [
+                    {
+                        "asset_type": a.asset_type,
+                        "page": a.page,
+                        "storage_path": a.storage_path,
+                        "mime_type": a.mime_type,
+                    }
+                    for a in assets
+                ]
+        return assets_map
 
     async def _build_fallback(
         self,
         *,
+        trace: SearchTraceCollector | None = None,
+        answer: bool = False,
         trace_id: str,
         query: str,
         category: str | None,
@@ -521,12 +744,33 @@ class SearchService:
             intent_tag=intent_tag,
             session_id=session_id,
         )
+        trace_dict = (
+            trace.finish(
+                outputs={"fallback": True, "max_rerank_score": max_rerank_score}
+            )
+            if trace is not None
+            else {
+                "trace_id": trace_id,
+                "total_ms": latency_ms,
+                "steps": [{"name": "fallback", "latency_ms": latency_ms}],
+            }
+        )
         return {
             "results": [],
             "degraded": degraded,
             "query_original": query,
             "message": _FALLBACK_MESSAGE,
             "trace_id": trace_id,
+            "answer": None,
+            "citations": [],
+            "trace": trace_dict,
+            "llm_meta": {
+                "requested": answer,
+                "enabled": settings.KB_LLM_ANSWER_ENABLED,
+                "provider": settings.LLM_PROVIDER,
+                "called": False,
+                "skip_reason": "search_fallback",
+            },
         }
 
     def _rrf_fuse(
@@ -600,3 +844,42 @@ class SearchService:
             ):
                 by_doc[doc_id] = item
         return list(by_doc.values())
+
+    @staticmethod
+    def _normalize_content(text: str) -> str:
+        """用于内容级去重的规范化：去空白、统一大小写与全半角标点。
+
+        - NFKC 归一化：把全角字符/标点映射为半角，统一全半角差异；
+        - 去除所有空白（含中英文空格、制表符、换行）；
+        - casefold：统一大小写（含特殊语言字符）。
+
+        返回空串表示该内容无可提取文本，不参与内容去重。
+        """
+        if not text:
+            return ""
+        normalized = unicodedata.normalize("NFKC", text)
+        normalized = re.sub(r"\s+", "", normalized)
+        return normalized.casefold()
+
+    def _dedup_by_content(self, items: list[dict]) -> list[dict]:
+        """内容级去重（V5 修复）：不同 doc_id 但 content 相同/仅格式差异只保留一条。
+
+        在既有 doc_id 去重之后、Rerank 之前执行，仅作用于输出去重阶段，不改变 RRF score 计算。
+        对 content 做规范化后比较，相同或仅格式差异（空格/大小写/全半角标点）只保留排序靠前
+        （score 更高）的一条；无可提取内容的项原样保留。
+        """
+        seen: dict[str, dict] = {}
+        for item in items:
+            key = self._normalize_content(item.get("content", "") or "")
+            if not key:
+                continue
+            current = seen.get(key)
+            if current is None or item.get("score", 0.0) > current.get("score", 0.0):
+                seen[key] = item
+
+        deduped: list[dict] = []
+        for item in items:
+            key = self._normalize_content(item.get("content", "") or "")
+            if not key or seen.get(key) is item:
+                deduped.append(item)
+        return deduped

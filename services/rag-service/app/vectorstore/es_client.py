@@ -137,23 +137,32 @@ class ESClient:
     async def search(
         self, query: str, top_n: int = 20, category: str | None = None,
         summary_boost: float | None = None,
+        entity_ids: list[str] | None = None,
     ) -> list[dict]:
         """BM25 检索。
 
         V4 增量：summary_boost 不为 None 且 > 0 时，对 content（must，保持 V3 召回语义）
         + doc_summary（should，加权上浮）双字段检索；缺省 None = 开关关闭，query 与 V3 完全一致。
+        entity_ids：业务实体 ID（如 CS20260020）精确短语加权，提升结构化查询精度。
         """
         client = await self._get_client()
         filter_clause = []
         if category:
             filter_clause.append({"term": {"category": category}})
 
+        should_extra: list[dict] = []
+        if entity_ids:
+            for eid in entity_ids:
+                should_extra.append(
+                    {"match_phrase": {"content": {"query": eid, "boost": 15.0}}}
+                )
+
         if summary_boost is not None and summary_boost > 0:
             # V4 摘要加权：正文 must 保持召回不变量，摘要 should 加权上浮（命中摘要者排序提升）
             must = [{"match": {"content": {"query": query, "boost": 1.0}}}]
             should = [
                 {"match": {"doc_summary": {"query": query, "boost": summary_boost}}}
-            ]
+            ] + should_extra
             query_clause = {
                 "bool": {
                     "must": must,
@@ -162,10 +171,12 @@ class ESClient:
                 }
             }
         else:
-            # 开关关闭（默认）→ 与 V3 完全一致
+            # 开关关闭（默认）→ 与 V3 完全一致；entity_ids 仍可通过 should 加权
+            must = [{"match": {"content": query}}]
             query_clause = {
                 "bool": {
-                    "must": [{"match": {"content": query}}],
+                    "must": must,
+                    **({"should": should_extra} if should_extra else {}),
                     **({"filter": filter_clause} if filter_clause else {}),
                 }
             }

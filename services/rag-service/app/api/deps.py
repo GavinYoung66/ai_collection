@@ -17,10 +17,12 @@ from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
 from common.trace.middleware import get_trace_id
 from app.services.asr_client import ASRClient
+from app.services.llm_service import LLMService
 from app.services.ocr_client import OCRClient
 from app.services.query_rewrite_service import RewriteService
 from app.services.routing_service import RoutingService
 from app.services.row_access_service import RowAccessService
+from app.services.sensitive_words_sync import SensitiveWordsSyncService
 from app.services.session_service import SessionService
 from app.services.weighting_service import WeightingService
 from app.vectorstore.embed_client import EmbedClient
@@ -43,6 +45,8 @@ _routing_service: RoutingService | None = None
 _weighting_service: WeightingService | None = None
 _row_access_service: RowAccessService | None = None
 _session_service: SessionService | None = None
+# V5 服务单例
+_llm_service: LLMService | None = None
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -161,6 +165,33 @@ async def get_session_service() -> SessionService:
         redis = await get_redis()
         _session_service = SessionService(redis=redis)
     return _session_service
+
+
+async def get_llm_service() -> LLMService:
+    """V5：LLM 回答服务单例（开关门控 + 熔断 + 信号量 + 合规红线）。
+
+    - word_provider：敏感词词库（红线关键词来源）——DB 优先 + 文件兜底
+      （SensitiveWordsSyncService 既有逻辑），每次短 session 读取，
+      LLMService 内部以 TTL 300s 缓存词集，不阻塞请求主链路；
+      读取失败按空词集处理（LLM 回答仍可用，仅红线校验不生效并告警）。
+    """
+    global _llm_service
+    if _llm_service is None:
+        redis = await get_redis()
+
+        async def _fetch_redline_words() -> set[str]:
+            try:
+                async with async_session_factory() as db:
+                    text = await SensitiveWordsSyncService(
+                        db, redis
+                    ).get_current_dict()
+                return {w.strip() for w in text.splitlines() if w.strip()}
+            except Exception as e:
+                logger.warning("llm_redline_words_fetch_failed", error=str(e))
+                return set()
+
+        _llm_service = LLMService(redis=redis, word_provider=_fetch_redline_words)
+    return _llm_service
 
 
 def get_jwt_payload(request: Request) -> dict | None:

@@ -10,10 +10,14 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.parsers import ParserFactory
+from app.parsers.asset_extractor import assets_enabled
 from app.parsers.audio_parser import AudioParser
 from app.parsers.image_parser import ImageParser
+from app.parsers.pptx_parser import PptxParser
+from app.parsers.xlsx_parser import XlsxParser
 from app.repositories.chunk_repo import ChunkRepo
 from app.repositories.doc_repo import DocRepo
+from app.services.asset_service import AssetService, remove_assets_dir
 from app.services.chunk_service import ChunkService
 from app.services.summary_service import SummaryService
 from app.vectorstore.embed_client import EmbedClient
@@ -38,14 +42,72 @@ def _detect_source(parser) -> str:
     """根据 Parser 实例类型推断文档来源标签。
 
     - ImageParser → "ocr"
-    - AudioParser → "asr"
+    - AudioParser → "asr"（含 V5 新增 AMR/WMA，与 MP3/WAV/M4A 一致）
+    - XlsxParser → "excel"
+    - PptxParser → "ppt"
     - 其他（Text/MD/PDF/Docx）→ "v1_legacy"
     """
     if isinstance(parser, ImageParser):
         return "ocr"
     if isinstance(parser, AudioParser):
         return "asr"
+    if isinstance(parser, XlsxParser):
+        return "excel"
+    if isinstance(parser, PptxParser):
+        return "ppt"
     return "v1_legacy"
+
+
+def _resolve_ingest_category(category: str, filename: str, raw_text: str) -> str:
+    """P0：合规类 PDF 若误选 other，自动提升为 regulation 便于检索与 LLM 合规策略。"""
+    if category != "other":
+        return category
+    name = filename.lower()
+    if not name.endswith(".pdf"):
+        return category
+    sample = raw_text[:4000]
+    markers = ("合规", "催收", "流程图", "话术", "监管", "自律", "风控")
+    hits = sum(1 for m in markers if m in sample)
+    if hits >= 2:
+        logger.info(
+            "ingest_category_promoted",
+            filename=filename,
+            from_category="other",
+            to_category="regulation",
+            marker_hits=hits,
+        )
+        return "regulation"
+    return category
+
+
+async def _delete_assets_with_retry(doc_id: str, doc_repo: DocRepo) -> None:
+    """V5：删除文档/reindex 时级联清理 kb_doc_assets 记录 + 本地资产目录。
+
+    失败按既有"删除失败重试与补偿"契约：重试 2 次（1s/3s）+ 告警标记，不阻断主流程
+    （PG 软删除与业务返回不受影响，后续 reindex 兜底）。
+    """
+    delays = (1.0, 3.0)
+    for attempt in range(3):
+        try:
+            uid = uuid.UUID(doc_id)
+            await doc_repo.delete_assets_by_doc(uid)
+            remove_assets_dir(uid)
+            return
+        except Exception as e:
+            if attempt < len(delays):
+                logger.warning(
+                    "asset_delete_retry_failed",
+                    doc_id=doc_id,
+                    attempt=attempt + 1,
+                    error=str(e),
+                )
+                await asyncio.sleep(delays[attempt])
+            else:
+                logger.error(
+                    "asset_delete_give_up",
+                    doc_id=doc_id,
+                    error=str(e),
+                )
 
 
 class IngestService:
@@ -58,6 +120,7 @@ class IngestService:
         embed_client: EmbedClient,
         chunk_service: ChunkService | None = None,
         redis: Redis | None = None,
+        asset_service: AssetService | None = None,
     ):
         self.doc_repo = doc_repo
         self.chunk_repo = chunk_repo
@@ -67,6 +130,23 @@ class IngestService:
         self.chunk_service = chunk_service or ChunkService()
         # V5 增量：补索引持久化（可选，缺省 None = 不持久化，存量行为不变）
         self._redis = redis
+        # V5 增量：资产落库编排（可选，缺省 None = 惰性构建，不影响存量构造调用方）
+        self.asset_service = asset_service
+
+    def _get_asset_service(self) -> AssetService:
+        if self.asset_service is None:
+            from app.repositories.asset_repo import AssetRepo
+
+            self.asset_service = AssetService(
+                doc_repo=self.doc_repo,
+                chunk_repo=self.chunk_repo,
+                asset_repo=AssetRepo(self.doc_repo.db),
+                milvus_client=self.milvus,
+                es_client=self.es,
+                embed_client=self.embed,
+                redis=self._redis,
+            )
+        return self.asset_service
 
     async def ingest(
         self, file_path: Path, filename: str, category: str,
@@ -76,6 +156,7 @@ class IngestService:
         if not ParserFactory.is_supported(filename):
             raise BizException(ErrorCode.A3001, f"不支持的文件格式: {Path(filename).suffix}")
 
+        assets: list = []
         try:
             parser = ParserFactory.get_parser(file_path)
             parse_start = time.time()
@@ -86,9 +167,16 @@ class IngestService:
                 parse_start_ts=parse_start,
             )
             try:
-                raw_text = await asyncio.wait_for(
-                    parser.extract_text(file_path), timeout=settings.KB_PARSE_TIMEOUT
-                )
+                if assets_enabled():
+                    # V5：内嵌图片/表格抽取开关开启 → 解析正文 + 资产（单次解析）
+                    raw_text, assets = await asyncio.wait_for(
+                        parser.extract_with_assets(file_path), timeout=settings.KB_PARSE_TIMEOUT
+                    )
+                else:
+                    # 开关全关 → V4 原路径，零额外开销
+                    raw_text = await asyncio.wait_for(
+                        parser.extract_text(file_path), timeout=settings.KB_PARSE_TIMEOUT
+                    )
             except asyncio.TimeoutError as te:
                 logger.info(
                     "ingest_parse_timeout",
@@ -131,6 +219,7 @@ class IngestService:
 
         # V2: 根据 Parser 类型记录文档来源标签（§6.6 / §15.1）
         source = _detect_source(parser)
+        category = _resolve_ingest_category(category, filename, raw_text or "")
 
         cleaned_text = self.chunk_service.clean(raw_text)
 
@@ -247,6 +336,18 @@ class IngestService:
         ]
         await self.chunk_repo.batch_create(chunk_entities)
 
+        # V5: 正文双索引完成后落内嵌资产（kb_doc_assets + 本地文件 + OCR/表格 chunk）；
+        # 开关关闭时 assets 恒为空（短路零开销）；资产失败仅 warning 不回滚正文
+        if assets:
+            try:
+                await self._get_asset_service().process_assets(doc_id, assets, category)
+            except Exception as e:
+                try:
+                    await self.doc_repo.db.rollback()
+                except Exception:
+                    pass
+                logger.warning("assets_process_failed", doc_id=str(doc_id), error=str(e))
+
         await self.doc_repo.update_status(doc_id, "active")
 
         # V4: 正文入库成功后，若携带摘要则按 ES → PG 顺序写入（design.md D3）；
@@ -345,6 +446,8 @@ class IngestService:
         await self.chunk_repo.delete_by_doc(uid)
         await self._delete_with_retry(self.milvus.delete_by_doc, doc_id, "milvus")
         await self._delete_with_retry(self.es.delete_by_doc, doc_id, "es")
+        # V5: 级联清理 kb_doc_assets 记录 + 本地资产目录（重试 2 次 + 告警，不阻断）
+        await _delete_assets_with_retry(doc_id, self.doc_repo)
         await self.doc_repo.soft_delete(uid)
 
     async def reindex(
@@ -364,6 +467,8 @@ class IngestService:
             await self.es.delete_by_doc(doc_id)
         except Exception as e:
             logger.warning("es_delete_old_failed", doc_id=doc_id, error=str(e))
+        # V5: reindex 前级联清理旧资产（记录 + 本地目录，重试 2 次 + 告警，不阻断）
+        await _delete_assets_with_retry(doc_id, self.doc_repo)
 
         await self.doc_repo.update_status(uid, "processing")
 

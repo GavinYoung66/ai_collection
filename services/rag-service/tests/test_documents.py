@@ -116,3 +116,28 @@ class TestChunkServiceSplit:
         text = "短\n\n短\n\n短"
         chunks = chunk_service.split(text, "regulation")
         assert len(chunks) == 0
+
+    def test_normalize_fullwidth_and_compat_chars(self, chunk_service):
+        # NFKC：全角字母/兼容字符统一，便于 ES/BM25 命中 CS 编号等
+        result = chunk_service.clean("ＣＳ20260020　录\u2f42案")
+        assert "CS20260020" in result
+        assert "文案" in result
+
+    def test_split_by_section_number(self, chunk_service):
+        text = (
+            "5.1 前端合规催收完整业务流程图\n"
+            "流程逻辑说明：用户账单逾期到结清。\n\n"
+            "5.2 前端话术风控拦截流程图\n"
+            "人工/系统录入催收文案\n"
+            "前端敏感词合规检测\n"
+            "含违规/恐吓/虚假词汇 纯合规话术\n\n"
+            "5.3 高频违规场景图文说明\n"
+            "配图1：时段违规场景说明内容足够长以满足最小切块长度限制。"
+        )
+        chunks = chunk_service.split(text, "regulation")
+        assert len(chunks) >= 3
+        sec_52 = [c for c in chunks if "5.2" in c["content"] or "敏感词合规检测" in c["content"]]
+        sec_53 = [c for c in chunks if "5.3" in c["content"]]
+        assert sec_52
+        assert sec_53
+        assert not any("5.2" in c["content"] and "5.3" in c["content"] for c in chunks)
