@@ -7,6 +7,7 @@ from pathlib import Path
 import structlog
 
 from app.models.orm import KbDocAsset
+from app.parsers.asset_extractor import image_extract_enabled, table_extract_enabled
 from common.config.settings import settings
 
 logger = structlog.get_logger()
@@ -55,25 +56,48 @@ class AssetService:
             self._ocr_client = await get_ocr_client()
         return self._ocr_client
 
+    @staticmethod
+    def _filter_assets_by_switch(assets: list[dict]) -> list[dict]:
+        """落库层再过滤：只保留与当前开关匹配的类型。"""
+        filtered: list[dict] = []
+        for asset in assets:
+            asset_type = asset.get("type")
+            if asset_type == "image" and not image_extract_enabled():
+                continue
+            if asset_type == "table" and not table_extract_enabled():
+                continue
+            filtered.append(asset)
+        return filtered
+
     async def process_assets(self, doc_id: uuid.UUID, assets: list[dict], category: str) -> None:
         """按资产类型落库：图片走 OCR 文搜图，表格走结构化入库。
 
-        单张失败仅 warning（含 trace_id）并跳过，不阻断正文（正文已入库不回滚）。
+        单张 OCR/落盘失败仅 warning 并跳过，不阻断正文；批量 embedding/双写失败向上抛出。
         """
-        # 从正文已占用的 chunk_index 之后递增，避免 (doc_id, chunk_index) 唯一约束冲突
+        assets = self._filter_assets_by_switch(assets)
+        if not assets:
+            return
+
         self._next_chunk_index = await self.chunk_repo.next_chunk_index(doc_id)
+        pending_chunks: list[str] = []
+        pending_meta: list[KbDocAsset] = []
+
         for asset in assets:
             try:
                 if asset["type"] == "image":
-                    await self._process_image(doc_id, asset, category)
+                    meta, chunk_text = await self._prepare_image(doc_id, asset)
                 else:
-                    await self._process_table(doc_id, asset, category)
+                    meta, chunk_text = await self._prepare_table(doc_id, asset)
+                if meta is not None:
+                    pending_meta.append(meta)
+                if chunk_text:
+                    if isinstance(chunk_text, list):
+                        pending_chunks.extend(chunk_text)
+                    else:
+                        pending_chunks.append(chunk_text)
             except Exception as e:
-                # flush 失败会污染 AsyncSession；回滚后才能继续处理其余资产与正文 active
-                try:
-                    await self.chunk_repo.db.rollback()
-                except Exception:
-                    pass
+                # 单资产失败仅 skip：禁止对共享 Session 全量 rollback（会滚掉同事务内
+                # 已 flush 的 kb_documents，导致后续批量写 kb_chunks 触发 FK 失败）。
                 logger.warning(
                     "asset_process_skipped",
                     doc_id=str(doc_id),
@@ -81,96 +105,105 @@ class AssetService:
                     error=str(e),
                 )
 
-    async def _process_image(self, doc_id: uuid.UUID, asset: dict, category: str) -> None:
+        if pending_chunks:
+            await self._batch_index_chunks(doc_id, category, pending_chunks)
+
+        if pending_meta:
+            await self.asset_repo.batch_create(pending_meta)
+
+    async def _prepare_image(
+        self, doc_id: uuid.UUID, asset: dict
+    ) -> tuple[KbDocAsset | None, str | None]:
         binary = asset["binary"]
         mime = asset.get("mime") or "image/png"
         page = asset.get("page") or 0
 
-        # 1) OCR 识别（ocr-service:8200，30s 超时/3 次退避/熔断 rag:ocr:degraded，复用既有 OCRClient）
         ocr = await self._get_ocr()
         ocr_text = await ocr.recognize(binary, f"asset_{doc_id}_p{page}")
 
-        # 2) 本地文件落 KB_ASSETS_DIR/{doc_id}/（相对路径入库，Gradio 经共享 volume 读取）
         ext = _EXT_BY_MIME.get(mime, "png")
         rel = f"{doc_id}/{page}_a_{uuid.uuid4().hex[:8]}.{ext}"
         abs_path = Path(settings.KB_ASSETS_DIR) / rel
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_bytes(binary)
 
-        # 3) OCR 文本以普通 chunk 走既有双索引入库（文搜图，source 语义经前缀标记）
-        if ocr_text.strip():
-            await self._index_chunk(doc_id, category, f"[图片] 页码P{page}: {ocr_text.strip()}")
+        chunk_text = (
+            f"[图片] 页码P{page}: {ocr_text.strip()}" if ocr_text.strip() else None
+        )
+        meta = KbDocAsset(
+            doc_id=doc_id,
+            asset_type="image",
+            page=page,
+            storage_path=rel,
+            ocr_text=ocr_text,
+            mime_type=mime,
+        )
+        return meta, chunk_text
 
-        # 4) kb_doc_assets 元数据
-        await self.asset_repo.batch_create([
-            KbDocAsset(
-                doc_id=doc_id,
-                asset_type="image",
-                page=page,
-                storage_path=rel,
-                ocr_text=ocr_text,
-                mime_type=mime,
-            )
-        ])
-
-    async def _process_table(self, doc_id: uuid.UUID, asset: dict, category: str) -> None:
+    async def _prepare_table(
+        self, doc_id: uuid.UUID, asset: dict
+    ) -> tuple[KbDocAsset | None, list[str] | None]:
         headers = asset.get("headers") or []
         rows = asset.get("rows") or []
         serialized_lines = asset.get("serialized_lines") or []
         page = asset.get("page") or 0
         if not serialized_lines:
-            return  # 空表/无数据行：不落库
+            return None, None
 
-        # 1) 每行序列化文本以 chunk 双索引入库（保留行列结构不打散）
-        for line in serialized_lines:
-            await self._index_chunk(doc_id, category, line)
-
-        # 2) 结构化预览源（content_json 供 gr.Dataframe 渲染，单一数据源）+ 元数据
         content_json = json.dumps({"headers": headers, "rows": rows}, ensure_ascii=False)
         rel = f"{doc_id}/{page}_t_{uuid.uuid4().hex[:8]}.json"
         abs_path = Path(settings.KB_ASSETS_DIR) / rel
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_text(content_json, encoding="utf-8")
 
-        await self.asset_repo.batch_create([
-            KbDocAsset(
-                doc_id=doc_id,
-                asset_type="table",
-                page=page,
-                storage_path=rel,
-                ocr_text="\n".join(serialized_lines),
-                mime_type="application/json",
-                content_json=content_json,
-            )
-        ])
-
-    async def _index_chunk(self, doc_id: uuid.UUID, category: str, content: str) -> None:
-        """单条资产 chunk 走既有双索引入库：embed → Milvus → ES → kb_chunks。"""
-        chunk_id = uuid.uuid4()
-        chunk_index = getattr(self, "_next_chunk_index", None)
-        if chunk_index is None:
-            chunk_index = await self.chunk_repo.next_chunk_index(doc_id)
-        vectors = await self.embed.batch_embed([content])
-        vector_ids = await self.milvus.insert(
-            vectors, [{"chunk_id": str(chunk_id), "doc_id": str(doc_id), "category": category}]
+        meta = KbDocAsset(
+            doc_id=doc_id,
+            asset_type="table",
+            page=page,
+            storage_path=rel,
+            ocr_text="\n".join(serialized_lines),
+            mime_type="application/json",
+            content_json=content_json,
         )
+        return meta, serialized_lines
+
+    async def _batch_index_chunks(
+        self, doc_id: uuid.UUID, category: str, contents: list[str]
+    ) -> None:
+        """同一文档资产阶段批量 embedding + 双写（仍保持一行/一图一 chunk）。"""
+        if not contents:
+            return
+
+        chunk_ids = [uuid.uuid4() for _ in contents]
+        start_index = getattr(self, "_next_chunk_index", None)
+        if start_index is None:
+            start_index = await self.chunk_repo.next_chunk_index(doc_id)
+
+        vectors = await self.embed.batch_embed(contents)
+        metadata = [
+            {"chunk_id": str(cid), "doc_id": str(doc_id), "category": category}
+            for cid in chunk_ids
+        ]
+        vector_ids = await self.milvus.insert(vectors, metadata)
         await self.es.index_docs([
             {
-                "chunk_id": str(chunk_id),
-                "content": content,
+                "chunk_id": str(chunk_ids[i]),
+                "content": contents[i],
                 "doc_id": str(doc_id),
                 "category": category,
                 "doc_summary": "",
             }
+            for i in range(len(contents))
         ])
         await self.chunk_repo.batch_create([
             {
-                "id": chunk_id,
+                "id": chunk_ids[i],
                 "doc_id": doc_id,
-                "chunk_index": chunk_index,
-                "content": content,
-                "vector_id": vector_ids[0],
+                "chunk_index": start_index + i,
+                "content": contents[i],
+                "vector_id": vector_ids[i],
                 "category": category,
             }
+            for i in range(len(contents))
         ])
-        self._next_chunk_index = chunk_index + 1
+        self._next_chunk_index = start_index + len(contents)

@@ -23,6 +23,9 @@ class MockDocRepo:
         self.doc_id = uuid.uuid4()
         self.statuses = []
         self.soft_deleted = []
+        self.db = MagicMock()
+        self.db.commit = AsyncMock()
+        self.db.rollback = AsyncMock()
 
     async def create(self, **kwargs):
         return self.doc_id
@@ -200,3 +203,76 @@ class TestBackfillPending:
         doc_id = uuid.uuid4()
         await svc._backfill_es_index([{"chunk_id": "c1", "content": "x"}], doc_id)
         assert redis.srem.await_count <= 1
+
+
+class TestAssetSessionBoundary:
+    """决策 6 / 任务 7.2–7.3：正文后 commit；资产批量失败仍 A3003。"""
+
+    def _mock_ok_parser(self, monkeypatch):
+        monkeypatch.setattr(ParserFactory, "is_supported", lambda f: True)
+
+        class OkParser:
+            async def extract_text(self, file_path):
+                return "催收合规制度正文内容足够长用于分块。"
+
+            async def extract_with_assets(self, file_path):
+                return (
+                    "催收合规制度正文内容足够长用于分块。",
+                    [{
+                        "type": "table",
+                        "page": 0,
+                        "headers": ["a"],
+                        "rows": [["1"]],
+                        "serialized_lines": ["表格(第0页): a:1"],
+                        "binary": b"",
+                    }],
+                )
+
+        monkeypatch.setattr(ParserFactory, "get_parser", lambda fp: OkParser())
+
+    @pytest.mark.asyncio
+    async def test_commit_before_process_assets(self, monkeypatch):
+        """正文索引完成后、process_assets 前必须 commit（文档行可被 FK 引用）。"""
+        monkeypatch.setattr(settings, "KB_IMAGE_EXTRACT_ENABLED", False)
+        monkeypatch.setattr(settings, "KB_TABLE_EXTRACT_ENABLED", True)
+        self._mock_ok_parser(monkeypatch)
+        doc_repo = MockDocRepo()
+        order: list[str] = []
+
+        async def _commit():
+            order.append("commit")
+
+        doc_repo.db.commit = AsyncMock(side_effect=_commit)
+
+        asset_svc = MagicMock()
+
+        async def _process(*_a, **_k):
+            order.append("process_assets")
+
+        asset_svc.process_assets = AsyncMock(side_effect=_process)
+        svc = _make_svc(doc_repo, MockChunkRepo(), MockMilvus(), MockES(), MockEmbed())
+        svc.asset_service = asset_svc
+        result = await svc.ingest(None, "test.docx", "regulation")
+        assert result["status"] == "active"
+        assert "commit" in order and "process_assets" in order
+        assert order.index("commit") < order.index("process_assets")
+        # 成功路径：正文 commit + API 层还会再 commit；至少一次在资产前
+        assert doc_repo.db.commit.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_asset_batch_failure_a3003_and_commit_failed(self, monkeypatch):
+        """资产批量失败 → A3003，且 failed 状态在 raise 前已 commit（不削弱回滚契约）。"""
+        monkeypatch.setattr(settings, "KB_IMAGE_EXTRACT_ENABLED", False)
+        monkeypatch.setattr(settings, "KB_TABLE_EXTRACT_ENABLED", True)
+        self._mock_ok_parser(monkeypatch)
+        doc_repo = MockDocRepo()
+        asset_svc = MagicMock()
+        asset_svc.process_assets = AsyncMock(side_effect=RuntimeError("batch embed down"))
+        svc = _make_svc(doc_repo, MockChunkRepo(), MockMilvus(), MockES(), MockEmbed())
+        svc.asset_service = asset_svc
+        with pytest.raises(BizException) as exc_info:
+            await svc.ingest(None, "test.docx", "regulation")
+        assert exc_info.value.code == ErrorCode.A3003
+        assert "failed" in doc_repo.statuses
+        # 正文 commit + failed 状态 commit
+        assert doc_repo.db.commit.await_count >= 2

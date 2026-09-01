@@ -66,6 +66,7 @@ class TestTableAssetIngest:
     async def test_table_chunk_and_preview_metadata(self, monkeypatch):
         """表格：序列化行以 chunk 入库 + kb_doc_assets 落 content_json（预览渲染源）。"""
         monkeypatch.setattr(settings, "KB_ASSETS_DIR", "/tmp")
+        monkeypatch.setattr(settings, "KB_TABLE_EXTRACT_ENABLED", True)
         svc = self._svc()
         svc.embed.batch_embed = AsyncMock(return_value=[[0.1] * 4])
         svc.milvus.insert = AsyncMock(return_value=["vid"])
@@ -80,6 +81,7 @@ class TestTableAssetIngest:
         # chunk 入库（保留行列结构不打散）
         chunk_args = svc.chunk_repo.batch_create.await_args.args[0]
         assert chunk_args[0]["content"] == "表格(第2页): 材料:身份证, 要求:原件"
+        svc.embed.batch_embed.assert_awaited_once()
         # kb_doc_assets 元数据：content_json 为表格行列结构化（gr.Dataframe 渲染源）
         assets = svc.asset_repo.batch_create.await_args.args[0]
         assert len(assets) == 1
@@ -101,6 +103,32 @@ class TestTableAssetIngest:
         }], "regulation")
         svc.embed.batch_embed.assert_not_awaited()
         svc.asset_repo.batch_create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_multi_row_table_single_batch_embed(self, monkeypatch):
+        """多行表格一次 batch_embed，仍每行一个 chunk。"""
+        monkeypatch.setattr(settings, "KB_ASSETS_DIR", "/tmp")
+        monkeypatch.setattr(settings, "KB_TABLE_EXTRACT_ENABLED", True)
+        svc = self._svc()
+        lines = [
+            "表格(第1页): a:1, b:2",
+            "表格(第1页): a:3, b:4",
+            "表格(第1页): a:5, b:6",
+        ]
+        svc.embed.batch_embed = AsyncMock(return_value=[[0.1] * 4 for _ in lines])
+        svc.milvus.insert = AsyncMock(return_value=["v1", "v2", "v3"])
+        svc.es.index_docs = AsyncMock()
+        doc_id = uuid.uuid4()
+        await svc.process_assets(doc_id, [{
+            "type": "table", "page": 1,
+            "headers": ["a", "b"],
+            "rows": [["1", "2"], ["3", "4"], ["5", "6"]],
+            "serialized_lines": lines,
+        }], "regulation")
+        svc.embed.batch_embed.assert_awaited_once()
+        assert len(svc.embed.batch_embed.await_args.args[0]) == 3
+        chunk_args = svc.chunk_repo.batch_create.await_args.args[0]
+        assert len(chunk_args) == 3
 
     @pytest.mark.asyncio
     async def test_switches_off_v4_text_only(self, tmp_path, monkeypatch):

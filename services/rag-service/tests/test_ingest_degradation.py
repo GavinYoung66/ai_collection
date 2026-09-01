@@ -5,7 +5,7 @@
 - ES 入库失败：开关开启 → 保留 Milvus + status=active + degraded=true；开关关闭 → A3003
 """
 import uuid
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -21,6 +21,9 @@ class MockDocRepo:
     def __init__(self):
         self.doc_id = uuid.uuid4()
         self.statuses = []
+        self.db = MagicMock()
+        self.db.commit = AsyncMock()
+        self.db.rollback = AsyncMock()
 
     async def create(self, **kwargs):
         return self.doc_id

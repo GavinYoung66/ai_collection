@@ -148,6 +148,23 @@ class IngestService:
             )
         return self.asset_service
 
+    async def _rollback_ingest_indices(self, doc_id: uuid.UUID) -> None:
+        """资产批量索引失败时回滚正文与资产索引（Milvus/ES/kb_chunks/本地资产）。"""
+        doc_id_str = str(doc_id)
+        try:
+            await self.milvus.delete_by_doc(doc_id_str)
+        except Exception as e:
+            logger.warning("rollback_milvus_failed", doc_id=doc_id_str, error=str(e))
+        try:
+            await self.es.delete_by_doc(doc_id_str)
+        except Exception as e:
+            logger.warning("rollback_es_failed", doc_id=doc_id_str, error=str(e))
+        try:
+            await self.chunk_repo.delete_by_doc(doc_id)
+        except Exception as e:
+            logger.warning("rollback_chunks_failed", doc_id=doc_id_str, error=str(e))
+        await _delete_assets_with_retry(doc_id_str, self.doc_repo)
+
     async def ingest(
         self, file_path: Path, filename: str, category: str,
         created_by: uuid.UUID | None = None,
@@ -248,13 +265,33 @@ class IngestService:
             chunk["id"] = str(chunk_uuids[i])
             chunk["doc_id"] = str(doc_id)
 
+        body_index_start = time.time()
+        logger.info(
+            "ingest_body_index_start",
+            doc_id=str(doc_id),
+            filename=filename,
+            chunks_count=len(chunks),
+        )
         try:
             texts = [c["content"] for c in chunks]
             vectors = await self.embed.batch_embed(texts)
         except Exception as e:
+            logger.error(
+                "ingest_body_index_failed",
+                doc_id=str(doc_id),
+                elapsed_s=round(time.time() - body_index_start, 3),
+                error=str(e),
+            )
             logger.error("embed_failed", doc_id=str(doc_id), error=str(e))
             # V2 §6.6: 降级入库开关——Embedding 失败时仅写 ES + 文本，不写 Milvus/kb_chunks.vector_id=null
             if settings.KB_EMBED_DEGRADED_KEEP_TEXT:
+                logger.info(
+                    "ingest_body_index_done",
+                    doc_id=str(doc_id),
+                    elapsed_s=round(time.time() - body_index_start, 3),
+                    chunks_count=len(chunks),
+                    degraded=True,
+                )
                 await self._ingest_degraded_fallback(doc_id, chunks, source, error=str(e))
                 return {
                     "doc_id": str(doc_id),
@@ -307,6 +344,13 @@ class IngestService:
                 ]
                 await self.chunk_repo.batch_create(chunk_entities)
                 await self.doc_repo.update_status(doc_id, "active")
+                logger.info(
+                    "ingest_body_index_done",
+                    doc_id=str(doc_id),
+                    elapsed_s=round(time.time() - body_index_start, 3),
+                    chunks_count=len(chunks),
+                    degraded=True,
+                )
                 logger.warning(
                     "ingest_degraded_es_fallback",
                     doc_id=str(doc_id),
@@ -335,18 +379,51 @@ class IngestService:
             for c in chunks
         ]
         await self.chunk_repo.batch_create(chunk_entities)
+        logger.info(
+            "ingest_body_index_done",
+            doc_id=str(doc_id),
+            elapsed_s=round(time.time() - body_index_start, 3),
+            chunks_count=len(chunks),
+        )
+
+        # 决策 6：资产阶段前提交正文事务边界，保证 kb_documents 可被 FK 引用；
+        # 单资产 OCR 失败不得再依赖「未 commit + 禁止 rollback」的脆弱组合。
+        await self.doc_repo.db.commit()
 
         # V5: 正文双索引完成后落内嵌资产（kb_doc_assets + 本地文件 + OCR/表格 chunk）；
-        # 开关关闭时 assets 恒为空（短路零开销）；资产失败仅 warning 不回滚正文
+        # 开关关闭时 assets 恒为空（短路零开销）；批量索引失败回滚并 A3003
         if assets:
+            asset_index_start = time.time()
+            logger.info(
+                "ingest_asset_index_start",
+                doc_id=str(doc_id),
+                asset_count=len(assets),
+            )
             try:
                 await self._get_asset_service().process_assets(doc_id, assets, category)
             except Exception as e:
-                try:
-                    await self.doc_repo.db.rollback()
-                except Exception:
-                    pass
-                logger.warning("assets_process_failed", doc_id=str(doc_id), error=str(e))
+                logger.error(
+                    "ingest_asset_index_failed",
+                    doc_id=str(doc_id),
+                    elapsed_s=round(time.time() - asset_index_start, 3),
+                    error=str(e),
+                )
+                await self._rollback_ingest_indices(doc_id)
+                await self.doc_repo.update_status(doc_id, "failed")
+                # 正文已提前 commit：此处再 commit，避免 API 层 BizException→rollback 丢掉 failed 状态
+                await self.doc_repo.db.commit()
+                raise BizException(ErrorCode.A3003, f"资产索引失败: {e}") from e
+            logger.info(
+                "ingest_asset_index_done",
+                doc_id=str(doc_id),
+                elapsed_s=round(time.time() - asset_index_start, 3),
+            )
+        else:
+            logger.info(
+                "ingest_asset_index_skipped",
+                doc_id=str(doc_id),
+                elapsed_s=0,
+            )
 
         await self.doc_repo.update_status(doc_id, "active")
 

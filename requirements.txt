@@ -1,0 +1,67 @@
+# =============================================================================
+#  ai_collection 生产依赖（Python 3.11）
+#  来源：requirements.in + 代码实际 import 扫描
+#  使用：pip install -r requirements.txt  （conda 环境 ai_collection）
+# =============================================================================
+
+# === 运行时 Web 框架 ===
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+python-multipart==0.0.6
+
+# === 数据库与 ORM ===
+sqlalchemy==2.0.23
+alembic==1.13.1
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
+redis==5.0.1
+
+# === AI 向量检索客户端 ===
+pymilvus==2.4.0
+elasticsearch==8.11.0
+rank-bm25==0.2.2
+
+# === HTTP 客户端 ===
+httpx==0.25.2
+aiohttp==3.9.1
+
+# === 文档解析 ===
+pdfplumber==0.11.10
+python-docx==1.1.0
+openpyxl==3.1.2
+python-pptx==0.6.23
+PyMuPDF==1.24.9
+
+# === 第三方 LLM SDK（DashScope / DeepSeek 通过 OpenAI 兼容协议）===
+openai>=1.12.0
+
+# === RAG V2 增量 ===
+PyYAML==6.0.1
+ulid-py==1.1.0
+
+# === RAG V3 增量 ===
+faster-whisper==1.0.3
+
+# === RAG V5 增量 ===
+langsmith==0.1.147
+pydub==0.25.1
+
+# === 调度、熔断与限流 ===
+apscheduler==3.10.4
+pybreaker==1.0.2
+
+# === 配置与日志 ===
+structlog==23.3.0
+
+# === 安全 ===
+cryptography==41.0.7
+pyahocorasick==2.0.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+python-jose[cryptography]==3.3.0
+
+# === 工具约束 ===
+setuptools<80           # pymilvus 依赖 pkg_resources
+marshmallow<4           # pymilvus 依赖 environs → marshmallow 3.x

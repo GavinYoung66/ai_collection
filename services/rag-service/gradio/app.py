@@ -48,6 +48,8 @@ _ALLOWED_EXTENSIONS = [
 ]
 _PAGE_SIZE = 20
 _TIMEOUT = httpx.Timeout(90.0, connect=5.0)
+# 入库含表格行/图片 OCR 逐条索引，常超过 90s；与检索超时分开，避免误报「后端不可用」
+_UPLOAD_TIMEOUT = httpx.Timeout(600.0, connect=5.0)
 
 _EXAMPLE_QUESTIONS = [
     ["和催收相关的法律法规有哪些？"],
@@ -361,7 +363,7 @@ async def upload_document(file, category_zh: str, summary: str, list_cat: str, l
         if summary:
             data_form["summary"] = summary
         try:
-            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=_UPLOAD_TIMEOUT) as client:
                 with open(path, "rb") as f:
                     resp = await client.post(
                         f"{_RAG_API_BASE}/kb/documents",
@@ -369,8 +371,26 @@ async def upload_document(file, category_zh: str, summary: str, list_cat: str, l
                         data=data_form,
                         headers=_headers(),
                     )
-        except (httpx.HTTPError, OSError) as e:
+        except httpx.ReadTimeout:
+            card = (
+                "### 入库处理中（未失败）\n"
+                f"- **文件**: `{path.name}`\n"
+                "- 后端仍在解析/索引（表格行、图片 OCR 会逐条写入，可能超过数分钟）。\n"
+                "- 前端等待超时，**不是**后端宕机。请到下方列表刷新："
+                "`processing` = 进行中，`active` = 完成。**请勿重复上传同一文件**。"
+            )
+            try:
+                table, total, page = await _list_docs(
+                    list_cat or "全部", list_status or "全部", 1
+                )
+                page_md = f"第 {page} 页 · 共 {total} 条"
+            except gr.Error:
+                table, page, page_md = [], 1, "请手动点「刷新列表」查看入库进度"
+            return card, table, page, page_md
+        except (httpx.ConnectError, httpx.ConnectTimeout, OSError) as e:
             raise gr.Error(f"后端服务暂不可用：{e.__class__.__name__}") from e
+        except httpx.HTTPError as e:
+            raise gr.Error(f"请求后端失败：{e.__class__.__name__}") from e
         if resp.status_code >= 400:
             raise gr.Error(_parse_biz_error(resp))
         data = resp.json().get("data") or {}
@@ -618,8 +638,6 @@ def build_ui() -> gr.Blocks:
     with gr.Blocks(
         title="RAG多模态知识库调试工作台",
         fill_height=True,
-        css=_CSS,
-        theme=_THEME,
     ) as demo:
         session_state = gr.State(_new_session_id())
         prev_queries_state = gr.State([])
@@ -729,7 +747,6 @@ def build_ui() -> gr.Blocks:
                         chatbot = gr.Chatbot(
                             label="对话",
                             height="58vh",
-                            type="messages",
                             layout="bubble",
                             buttons=["copy", "copy_all"],
                             placeholder="在下方输入问题。召回片段与资产预览在右侧，不在气泡内重复。",
