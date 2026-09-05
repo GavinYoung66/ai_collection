@@ -73,6 +73,7 @@ async def test_reindex_full_flow():
     assert data["doc_id"] == str(uid)
     assert data["status"] == "active"
     assert data["chunks_count"] == 2
+    assert data["assets_rebuilt"] is False
 
     # 旧索引删除：chunk 表 + Milvus + ES
     chunk_repo.delete_by_doc.assert_awaited_once()

@@ -43,14 +43,14 @@ class TestXlsxParser:
 
     @pytest.mark.asyncio
     async def test_sheet_name_prefix_in_each_line(self, tmp_path, monkeypatch):
-        """sheet 名前缀冗余进每行 chunk（"材料表: 材料:身份证,..."）。"""
+        """sheet 名作为定位前缀（表格(第0页)[sheet名]: ...）。"""
         monkeypatch.setattr(settings, "KB_EXCEL_SHEET_ALL", True)
         f = tmp_path / "prefix.xlsx"
         _make_xlsx(f, {"材料表": [["材料", "要求"], ["身份证", "原件"], ["合同", "复印件"]]})
         text = await XlsxParser().extract_text(f)
         lines = [ln for ln in text.split("\n") if ln.strip()]
-        assert lines[0].startswith("材料表: "), lines[0]
-        assert lines[1].startswith("材料表: "), lines[1]
+        assert lines[0].startswith("表格(第0页)[材料表]: "), lines[0]
+        assert lines[1].startswith("表格(第0页)[材料表]: "), lines[1]
 
     @pytest.mark.asyncio
     async def test_row_serialization_format(self, tmp_path, monkeypatch):

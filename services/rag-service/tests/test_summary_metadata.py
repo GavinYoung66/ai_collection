@@ -143,47 +143,64 @@ class TestSummaryService:
 
 class TestUploadSummary:
     def _patch_upload(self, monkeypatch, captured: dict):
-        class MockIngest:
-            async def ingest(self, file_path, filename, category, created_by=None, summary=None):
-                captured["summary"] = summary
-                return {"doc_id": str(DOC_ID), "chunks_count": 1, "status": "active"}
+        doc_id = DOC_ID
+
+        repo = MagicMock()
+        repo.find_processing_by_title = AsyncMock(return_value=None)
+        repo.find_active_by_title = AsyncMock(return_value=None)
+        repo.create = AsyncMock(return_value=doc_id)
+        repo.update_ingest_stage = AsyncMock()
+
+        def fake_schedule(did, path, filename, category, summary):
+            captured["summary"] = summary
 
         monkeypatch.setattr(ParserFactory, "is_supported", lambda f: True)
         monkeypatch.setattr(
-            "app.api.documents.save_upload_file",
+            "app.api.documents.DocRepo",
+            lambda _db: repo,
+        )
+        monkeypatch.setattr(
+            "app.api.documents.save_upload_to_staging",
             AsyncMock(return_value=Path("/tmp/x.txt")),
         )
         monkeypatch.setattr(
-            "app.api.documents._get_ingest_service", lambda *a, **k: MockIngest()
+            "app.api.documents.schedule_background_ingest",
+            fake_schedule,
         )
         monkeypatch.setattr(settings, "KB_CACHE_ENABLED", False)
 
     @pytest.mark.asyncio
     async def test_upload_with_summary_passes_to_ingest(self, monkeypatch):
-        """7.1 携带摘要上传 → 摘要透传给入库链路（存量字段与行为不变）。"""
+        """7.1 携带摘要上传 → 摘要透传给后台入库任务。"""
         captured: dict = {}
         self._patch_upload(monkeypatch, captured)
+        db = MagicMock()
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
         resp = await upload_document(
             file=MagicMock(filename="x.txt"),
             category="regulation",
             summary=SUMMARY_TEXT,
             auth=None, rate=None,
-            db=AsyncMock(), milvus=MagicMock(), es=MagicMock(), embed=MagicMock(),
+            db=db,
         )
         assert captured["summary"] == SUMMARY_TEXT
-        assert resp["data"]["status"] == "active"
+        assert resp["data"]["status"] == "processing"
 
     @pytest.mark.asyncio
     async def test_upload_without_summary_unchanged(self, monkeypatch):
-        """7.1 不携带摘要 → summary=None 透传（存量行为完全不变）。"""
+        """7.1 不携带摘要 → summary=None 透传。"""
         captured: dict = {}
         self._patch_upload(monkeypatch, captured)
+        db = MagicMock()
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
         await upload_document(
             file=MagicMock(filename="x.txt"),
             category="regulation",
             summary="",
             auth=None, rate=None,
-            db=AsyncMock(), milvus=MagicMock(), es=MagicMock(), embed=MagicMock(),
+            db=db,
         )
         assert captured["summary"] is None
 
@@ -197,7 +214,7 @@ class TestUploadSummary:
                 category="regulation",
                 summary="x" * 11,
                 auth=None, rate=None,
-                db=MagicMock(), milvus=MagicMock(), es=MagicMock(), embed=MagicMock(),
+                db=MagicMock(),
             )
         assert exc_info.value.code == ErrorCode.B0001
 

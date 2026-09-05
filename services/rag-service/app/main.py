@@ -282,6 +282,27 @@ async def startup():
     except Exception as e:
         logger.warning("backfill_resume_init_failed", error=str(e))
 
+    # 异步入库僵尸 processing 回收（async-kb-ingest-observability）
+    try:
+        await _sweep_stale_ingest_jobs()
+    except Exception as e:
+        logger.warning("ingest_sweep_init_failed", error=str(e))
+
+
+async def _sweep_stale_ingest_jobs() -> None:
+    """启动时将超时 processing 文档置 failed，避免进程重启丢 task 后永久卡住。"""
+    from common.config.settings import settings
+    from common.db.session import async_session_factory
+    from app.repositories.doc_repo import DocRepo
+
+    async with async_session_factory() as session:
+        count = await DocRepo(session).sweep_stale_processing(
+            settings.KB_INGEST_JOB_TIMEOUT
+        )
+        if count:
+            await session.commit()
+            logger.warning("ingest_stale_processing_swept", count=count)
+
 
 @app.on_event("shutdown")
 async def shutdown():

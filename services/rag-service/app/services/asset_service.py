@@ -150,6 +150,11 @@ class AssetService:
         if not serialized_lines:
             return None, None
 
+        chunk_lines = list(serialized_lines)
+        summary_line = asset.get("summary_line")
+        if summary_line:
+            chunk_lines.append(summary_line)
+
         content_json = json.dumps({"headers": headers, "rows": rows}, ensure_ascii=False)
         rel = f"{doc_id}/{page}_t_{uuid.uuid4().hex[:8]}.json"
         abs_path = Path(settings.KB_ASSETS_DIR) / rel
@@ -165,7 +170,7 @@ class AssetService:
             mime_type="application/json",
             content_json=content_json,
         )
-        return meta, serialized_lines
+        return meta, chunk_lines
 
     async def _batch_index_chunks(
         self, doc_id: uuid.UUID, category: str, contents: list[str]

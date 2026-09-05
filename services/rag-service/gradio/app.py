@@ -148,6 +148,13 @@ def _acquire(op: str) -> None:
     _inflight.add(op)
 
 
+def _try_acquire(op: str) -> bool:
+    if op in _inflight:
+        return False
+    _inflight.add(op)
+    return True
+
+
 def _release(op: str) -> None:
     _inflight.discard(op)
 
@@ -344,16 +351,62 @@ async def _list_docs(category_zh: str, status: str, page: int):
     return docs_table_rows(items), total, page
 
 
+async def _title_exists_with_status(filename: str, status: str) -> bool:
+    """按 title + status 翻页穷尽检测（禁止只扫第一页）。"""
+    page = 1
+    page_size = 100
+    max_pages = 1000
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            while page <= max_pages:
+                resp = await client.get(
+                    f"{_RAG_API_BASE}/kb/documents",
+                    params={"status": status, "page": page, "page_size": page_size},
+                    headers=_headers(),
+                )
+                if resp.status_code >= 400:
+                    return False
+                payload = resp.json().get("data") or {}
+                items = payload.get("items") or []
+                total = int(payload.get("total") or 0)
+                if any((it.get("title") or "") == filename for it in items):
+                    return True
+                if not items or page * page_size >= total:
+                    return False
+                page += 1
+    except httpx.HTTPError:
+        return False
+    return False
+
+
+async def _find_processing_title(filename: str) -> bool:
+    return await _title_exists_with_status(filename, "processing")
+
+
+async def _find_active_title(filename: str) -> bool:
+    return await _title_exists_with_status(filename, "active")
+
+
 async def upload_document(file, category_zh: str, summary: str, list_cat: str, list_status: str):
-    _acquire("upload")
+    path = _file_path(file)
+    inflight_key = f"upload:{path.name}" if path else "upload"
+    if not _try_acquire(inflight_key):
+        raise gr.Error(f"文件 `{path.name if path else ''}` 正在上传中，请稍候")
     try:
         _check_token()
-        path = _file_path(file)
         if path is None:
             raise gr.Error("请先选择要上传的文件")
         if path.suffix.lower().lstrip(".") not in _ALLOWED_EXTENSIONS:
             raise gr.Error(
                 f"不支持的文件格式: {path.name}（支持: {'/'.join(_ALLOWED_EXTENSIONS)}）"
+            )
+        if await _find_active_title(path.name):
+            raise gr.Error(
+                f"同名文件 `{path.name}` 已在知识库中（active），请先删除后再上传"
+            )
+        if await _find_processing_title(path.name):
+            raise gr.Error(
+                f"同名文件 `{path.name}` 正在入库中（processing），请刷新列表查看进度，勿重复上传"
             )
         category = category_code(category_zh) or "regulation"
         summary = (summary or "").strip()
@@ -401,10 +454,10 @@ async def upload_document(file, category_zh: str, summary: str, list_cat: str, l
             table, total, page = await _list_docs(list_cat or "全部", list_status or "全部", 1)
             page_md = f"第 {page} 页 · 共 {total} 条"
         except gr.Error:
-            table, page, page_md = [], 1, "入库成功，但刷新列表失败"
+            table, page, page_md = [], 1, "入库已提交，但刷新列表失败"
         return card, table, page, page_md
     finally:
-        _release("upload")
+        _release(inflight_key)
 
 
 async def refresh_docs(category_zh: str, status: str, page: int):
@@ -468,7 +521,20 @@ async def view_doc(doc_id: str):
     if resp.status_code >= 400:
         raise gr.Error(_parse_biz_error(resp))
     data = resp.json().get("data") or {}
-    return format_doc_detail(data)
+    detail = format_doc_detail(data)
+    assets = data.get("assets") or []
+    images: list[str] = []
+    for a in assets:
+        if a.get("asset_type") == "image":
+            sp = a.get("storage_path") or ""
+            if sp:
+                abs_path = _KB_ASSETS_DIR / sp
+                if abs_path.exists():
+                    images.append(str(abs_path))
+    if images:
+        gallery_md = "\n".join(f"![asset](file={p})" for p in images[:12])
+        detail = detail + "\n\n**资产图片预览**\n\n" + gallery_md
+    return detail
 
 
 async def delete_doc(doc_id: str, confirm: bool, category_zh: str, status: str, page: int):
@@ -497,33 +563,48 @@ async def delete_doc(doc_id: str, confirm: bool, category_zh: str, status: str, 
 
 
 async def reindex_doc(doc_id: str, confirm: bool, category_zh: str, status: str, page: int):
-    _acquire("reindex")
+    inflight_key = f"reindex:{(doc_id or '').strip()}"
+    _acquire(inflight_key)
     try:
         _check_token()
         doc_id = (doc_id or "").strip()
         if not doc_id:
             raise gr.Error("请先在列表中点选一行")
         if not confirm:
-            raise gr.Error("请先勾选「确认重新索引」")
+            raise gr.Error(
+                "请先勾选「确认重新索引」。注意：默认仅按 PG 正文重切，"
+                "不会重建 docx/xlsx 内嵌图片与表格（assets_rebuilt=false）。"
+            )
         try:
-            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=_UPLOAD_TIMEOUT) as client:
                 resp = await client.post(
                     f"{_RAG_API_BASE}/kb/documents/{doc_id}/reindex",
                     headers=_headers(),
                 )
-        except httpx.HTTPError as e:
+        except httpx.ReadTimeout:
+            rows, page, page_md = await refresh_docs(category_zh, status, page)
+            msg = (
+                f"重新索引 `{doc_id}` 仍在处理中（ReadTimeout）。"
+                "请刷新列表查看 status，勿重复点击。"
+            )
+            return rows, page, page_md, False, msg
+        except (httpx.ConnectError, httpx.ConnectTimeout, OSError) as e:
             raise gr.Error(f"后端服务暂不可用：{e.__class__.__name__}") from e
+        except httpx.HTTPError as e:
+            raise gr.Error(f"请求后端失败：{e.__class__.__name__}") from e
         if resp.status_code >= 400:
             raise gr.Error(_parse_biz_error(resp))
         data = resp.json().get("data") or {}
         rows, page, page_md = await refresh_docs(category_zh, status, page)
         chunks = data.get("chunks_count", "-")
+        rebuilt = data.get("assets_rebuilt", False)
         return (
             rows, page, page_md, False,
-            f"已重新索引 `{doc_id}` · chunks={chunks} · status={data.get('status', '-')}",
+            f"已重新索引 `{doc_id}` · chunks={chunks} · status={data.get('status', '-')} "
+            f"· assets_rebuilt={rebuilt}（默认不重建多模态资产）",
         )
     finally:
-        _release("reindex")
+        _release(inflight_key)
 
 
 def _empty_qa(sid: str, extra: str):
@@ -573,11 +654,8 @@ async def ask_chat(
         prev_queries = list(prev_queries or [])
         session_id = session_id or _new_session_id()
 
-        spliced_n = 0
+        spliced_n = len(prev_queries)
         api_query = query
-        if prev_queries:
-            spliced_n = min(len(prev_queries), 3)
-            api_query = " ".join(prev_queries[-3:] + [query])[:500]
 
         payload: dict = {
             "query": api_query,
@@ -731,7 +809,11 @@ def build_ui() -> gr.Blocks:
                             view_btn = gr.Button("查看详情", size="sm")
                             confirm_del = gr.Checkbox(label="确认删除", value=False, scale=1)
                             del_btn = gr.Button("删除", size="sm")
-                            confirm_reindex = gr.Checkbox(label="确认重新索引", value=False, scale=1)
+                            confirm_reindex = gr.Checkbox(
+                                label="确认重新索引（仅正文，不重建图片/表格）",
+                                value=False,
+                                scale=1,
+                            )
                             reindex_btn = gr.Button("重新索引", size="sm")
                         doc_detail = gr.Markdown("_点选列表一行后可查看详情（含摘要）_")
 

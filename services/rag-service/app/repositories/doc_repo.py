@@ -1,10 +1,18 @@
 """kb_documents 数据访问层。"""
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.orm import KBChunk, KBDocument, KbDocAsset
+
+STAGE_PROGRESS = {
+    "parse": 25,
+    "body_index": 50,
+    "asset_index": 75,
+    "done": 100,
+}
 
 
 class DocRepo:
@@ -49,6 +57,96 @@ class DocRepo:
         )
         return result.scalar() or 0
 
+    def _ingest_fields(self, doc: KBDocument) -> dict:
+        return {
+            "ingest_stage": doc.ingest_stage,
+            "ingest_progress": doc.ingest_progress,
+            "ingest_error": doc.ingest_error,
+        }
+
+    async def find_processing_by_title(self, title: str) -> KBDocument | None:
+        result = await self.db.execute(
+            select(KBDocument).where(
+                KBDocument.title == title,
+                KBDocument.status == "processing",
+                KBDocument.is_delete == "0",
+            ).limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def find_active_by_title(self, title: str) -> KBDocument | None:
+        result = await self.db.execute(
+            select(KBDocument).where(
+                KBDocument.title == title,
+                KBDocument.status == "active",
+                KBDocument.is_delete == "0",
+            ).limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def update_content(self, doc_id: uuid.UUID, content: str) -> None:
+        await self.db.execute(
+            update(KBDocument)
+            .where(KBDocument.id == doc_id)
+            .values(content=content)
+        )
+
+    async def update_ingest_stage(
+        self, doc_id: uuid.UUID, stage: str | None, progress: int | None = None
+    ) -> None:
+        if progress is None and stage:
+            progress = STAGE_PROGRESS.get(stage)
+        values: dict = {"ingest_stage": stage}
+        if progress is not None:
+            values["ingest_progress"] = progress
+        await self.db.execute(
+            update(KBDocument).where(KBDocument.id == doc_id).values(**values)
+        )
+
+    async def clear_ingest_progress(self, doc_id: uuid.UUID) -> None:
+        await self.db.execute(
+            update(KBDocument)
+            .where(KBDocument.id == doc_id)
+            .values(ingest_stage="done", ingest_progress=100, ingest_error=None)
+        )
+
+    async def mark_failed(self, doc_id: uuid.UUID, error: str) -> None:
+        msg = (error or "入库失败")[:500]
+        await self.db.execute(
+            update(KBDocument)
+            .where(KBDocument.id == doc_id)
+            .values(status="failed", ingest_error=msg, ingest_stage=None)
+        )
+
+    async def get_active_doc_id_set(self, doc_ids: list[uuid.UUID]) -> set[str]:
+        if not doc_ids:
+            return set()
+        result = await self.db.execute(
+            select(KBDocument.id).where(
+                KBDocument.id.in_(doc_ids),
+                KBDocument.status == "active",
+                KBDocument.is_delete == "0",
+            )
+        )
+        return {str(row[0]) for row in result.all()}
+
+    async def sweep_stale_processing(self, timeout_seconds: float) -> int:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
+        result = await self.db.execute(
+            update(KBDocument)
+            .where(
+                KBDocument.status == "processing",
+                KBDocument.is_delete == "0",
+                KBDocument.update_time < cutoff,
+            )
+            .values(
+                status="failed",
+                ingest_error="ingest job timeout or worker lost",
+                ingest_stage=None,
+            )
+        )
+        return result.rowcount or 0
+
     async def list_by_category(
         self, category: str | None = None, status: str | None = None,
         page: int = 1, size: int = 20,
@@ -84,14 +182,16 @@ class DocRepo:
 
         items = []
         for doc in docs:
-            items.append({
+            item = {
                 "id": str(doc.id),
                 "title": doc.title,
                 "category": doc.category,
                 "status": doc.status,
                 "chunks_count": counts.get(str(doc.id), 0),
                 "create_time": doc.create_time.isoformat() if doc.create_time else "",
-            })
+            }
+            item.update(self._ingest_fields(doc))
+            items.append(item)
         return items, total
 
     async def update_status(self, doc_id: uuid.UUID, status: str) -> None:

@@ -19,6 +19,19 @@ class TestRagFileSizeParseTimeout:
         s = Settings()
         assert s.KB_PARSE_TIMEOUT == 60.0
 
+    def test_kb_ingest_job_timeout_default(self):
+        s = Settings()
+        assert s.KB_INGEST_JOB_TIMEOUT == 1800.0
+
+
+    def test_kb_doc_chunk_keep_default_and_override(self, monkeypatch):
+        """KB_DOC_CHUNK_KEEP 默认 5，可通过环境变量覆盖。"""
+        s = Settings()
+        assert s.KB_DOC_CHUNK_KEEP == 5
+        monkeypatch.setenv("KB_DOC_CHUNK_KEEP", "3")
+        s = Settings()
+        assert s.KB_DOC_CHUNK_KEEP == 3
+
 
 class TestHealthDegradedMode:
     def test_health_degraded_mode_default_false(self):

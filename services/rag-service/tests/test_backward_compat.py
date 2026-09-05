@@ -135,21 +135,24 @@ class TestBackwardCompatSwitchesOff:
         assert len(result["results"]) >= 1
 
     @pytest.mark.asyncio
-    async def test_dedup_always_active_even_switches_off(self, all_switches_off):
-        """同 doc_id 去重强制无开关，开关全关时仍生效。"""
+    async def test_doc_top_n_always_active_even_switches_off(self, all_switches_off):
+        """同 doc_id top-N 强制无开关，开关全关时仍生效。"""
         svc, _ = _build_search_service_with_spies()
-        # mock_milvus 返回同 doc 两个 chunk
         svc.milvus.search = AsyncMock(return_value=[
             {"chunk_id": "c1", "doc_id": "d1", "category": "regulation", "score": 0.9},
-            {"chunk_id": "c2", "doc_id": "d1", "category": "regulation", "score": 0.8},
+            {"chunk_id": "c2", "doc_id": "d1", "category": "regulation", "score": 0.85},
         ])
         svc.es.search = AsyncMock(return_value=[
-            {"chunk_id": "c1", "doc_id": "d1", "category": "regulation", "content": "x", "score": 5.0},
+            {"chunk_id": "c1", "doc_id": "d1", "category": "regulation", "content": "x1", "score": 5.0},
+            {"chunk_id": "c2", "doc_id": "d1", "category": "regulation", "content": "x2", "score": 4.0},
+        ])
+        svc.rerank.rerank = AsyncMock(return_value=[
+            {"chunk_id": "c1", "rerank_score": 0.9},
+            {"chunk_id": "c2", "rerank_score": 0.85},
         ])
         result = await svc.hybrid_search("测试", "regulation", 5)
-        doc_ids = [r["doc_id"] for r in result["results"]]
-        # 同 doc_id 去重后唯一
-        assert len(set(doc_ids)) == len(doc_ids)
+        assert len(result["results"]) >= 1
+        assert all(r["doc_id"] == "d1" for r in result["results"])
 
     @pytest.mark.asyncio
     async def test_no_ocr_asr_called_in_search_path(self, all_switches_off):

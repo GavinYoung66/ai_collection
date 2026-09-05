@@ -1,69 +1,49 @@
-"""deps 上传临时文件清理测试（rag-service-final-fix 5.1/5.2 隐患修复）。"""
+"""deps 上传临时文件清理测试（rag-service-final-fix 5.1/5.2 隐患修复）。
+
+异步入库后：API 层不再删除 staging 文件，由后台任务 finally 清理。
+"""
 from unittest.mock import AsyncMock, MagicMock
+import uuid
 
 import pytest
 
 from app.api import documents as docs_module
 from app.api.documents import upload_document
 from common.config.settings import settings
-from common.errors.exceptions import BizException
 
 
-class TestUploadTempFileCleanedUp:
-    def _patch_upload_deps(self, monkeypatch, tmp_path):
-        """接管 save_upload_file → 在 tmp_path 创建临时文件并记录路径。"""
-        captured: dict = {}
+class TestUploadStagingBehavior:
+    @pytest.mark.asyncio
+    async def test_upload_leaves_staging_for_background(self, monkeypatch, tmp_path):
+        """异步入库：API commit 后 staging 文件保留，由后台任务删除。"""
+        doc_id = uuid.uuid4()
+        staging = tmp_path / f"{doc_id}.txt"
+        staging.write_bytes(b"x" * 100)
 
-        async def fake_save(file):
-            path = tmp_path / "upload_test.txt"
-            path.write_bytes(b"x" * 100)
-            captured["path"] = path
-            return path
+        repo = MagicMock()
+        repo.find_processing_by_title = AsyncMock(return_value=None)
+        repo.find_active_by_title = AsyncMock(return_value=None)
+        repo.create = AsyncMock(return_value=doc_id)
+        repo.update_ingest_stage = AsyncMock()
 
-        monkeypatch.setattr(docs_module, "save_upload_file", fake_save)
+        async def fake_staging(file, did):
+            return staging
 
-        class MockIngest:
-            async def ingest(self, file_path, filename, category, created_by=None, summary=None):
-                return {"doc_id": "doc-1", "chunks_count": 1, "status": "active"}
-
-        monkeypatch.setattr(
-            docs_module, "_get_ingest_service", lambda *a, **k: MockIngest()
-        )
+        monkeypatch.setattr(docs_module, "DocRepo", lambda _db: repo)
+        monkeypatch.setattr(docs_module, "save_upload_to_staging", fake_staging)
+        monkeypatch.setattr(docs_module, "schedule_background_ingest", lambda *a, **k: None)
         monkeypatch.setattr(docs_module.ParserFactory, "is_supported", lambda f: True)
         monkeypatch.setattr(settings, "KB_CACHE_ENABLED", False)
-        return captured
 
-    @pytest.mark.asyncio
-    async def test_upload_temp_file_cleaned_up(self, monkeypatch, tmp_path):
-        """上传成功后临时文件被 finally 清理，目录无残留。"""
-        captured = self._patch_upload_deps(monkeypatch, tmp_path)
+        db = MagicMock()
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+
         await upload_document(
             file=MagicMock(filename="x.txt"),
             category="regulation",
             summary="",
             auth=None, rate=None,
-            db=AsyncMock(), milvus=MagicMock(), es=MagicMock(), embed=MagicMock(),
+            db=db,
         )
-        assert not captured["path"].exists()
-
-    @pytest.mark.asyncio
-    async def test_upload_failure_also_cleans_up(self, monkeypatch, tmp_path):
-        """上传/入库失败时临时文件同样被清理（finally 兜底）。"""
-        captured = self._patch_upload_deps(monkeypatch, tmp_path)
-
-        class FailingIngest:
-            async def ingest(self, file_path, filename, category, created_by=None, summary=None):
-                raise BizException("A3001", "文档解析失败")
-
-        monkeypatch.setattr(
-            docs_module, "_get_ingest_service", lambda *a, **k: FailingIngest()
-        )
-        with pytest.raises(BizException):
-            await upload_document(
-                file=MagicMock(filename="x.txt"),
-                category="regulation",
-                summary="",
-                auth=None, rate=None,
-                db=AsyncMock(), milvus=MagicMock(), es=MagicMock(), embed=MagicMock(),
-            )
-        assert not captured["path"].exists()
+        assert staging.exists()

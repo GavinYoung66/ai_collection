@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     KB_CHUNK_OVERLAP: int = 50
     KB_CHUNK_MIN_LENGTH: int = 10
     KB_RETRIEVAL_TOP_N: int = 20
+    KB_DOC_CHUNK_KEEP: int = 5  # RRF 后同 doc_id 保留 chunk 数上限；实际 N = min(top_k, keep)
     KB_RRF_K: int = 60
     KB_RERANK_THRESHOLD: float = 0.35
     KB_CACHE_TTL: int = 3600
@@ -71,6 +72,8 @@ class Settings(BaseSettings):
     # 文档入库限制（对齐 DD-03 §8：上传大小上限 20MB、解析超时 30s）
     KB_MAX_FILE_SIZE: int = 20 * 1024 * 1024  # 上传文件大小上限（字节），超限返回 B0001
     KB_PARSE_TIMEOUT: float = 30.0            # 单文件解析超时（秒），超时按解析失败 A3001 处理
+    KB_INGEST_JOB_TIMEOUT: float = 1800.0     # 后台入库总时限（秒），超时置 failed
+    KB_INGEST_STAGING_DIR: str = "data/ingest_staging"  # 异步入库临时文件目录
     KB_HEALTH_DEGRADED_MODE: bool = False     # /health 降级模式：true 时依赖探活失败只告警，status=degraded 不判 unhealthy（不触发容器重启）
     RAG_REDIS_DB: int = 2
     # 超时与请求级时限（对齐 step6/01 §4：通用外部调用 5s/3 次重试）

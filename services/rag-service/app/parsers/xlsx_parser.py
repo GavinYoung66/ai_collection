@@ -9,7 +9,7 @@ from common.config.settings import settings
 class XlsxParser(DocumentParser):
     """Excel 解析：全部 sheet（KB_EXCEL_SHEET_ALL）/ 表头行（KB_EXCEL_HEADER_ROW）/ 行切块序列化。
 
-    - 每行序列化为 "sheet名: 列名1:值1, 列名2:值2,..."（sheet 名前缀冗余进每行 chunk）；
+    - 每行序列化为 "表格(第0页)[sheet名]: 列名1:值1, 列名2:值2,..."（sheet 名作定位前缀）；
     - 表头行之前的行视为标题跳过；空行与全空值行跳过；空单元格不序列化；
     - 损坏/加密 → 抛通用异常，由 ingest 沿既有失败路径转 A3001（或降级占位）；
     - 解析耗时受 KB_PARSE_TIMEOUT 约束（ingest 层 asyncio.wait_for 包裹）。
@@ -78,7 +78,7 @@ class XlsxParser(DocumentParser):
                         if i < len(header) and c is not None and str(c).strip() != ""
                     ]
                     if pairs:
-                        lines.append(f"{name}: {', '.join(pairs)}")
+                        lines.append(f"表格(第0页)[{name}]: {', '.join(pairs)}")
         finally:
             wb_values.close()
             wb_formula.close()

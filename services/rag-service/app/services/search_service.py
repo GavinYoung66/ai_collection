@@ -276,6 +276,7 @@ class SearchService:
             degraded = True
 
         # --- V2 Step 4: RRF 融合（带路由权重调整 rank） ---
+        keep_n = min(top_k, settings.KB_DOC_CHUNK_KEEP)
         with trace.step("rrf_fuse", dense=len(dense_hits), sparse=len(sparse_hits)):
             fused = self._rrf_fuse(
                 dense_hits,
@@ -283,7 +284,13 @@ class SearchService:
                 k=settings.KB_RRF_K,
                 routing_weights=routing_weights,
             )
-            fused = self._dedup_by_doc_id(fused)
+        pre_doc_dedup = len(fused)
+        with trace.step(
+            "doc_id_dedup",
+            pre_count=pre_doc_dedup,
+            keep_n=keep_n,
+        ):
+            fused = self._dedup_by_doc_id(fused, keep_n=keep_n)
 
         # 闸门 1（对齐 step1/01、step4/02 §四.1）：召回相似度不足 → 判定无匹配，走兜底
         # 说明：RRF 融合分是排名分（量纲约 1/(k+rank)），不能直接与 0.6 比较，
@@ -374,6 +381,21 @@ class SearchService:
         # 在既有 doc_id 去重之后、Rerank 之前执行，仅作用于输出去重阶段，不改变 RRF score 计算；
         # 避免库内多个不同 doc_id 的文档内容一字不差时，检索结果重复返回 5–6 条同内容。
         fused_with_content = self._dedup_by_content(fused_with_content)
+
+        # processing/failed 文档不可检索（async-kb-ingest-observability）
+        if self.doc_repo and fused_with_content:
+            uid_list = [
+                u
+                for d in {f["doc_id"] for f in fused_with_content if f.get("doc_id")}
+                if (u := _safe_uuid(d)) is not None
+            ]
+            get_active = getattr(self.doc_repo, "get_active_doc_id_set", None)
+            if uid_list and get_active is not None:
+                active_set = await get_active(uid_list)
+                fused_with_content = [
+                    f for f in fused_with_content if f.get("doc_id") in active_set
+                ]
+
         doc_ids = list({f["doc_id"] for f in fused_with_content if f.get("doc_id")})
 
         # --- V2 Step 6: 业务加权（开关，RRF→去重之后、Rerank 之前） ---
@@ -829,21 +851,35 @@ class SearchService:
         ]
         return fused
 
-    def _dedup_by_doc_id(self, fused: list[dict]) -> list[dict]:
-        """同 doc_id 最高分去重（强制无开关，始终生效）。
+    def _dedup_by_doc_id(self, fused: list[dict], *, keep_n: int = 1) -> list[dict]:
+        """同 doc_id 保留 RRF 最高 keep_n 条（强制无开关，始终生效）。
 
-        遍历 RRF 融合后的 items，按 doc_id 分组保留得分最高的 chunk，
-        保证输出 doc_id 唯一。无 doc_id 的项也会被保留（key="").
+        keep_n = min(top_k, KB_DOC_CHUNK_KEEP)，且 keep_n ≥ 1。
+        无 doc_id 的项共用 key="" 分组。输出顺序与 RRF 融合后一致。
         """
-        by_doc: dict[str, dict] = {}
+        keep_n = max(1, keep_n)
+        by_doc: dict[str, list[dict]] = {}
         for item in fused:
             doc_id = item.get("doc_id", "")
-            if (
-                doc_id not in by_doc
-                or item.get("score", 0.0) > by_doc[doc_id].get("score", 0.0)
-            ):
-                by_doc[doc_id] = item
-        return list(by_doc.values())
+            by_doc.setdefault(doc_id, []).append(item)
+
+        kept_chunk_ids: set[str] = set()
+        for items in by_doc.values():
+            ranked = sorted(items, key=lambda x: x.get("score", 0.0), reverse=True)
+            for item in ranked[:keep_n]:
+                cid = item.get("chunk_id")
+                if cid:
+                    kept_chunk_ids.add(cid)
+                else:
+                    kept_chunk_ids.add(f"__no_cid_{id(item)}")
+
+        result: list[dict] = []
+        for item in fused:
+            cid = item.get("chunk_id")
+            key = cid if cid else f"__no_cid_{id(item)}"
+            if key in kept_chunk_ids:
+                result.append(item)
+        return result
 
     @staticmethod
     def _normalize_content(text: str) -> str:

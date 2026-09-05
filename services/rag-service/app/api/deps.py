@@ -1,6 +1,7 @@
 """FastAPI 依赖注入 + 统一响应助手。"""
 import os
 import tempfile
+import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
@@ -220,6 +221,39 @@ def success_response(data, message: str = "success") -> dict:
         "data": data,
         "trace_id": get_trace_id(),
     }
+
+
+async def save_upload_to_staging(file: UploadFile, doc_id: uuid.UUID) -> Path:
+    """保存上传文件到异步入库 staging 目录（后台任务结束后删除）。"""
+    suffix = Path(file.filename or "").suffix
+    max_size = settings.KB_MAX_FILE_SIZE
+    filename = file.filename or ""
+    declared_size = getattr(file, "size", None)
+    logger.info(
+        "upload_received",
+        filename=filename,
+        declared_size=declared_size,
+        max_size=max_size,
+        staging_doc_id=str(doc_id),
+    )
+    if isinstance(declared_size, int) and declared_size > max_size:
+        raise BizException(
+            ErrorCode.B0001,
+            f"上传文件超过大小上限 {max_size // (1024 * 1024)}MB",
+        )
+
+    staging_dir = Path(settings.KB_INGEST_STAGING_DIR)
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    dest = staging_dir / f"{doc_id}{suffix}"
+
+    content = await file.read()
+    if len(content) > max_size:
+        raise BizException(
+            ErrorCode.B0001,
+            f"上传文件超过大小上限 {max_size // (1024 * 1024)}MB",
+        )
+    dest.write_bytes(content)
+    return dest
 
 
 async def save_upload_file(file: UploadFile) -> Path:

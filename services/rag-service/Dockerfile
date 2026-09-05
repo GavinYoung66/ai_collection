@@ -55,5 +55,7 @@ ENV KB_LLM_ANSWER_ENABLED=false \
 # 文档入库限制（对齐 DD-03 §8）
 ENV KB_MAX_FILE_SIZE=20971520 \
     KB_PARSE_TIMEOUT=30 \
+    KB_INGEST_JOB_TIMEOUT=1800 \
+    KB_INGEST_STAGING_DIR=data/ingest_staging \
     KB_HEALTH_DEGRADED_MODE=false
 CMD ["/entrypoint.sh"]

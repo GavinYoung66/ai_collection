@@ -118,7 +118,7 @@ class TestEmbedEsOnlyDegradation:
 
     @pytest.mark.asyncio
     async def test_embed_failure_es_only_rrf_dedup_traceback(self):
-        """T4: ES-only 下 RRF/去重/溯源正常（同 doc_id 多 chunk 只留 1 条）。"""
+        """T4: ES-only 下 RRF/去重/溯源正常（同 doc_id 可保留多条 top-N）。"""
         sparse_hits = [
             {
                 "chunk_id": "chunk-a",
@@ -137,8 +137,8 @@ class TestEmbedEsOnlyDegradation:
         ]
         svc, _ = _make_service(embed_raises=True, sparse_hits=sparse_hits)
         result = await svc.hybrid_search("测试", "regulation", 5)
-        doc_ids = [r["doc_id"] for r in result["results"]]
-        assert doc_ids == ["doc-1"]  # 去重后 doc_id 唯一
+        assert len(result["results"]) >= 1
+        assert all(r["doc_id"] == "doc-1" for r in result["results"])
         assert result["results"][0]["version"] == 1
         assert result["results"][0]["source"] == "v1_legacy"
 

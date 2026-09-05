@@ -8,6 +8,9 @@ from typing import Any, cast
 import structlog
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
+from sqlalchemy import update
+
+from app.models.orm import KBDocument
 
 from app.parsers import ParserFactory
 from app.parsers.asset_extractor import assets_enabled
@@ -110,6 +113,105 @@ async def _delete_assets_with_retry(doc_id: str, doc_repo: DocRepo) -> None:
                 )
 
 
+def sanitize_ingest_error(exc: Exception) -> str:
+    """API/DB 可读失败原因，不含栈与裸异常串。"""
+    if isinstance(exc, BizException):
+        return (exc.message or "入库失败")[:500]
+    if isinstance(exc, ParseTimeoutError):
+        return f"解析超时（>{settings.KB_PARSE_TIMEOUT}s）"
+    return "入库失败，请稍后刷新列表或联系管理员"
+
+
+def schedule_background_ingest(
+    doc_id: uuid.UUID,
+    file_path: Path,
+    filename: str,
+    category: str,
+    summary: str | None,
+) -> None:
+    """异步入库：在运行中的事件循环上调度后台任务。"""
+    asyncio.create_task(
+        run_background_ingest_job(doc_id, file_path, filename, category, summary)
+    )
+
+
+async def run_background_ingest_job(
+    doc_id: uuid.UUID,
+    file_path: Path,
+    filename: str,
+    category: str,
+    summary: str | None,
+) -> None:
+    """后台入库 worker：阶段短事务、超时回收、finally 清理 staging 文件。"""
+    from common.db.session import async_session_factory
+    from app.api.deps import get_embed_client, get_es_client, get_milvus_client, get_redis
+
+    try:
+        await asyncio.wait_for(
+            _run_background_ingest_impl(
+                doc_id, file_path, filename, category, summary,
+                milvus=get_milvus_client(),
+                es=get_es_client(),
+                embed=await get_embed_client(),
+                redis=await get_redis(),
+            ),
+            timeout=settings.KB_INGEST_JOB_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.error("background_ingest_timeout", doc_id=str(doc_id))
+        async with async_session_factory() as session:
+            await DocRepo(session).mark_failed(doc_id, "ingest job timeout")
+            await session.commit()
+    except Exception as e:
+        logger.error(
+            "background_ingest_failed",
+            doc_id=str(doc_id),
+            error=str(e),
+            exc_info=True,
+        )
+        async with async_session_factory() as session:
+            await DocRepo(session).mark_failed(doc_id, sanitize_ingest_error(e))
+            await session.commit()
+    finally:
+        try:
+            file_path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning(
+                "ingest_staging_cleanup_failed",
+                path=str(file_path),
+                error=str(e),
+            )
+
+
+async def _run_background_ingest_impl(
+    doc_id: uuid.UUID,
+    file_path: Path,
+    filename: str,
+    category: str,
+    summary: str | None,
+    *,
+    milvus: MilvusClient,
+    es: ESClient,
+    embed: EmbedClient,
+    redis: Redis | None,
+) -> None:
+    from common.db.session import async_session_factory
+
+    async with async_session_factory() as session:
+        ingest = IngestService(
+            doc_repo=DocRepo(session),
+            chunk_repo=ChunkRepo(session),
+            milvus_client=milvus,
+            es_client=es,
+            embed_client=embed,
+            redis=redis,
+        )
+        await ingest.run_ingest_for_doc(
+            doc_id, file_path, filename, category, summary=summary
+        )
+        await session.commit()
+
+
 class IngestService:
     def __init__(
         self,
@@ -164,6 +266,327 @@ class IngestService:
         except Exception as e:
             logger.warning("rollback_chunks_failed", doc_id=doc_id_str, error=str(e))
         await _delete_assets_with_retry(doc_id_str, self.doc_repo)
+
+    async def _mark_failed_and_rollback_vectors(
+        self, doc_id: uuid.UUID, error: str, *, rollback_milvus: bool = False
+    ) -> None:
+        doc_id_str = str(doc_id)
+        if rollback_milvus:
+            try:
+                await self.milvus.delete_by_doc(doc_id_str)
+            except Exception as e:
+                logger.warning(
+                    "orphan_milvus_cleanup_failed",
+                    doc_id=doc_id_str,
+                    error=str(e),
+                )
+        await self.doc_repo.mark_failed(doc_id, error)
+
+    async def run_ingest_for_doc(
+        self,
+        doc_id: uuid.UUID,
+        file_path: Path,
+        filename: str,
+        category: str,
+        summary: str | None = None,
+    ) -> dict:
+        """对已存在的 processing 文档执行完整入库（异步入库后台路径）。"""
+        await self.doc_repo.update_ingest_stage(doc_id, "parse")
+        await self.doc_repo.db.commit()
+
+        if not ParserFactory.is_supported(filename):
+            await self._mark_failed_and_rollback_vectors(
+                doc_id, f"不支持的文件格式: {Path(filename).suffix}"
+            )
+            await self.doc_repo.db.commit()
+            raise BizException(ErrorCode.A3001, f"不支持的文件格式: {Path(filename).suffix}")
+
+        assets: list = []
+        try:
+            parser = ParserFactory.get_parser(file_path)
+            parse_start = time.time()
+            logger.info(
+                "ingest_parse_start",
+                doc_id=str(doc_id),
+                filename=filename,
+                timeout=settings.KB_PARSE_TIMEOUT,
+                parse_start_ts=parse_start,
+            )
+            try:
+                if assets_enabled():
+                    raw_text, assets = await asyncio.wait_for(
+                        parser.extract_with_assets(file_path),
+                        timeout=settings.KB_PARSE_TIMEOUT,
+                    )
+                else:
+                    raw_text = await asyncio.wait_for(
+                        parser.extract_text(file_path),
+                        timeout=settings.KB_PARSE_TIMEOUT,
+                    )
+            except asyncio.TimeoutError as te:
+                logger.info(
+                    "ingest_parse_timeout",
+                    doc_id=str(doc_id),
+                    filename=filename,
+                    timeout=settings.KB_PARSE_TIMEOUT,
+                    elapsed_s=round(time.time() - parse_start, 3),
+                )
+                raise ParseTimeoutError(
+                    f"解析超时（>{settings.KB_PARSE_TIMEOUT}s）"
+                ) from te
+            logger.info(
+                "ingest_parse_done",
+                doc_id=str(doc_id),
+                filename=filename,
+                elapsed_s=round(time.time() - parse_start, 3),
+                text_len=len(raw_text or ""),
+            )
+        except BizException:
+            raise
+        except Exception as e:
+            logger.error("parse_failed", doc_id=str(doc_id), filename=filename, error=str(e))
+            if settings.KB_OCR_ASR_DEGRADED_KEEP_TEXT:
+                await self.doc_repo.update_content(doc_id, "")
+                await self.doc_repo.mark_failed(doc_id, sanitize_ingest_error(e))
+                await self.doc_repo.db.commit()
+                logger.warning(
+                    "ingest_degraded_parse_failed",
+                    filename=filename,
+                    doc_id=str(doc_id),
+                    error=str(e),
+                )
+                return {
+                    "doc_id": str(doc_id),
+                    "chunks_count": 0,
+                    "status": "failed",
+                    "degraded": True,
+                }
+            await self._mark_failed_and_rollback_vectors(
+                doc_id, sanitize_ingest_error(e)
+            )
+            await self.doc_repo.db.commit()
+            raise BizException(ErrorCode.A3001, "文档解析失败")
+
+        source = _detect_source(parser)
+        category = _resolve_ingest_category(category, filename, raw_text or "")
+        cleaned_text = self.chunk_service.clean(raw_text)
+
+        await self.doc_repo.update_content(doc_id, cleaned_text)
+        await self.doc_repo.db.execute(
+            update(KBDocument)
+            .where(KBDocument.id == doc_id)
+            .values(category=category, source=source)
+        )
+        await self.doc_repo.update_ingest_stage(doc_id, "body_index")
+        await self.doc_repo.db.commit()
+
+        return await self._index_body_and_assets(
+            doc_id, filename, category, cleaned_text, assets, summary, source
+        )
+
+    async def _index_body_and_assets(
+        self,
+        doc_id: uuid.UUID,
+        filename: str,
+        category: str,
+        cleaned_text: str,
+        assets: list,
+        summary: str | None,
+        source: str,
+    ) -> dict:
+        try:
+            chunks = self.chunk_service.split(cleaned_text, category)
+            if not chunks:
+                raise BizException(ErrorCode.A3002, "文档分块后无有效内容")
+        except BizException:
+            await self._mark_failed_and_rollback_vectors(
+                doc_id, "文档分块后无有效内容"
+            )
+            await self.doc_repo.db.commit()
+            raise
+        except Exception as e:
+            logger.error("chunk_failed", doc_id=str(doc_id), error=str(e))
+            await self._mark_failed_and_rollback_vectors(
+                doc_id, sanitize_ingest_error(e)
+            )
+            await self.doc_repo.db.commit()
+            raise BizException(ErrorCode.A3002, "文本切片失败")
+
+        chunk_uuids = [uuid.uuid4() for _ in chunks]
+        for i, chunk in enumerate(chunks):
+            chunk["id"] = str(chunk_uuids[i])
+            chunk["doc_id"] = str(doc_id)
+
+        body_index_start = time.time()
+        logger.info(
+            "ingest_body_index_start",
+            doc_id=str(doc_id),
+            filename=filename,
+            chunks_count=len(chunks),
+        )
+        milvus_written = False
+        try:
+            texts = [c["content"] for c in chunks]
+            vectors = await self.embed.batch_embed(texts)
+        except Exception as e:
+            logger.error(
+                "ingest_body_index_failed",
+                doc_id=str(doc_id),
+                elapsed_s=round(time.time() - body_index_start, 3),
+                error=str(e),
+            )
+            if settings.KB_EMBED_DEGRADED_KEEP_TEXT:
+                await self._ingest_degraded_fallback(doc_id, chunks, source, error=str(e))
+                await self.doc_repo.clear_ingest_progress(doc_id)
+                await self.doc_repo.db.commit()
+                return {
+                    "doc_id": str(doc_id),
+                    "chunks_count": len(chunks),
+                    "status": "active",
+                    "degraded": True,
+                }
+            await self._mark_failed_and_rollback_vectors(
+                doc_id, "向量入库失败"
+            )
+            await self.doc_repo.db.commit()
+            raise BizException(ErrorCode.A3003, "向量入库失败")
+
+        try:
+            metadata = [
+                {"chunk_id": c["id"], "doc_id": c["doc_id"], "category": c["category"]}
+                for c in chunks
+            ]
+            vector_ids = await self.milvus.insert(vectors, metadata)
+            milvus_written = True
+        except Exception as e:
+            logger.error("milvus_insert_failed", doc_id=str(doc_id), error=str(e))
+            await self._mark_failed_and_rollback_vectors(doc_id, "向量入库失败")
+            await self.doc_repo.db.commit()
+            raise BizException(ErrorCode.A3003, "向量入库失败")
+
+        for i, c in enumerate(chunks):
+            c["vector_id"] = vector_ids[i]
+
+        try:
+            es_docs = [
+                {
+                    "chunk_id": c["id"],
+                    "content": c["content"],
+                    "doc_id": c["doc_id"],
+                    "category": c["category"],
+                }
+                for c in chunks
+            ]
+            await self.es.index_docs(es_docs)
+        except Exception as e:
+            logger.error("es_index_failed", doc_id=str(doc_id), error=str(e))
+            if settings.KB_ES_DEGRADED_KEEP_MILVUS:
+                chunk_entities = [
+                    {
+                        "id": uuid.UUID(c["id"]),
+                        "doc_id": doc_id,
+                        "chunk_index": c["chunk_index"],
+                        "content": c["content"],
+                        "vector_id": c["vector_id"],
+                        "category": c["category"],
+                    }
+                    for c in chunks
+                ]
+                await self.chunk_repo.batch_create(chunk_entities)
+                await self.doc_repo.update_status(doc_id, "active")
+                await self.doc_repo.clear_ingest_progress(doc_id)
+                await self.doc_repo.db.commit()
+                asyncio.create_task(self._backfill_es_index(es_docs, doc_id))
+                return {
+                    "doc_id": str(doc_id),
+                    "chunks_count": len(chunks),
+                    "status": "active",
+                    "degraded": True,
+                }
+            await self._mark_failed_and_rollback_vectors(
+                doc_id, "ES 索引写入失败", rollback_milvus=milvus_written
+            )
+            await self.doc_repo.db.commit()
+            raise BizException(ErrorCode.A3003, "ES 索引写入失败")
+
+        chunk_entities = [
+            {
+                "id": uuid.UUID(c["id"]),
+                "doc_id": doc_id,
+                "chunk_index": c["chunk_index"],
+                "content": c["content"],
+                "vector_id": c["vector_id"],
+                "category": c["category"],
+            }
+            for c in chunks
+        ]
+        try:
+            await self.chunk_repo.batch_create(chunk_entities)
+        except Exception as e:
+            logger.error("chunk_persist_failed", doc_id=str(doc_id), error=str(e))
+            await self._mark_failed_and_rollback_vectors(
+                doc_id, "分块持久化失败", rollback_milvus=milvus_written
+            )
+            try:
+                await self.es.delete_by_doc(str(doc_id))
+            except Exception as es_e:
+                logger.warning("orphan_es_cleanup_failed", doc_id=str(doc_id), error=str(es_e))
+            await self.doc_repo.db.commit()
+            raise BizException(ErrorCode.A3003, "分块持久化失败")
+
+        logger.info(
+            "ingest_body_index_done",
+            doc_id=str(doc_id),
+            elapsed_s=round(time.time() - body_index_start, 3),
+            chunks_count=len(chunks),
+        )
+
+        await self.doc_repo.db.commit()
+
+        if assets:
+            await self.doc_repo.update_ingest_stage(doc_id, "asset_index")
+            await self.doc_repo.db.commit()
+            asset_index_start = time.time()
+            logger.info(
+                "ingest_asset_index_start",
+                doc_id=str(doc_id),
+                asset_count=len(assets),
+            )
+            try:
+                await self._get_asset_service().process_assets(doc_id, assets, category)
+            except Exception as e:
+                logger.error(
+                    "ingest_asset_index_failed",
+                    doc_id=str(doc_id),
+                    elapsed_s=round(time.time() - asset_index_start, 3),
+                    error=str(e),
+                )
+                await self._rollback_ingest_indices(doc_id)
+                await self._mark_failed_and_rollback_vectors(doc_id, "资产索引失败")
+                await self.doc_repo.db.commit()
+                raise BizException(ErrorCode.A3003, "资产索引失败") from e
+            logger.info(
+                "ingest_asset_index_done",
+                doc_id=str(doc_id),
+                elapsed_s=round(time.time() - asset_index_start, 3),
+            )
+        else:
+            logger.info("ingest_asset_index_skipped", doc_id=str(doc_id), elapsed_s=0)
+
+        await self.doc_repo.update_status(doc_id, "active")
+        await self.doc_repo.clear_ingest_progress(doc_id)
+
+        if summary:
+            await SummaryService(self.doc_repo, self.es).write_summary(
+                doc_id, summary, retries=0, raise_on_failure=False
+            )
+
+        await self.doc_repo.db.commit()
+        return {
+            "doc_id": str(doc_id),
+            "chunks_count": len(chunks),
+            "status": "active",
+        }
 
     async def ingest(
         self, file_path: Path, filename: str, category: str,

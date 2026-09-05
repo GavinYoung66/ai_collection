@@ -33,7 +33,7 @@ STATUS_CHOICES = ["全部", "active", "processing", "failed", "archived"]
 CHUNK_TABLE_HEADERS = [
     "content", "title", "doc_id", "category", "chunk_index", "RRF", "rerank", "source",
 ]
-DOC_TABLE_HEADERS = ["标题", "分类", "status", "chunks", "创建时间", "doc_id"]
+DOC_TABLE_HEADERS = ["标题", "分类", "status", "stage", "chunks", "创建时间", "doc_id"]
 
 PREVIEW_CHARS = 800
 RAW_DUMP_MAX = 80_000
@@ -146,17 +146,32 @@ def format_upload_card(data: dict) -> str:
     degraded = data.get("degraded")
     filename = data.get("filename") or "-"
     category = category_zh(data.get("category"))
+    stage = data.get("ingest_stage")
+    progress = data.get("ingest_progress")
     lines = [
         "### 入库结果",
         f"- **文件**: `{escape(filename)}`",
         f"- **doc_id**: `{doc_id}`",
         f"- **分类**: {category}",
         f"- **status**: `{status}`",
-        f"- **chunks_count**: `{chunks}`",
     ]
+    if status == "processing":
+        lines.append(
+            "- 后台正在解析/索引，请刷新列表查看 **stage** 与 **ingest_progress**；"
+            "完成前 **不可检索**，请勿重复上传同名文件。"
+        )
+    if stage:
+        lines.append(f"- **ingest_stage**: `{stage}`")
+    if progress is not None:
+        lines.append(f"- **ingest_progress**: `{progress}`")
+    if chunks != "-":
+        lines.append(f"- **chunks_count**: `{chunks}`")
     if degraded is not None:
         flag = "是 ⚠️" if degraded else "否"
         lines.append(f"- **degraded**: {flag}")
+    err = data.get("ingest_error")
+    if err:
+        lines.append(f"- **ingest_error**: {escape(str(err))}")
     return "\n".join(lines)
 
 
@@ -165,7 +180,7 @@ def format_doc_detail(data: dict) -> str:
     preview = content[:1200]
     more = f"\n\n_（正文已截断，共 {len(content)} 字）_" if len(content) > 1200 else ""
     summary = data.get("summary") or "（无摘要）"
-    return "\n".join([
+    lines = [
         f"### {data.get('title') or '未命名文档'}",
         f"- **doc_id**: `{data.get('id') or '-'}`",
         f"- **分类**: {category_zh(data.get('category'))}",
@@ -173,11 +188,27 @@ def format_doc_detail(data: dict) -> str:
         f"- **chunks**: `{data.get('chunks_count', '-')}`",
         f"- **创建**: {data.get('create_time') or '-'} · **更新**: {data.get('update_time') or '-'}",
         f"- **摘要**: {summary}",
-        "",
-        "**正文预览**",
-        "",
-        preview + more,
-    ])
+    ]
+    stage = data.get("ingest_stage")
+    if stage:
+        lines.append(f"- **ingest_stage**: `{stage}`")
+    progress = data.get("ingest_progress")
+    if progress is not None:
+        lines.append(f"- **ingest_progress**: `{progress}`")
+    err = data.get("ingest_error")
+    if err:
+        lines.append(f"- **ingest_error**: ⚠️ {escape(str(err))}")
+    assets = data.get("assets") or []
+    if assets:
+        lines.append("")
+        lines.append(f"**内嵌资产**（{len(assets)} 项）")
+        for a in assets[:20]:
+            lines.append(
+                f"- P{a.get('page', 0)} · {a.get('asset_type', '-')} · "
+                f"`{a.get('storage_path', '-')}`"
+            )
+    lines.extend(["", "**正文预览**", "", preview + more])
+    return "\n".join(lines)
 
 
 def citation_lines(body: dict) -> list[str]:
@@ -305,7 +336,9 @@ def format_query_gate_md(
     meta = body.get("llm_meta") or {}
     skip = meta.get("skip_reason")
     rewritten = extract_rewritten_query(body)
-    splice_note = f"（已拼接近 {spliced_n} 轮）" if spliced_n else "（未拼接历史）"
+    splice_note = (
+        f"（会话历史 {spliced_n} 轮，未拼接进请求）" if spliced_n else "（未拼接历史）"
+    )
     rewritten_line = rewritten if rewritten else "（响应未返回改写结果，不臆造）"
     return "\n".join([
         f"**用户原问题**: {user_query or '-'}",
@@ -396,10 +429,14 @@ def chunks_table_rows(results: list[dict]) -> list[list]:
 def docs_table_rows(items: list[dict]) -> list[list]:
     rows: list[list] = []
     for doc in items:
+        stage = doc.get("ingest_stage") or ""
+        if doc.get("status") == "failed" and doc.get("ingest_error"):
+            stage = f"{stage} ⚠️" if stage else "failed ⚠️"
         rows.append([
             doc.get("title") or "",
             category_zh(doc.get("category")),
             doc.get("status") or "",
+            stage,
             doc.get("chunks_count", ""),
             (doc.get("create_time") or "")[:19],
             doc.get("id") or "",

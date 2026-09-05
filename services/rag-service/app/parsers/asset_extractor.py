@@ -70,10 +70,51 @@ class AssetExtractor:
         return []
 
     @staticmethod
-    def _build_table_asset(page: int, rows: list[list[str]]) -> dict:
+    def _resolve_table_location(headers: list[str], location: str | None) -> str:
+        loc = (location or "").strip()
+        if loc:
+            return loc
+        header_label = ", ".join(h for h in headers if h)
+        return header_label or "未命名表"
+
+    @staticmethod
+    def _build_column_summary(
+        headers: list[str], data_rows: list[list[str]], page: int, location: str
+    ) -> str | None:
+        if not headers or not data_rows:
+            return None
+        col_idx = 0
+        for name in ("技术类别", "子系统"):
+            if name in headers:
+                col_idx = headers.index(name)
+                break
+        values: list[str] = []
+        seen: set[str] = set()
+        for row in data_rows:
+            if col_idx < len(row) and row[col_idx]:
+                val = str(row[col_idx]).strip()
+                if val and val not in seen:
+                    seen.add(val)
+                    values.append(val)
+        if not values:
+            return None
+        col_name = headers[col_idx] if col_idx < len(headers) else "列1"
+        prefix = f"表格(第{page}页)[{location}]"
+        summary = f"{prefix}: {col_name}: {', '.join(values)}"
+        max_len = settings.KB_CHUNK_SIZE
+        if len(summary) > max_len:
+            summary = summary[: max_len - 3] + "..."
+        return summary
+
+    @staticmethod
+    def _build_table_asset(
+        page: int, rows: list[list[str]], location: str | None = None
+    ) -> dict:
         """表格资产：首行为表头，后续行序列化（合并单元格值在行内保留，取左上角）。"""
         headers = [h for h in (rows[0] if rows else [])]
         data_rows = rows[1:] if rows else []
+        loc = AssetExtractor._resolve_table_location(headers, location)
+        prefix = f"表格(第{page}页)[{loc}]"
         serialized_lines: list[str] = []
         for row in data_rows:
             pairs = [
@@ -82,14 +123,19 @@ class AssetExtractor:
                 if row[j]
             ]
             if pairs:
-                serialized_lines.append(f"表格(第{page}页): {', '.join(pairs)}")
-        return {
+                serialized_lines.append(f"{prefix}: {', '.join(pairs)}")
+        result: dict = {
             "type": "table",
             "page": page,
             "headers": headers,
             "rows": data_rows,
             "serialized_lines": serialized_lines,
+            "location": loc,
         }
+        summary_line = AssetExtractor._build_column_summary(headers, data_rows, page, loc)
+        if summary_line:
+            result["summary_line"] = summary_line
+        return result
 
     def _extract_pdf(self, file_path: Path) -> list[dict]:
         import fitz  # PyMuPDF
@@ -201,6 +247,12 @@ class AssetExtractor:
         extract_tables = table_extract_enabled()
         prs = Presentation(str(file_path))
         for i, slide in enumerate(prs.slides, start=1):
+            slide_title = ""
+            try:
+                if slide.shapes.title and slide.shapes.title.text:
+                    slide_title = slide.shapes.title.text.strip()
+            except Exception:
+                pass
             for shape in slide.shapes:
                 try:
                     if extract_images and shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
@@ -209,7 +261,9 @@ class AssetExtractor:
                     elif extract_tables and shape.has_table:
                         rows = [[cell.text.strip() for cell in row.cells] for row in shape.table.rows]
                         if rows:
-                            assets.append(self._build_table_asset(i, rows))
+                            assets.append(
+                                self._build_table_asset(i, rows, location=slide_title or None)
+                            )
                 except Exception:
                     continue
         return assets

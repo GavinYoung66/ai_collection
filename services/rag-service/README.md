@@ -148,6 +148,7 @@ bash scripts/smoke/smoke_rag_v2.sh
 | `KB_ASR_AMR_WMA_ENABLED`   | `false`        | `true` AMR/WMA ffmpeg 解码 → 复用 VAD/ASR 转写（关闭=白名单外 A3001，V4 行为）                  |
 | `KB_ASSETS_DIR`            | `data/assets/` | 内嵌资产本地存储目录（Docker 挂载 volume，与 Gradio 共享预览源）                                |
 | `KB_ASSETS_MAX_SIZE`       | `1024`         | 图片渲染最大边长（px，等比缩放）                                                                |
+| `KB_DOC_CHUNK_KEEP`        | `5`            | RRF 后同 doc_id 保留 chunk 数上限；实际保留 N = min(请求 top_k, keep)                           |
 
 ### 一键回退方案
 
@@ -355,6 +356,25 @@ bash scripts/smoke/smoke_rag_v5.sh
 
 - 启动/页面地址/访问约束/`RAG_API_TOKEN` 注入见 **§E**（Gradio 浏览器前端）；12 步全链路验证见 **§F**。
 - 要点：Gradio 为独立 compose 服务（`docker compose up -d gradio`，依赖 rag-service healthy），`RAG_API_TOKEN` 由环境注入（`${RAG_API_TOKEN:?must set internal token}` 强制必填），前端不硬编码；图片预览按 `storage_path` 从共享 `rag_assets` 卷读取，表格按 `content_json` 渲染 `gr.Dataframe`。
+
+### BREAKING：异步入库与可观测（async-kb-ingest-observability）
+
+**`POST /api/v1/kb/documents` 行为变更（HTTP 200，非 202）：**
+
+| 变更项 | 说明 |
+| ------ | ---- |
+| 早返回 | 校验通过后立即返回 `{ doc_id, status: "processing" }`；解析/索引在后台完成 |
+| 轮询 | 调用方 MUST 轮询 `GET /kb/documents` 或 `GET /kb/documents/{id}` 直至 `status` 为 `active` 或 `failed` |
+| 进度字段 | 列表/详情新增 `ingest_stage` / `ingest_progress` / `ingest_error`（failed 时读 error 定位原因） |
+| 防重 | 同名且 `status=processing` 或 `status=active` 时重复 POST 返回 B0001，不得并行第二条入库任务 |
+| 不可检索 | `processing` / `failed` 文档 chunks 不参与混合检索命中 |
+| reindex | 保持同步；默认仅按 PG 正文重切，响应 `assets_rebuilt=false`（不重建 docx/xlsx 内嵌资产）。**表格章节前缀/列汇总增强仅对新上传生效**，存量文档须删除后重传；Gradio reindex 不会补全表格资产 |
+
+**stage → progress 映射：** `parse=25` · `body_index=50` · `asset_index=75` · `done=100`（无资产时跳过 asset_index）。
+
+**配置：** `KB_INGEST_JOB_TIMEOUT`（默认 1800s，后台 job 总时限）；`KB_INGEST_STAGING_DIR`（staging 临时文件目录，任务结束自动清理）。进程重启后 startup 会将超时 `processing` 置 `failed`（`ingest_error` 含 timeout 文案）。
+
+**Gradio：** 上传后立即展示 `processing`；列表含 `stage` 列；reindex 使用 600s 超时 + ReadTimeout 后轮询；ConnectError 仍报「后端不可用」（与 ReadTimeout 区分）。
 
 ### V5 Migrate Runbook
 

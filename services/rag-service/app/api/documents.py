@@ -5,13 +5,22 @@ import structlog
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, get_embed_client, get_es_client, get_milvus_client, get_redis, save_upload_file, success_response
+from app.api.deps import (
+    get_db,
+    get_embed_client,
+    get_es_client,
+    get_milvus_client,
+    get_redis,
+    save_upload_to_staging,
+    success_response,
+)
 from app.models.document import SummaryUpdateRequest
 from app.parsers import ParserFactory
+from app.repositories.asset_repo import AssetRepo
 from app.repositories.chunk_repo import ChunkRepo
 from app.repositories.doc_repo import DocRepo
 from app.services import query_cache
-from app.services.ingest_service import IngestService, _delete_assets_with_retry
+from app.services.ingest_service import IngestService, _delete_assets_with_retry, schedule_background_ingest
 from app.services.chunk_service import ChunkService
 from app.services.rate_limit import rate_limiter
 from app.services.require_role import require_roles
@@ -50,60 +59,68 @@ def _get_ingest_service(
 async def upload_document(
     file: UploadFile = File(...),
     category: str = Form(...),
-    # V4 新增：可选摘要（上游业务中台预生成，随入库提交；不携带 = 存量行为完全不变）
     summary: str = Form(""),
     auth: None = Depends(require_roles("ADMIN", "SUPERVISOR")),
     rate: None = Depends(rate_limiter("kb_upload", 20)),
     db: AsyncSession = Depends(get_db),
-    milvus: MilvusClient = Depends(get_milvus_client),
-    es: ESClient = Depends(get_es_client),
-    embed: EmbedClient = Depends(get_embed_client),
 ):
-    """上传文档入库（V4 新增可选 form 字段 `summary`，其余为存量接口保持不变）。
+    """上传文档异步入库（BREAKING：校验通过后立即返回 status=processing，后台完成索引）。
 
-    - 存量行为不变：`file` + `category` 必填，解析 → 清洗 → 分块 → 双索引入库；
-    - **新增（V4）**：可选 form 字段 `summary`（文档级摘要，上游业务中台预生成），
-      长度超 `KB_SUMMARY_MAX_LEN`（默认 200）返回 B0001；不携带 = 存量行为完全不变；
-    - **新增（V4）**：携带摘要时按 ES（检索副本）→ PG（权威源）顺序写入，
-      ES 写失败仅 warning（含 trace_id）+ PG 不写，正文已 active 不回滚、不返回错误；
-    - 权限：ADMIN/SUPERVISOR；限流 20/min。
+    - 校验失败仍同步返回 BizException；
+    - 同名且 status=processing 的文档存在时拒绝重复上传（B0001）；
+    - 客户端应轮询列表/详情直至 active 或 failed（可读 ingest_error）。
     """
     if category not in _VALID_CATEGORIES:
         raise BizException(ErrorCode.B0001, f"category 必须为: {_VALID_CATEGORIES}")
-    if not ParserFactory.is_supported(file.filename or ""):
-        raise BizException(ErrorCode.A3001, f"不支持的文件格式: {file.filename}")
-    # V4 校验：摘要长度超上限返回 B0001（空串/未携带跳过，存量行为不变）
+    filename = file.filename or ""
+    if not ParserFactory.is_supported(filename):
+        raise BizException(ErrorCode.A3001, f"不支持的文件格式: {filename}")
     if summary and len(summary) > settings.KB_SUMMARY_MAX_LEN:
         raise BizException(
             ErrorCode.B0001,
             f"summary 长度超过上限 {settings.KB_SUMMARY_MAX_LEN} 字符",
         )
 
-    file_path = await save_upload_file(file)
-    # 补索引持久化需要 Redis（rag-service-final-fix 5.9）
-    redis = await get_redis()
-    ingest = _get_ingest_service(db, milvus, es, embed, redis)
-    try:
-        result = await ingest.ingest(
-            file_path, file.filename, category, summary=summary or None
+    doc_repo = DocRepo(db)
+    if await doc_repo.find_processing_by_title(filename):
+        raise BizException(
+            ErrorCode.B0001,
+            "同名文件正在入库中，请稍后刷新列表查看进度",
         )
+    if await doc_repo.find_active_by_title(filename):
+        raise BizException(
+            ErrorCode.B0001,
+            "同名文件已在知识库中（active），请先删除后再上传",
+        )
+
+    try:
+        doc_id = await doc_repo.create(
+            title=filename,
+            category=category,
+            content="",
+        )
+        await doc_repo.update_ingest_stage(doc_id, "parse")
+        file_path = await save_upload_to_staging(file, doc_id)
         await db.commit()
+
+        schedule_background_ingest(
+            doc_id, file_path, filename, category, summary or None
+        )
+
         if settings.KB_CACHE_ENABLED:
             await query_cache.invalidate_category(category)
-        return success_response(result)
+
+        return success_response({
+            "doc_id": str(doc_id),
+            "status": "processing",
+        })
     except BizException:
         await db.rollback()
         raise
     except Exception as e:
         await db.rollback()
-        logger.error("upload_failed", error=str(e))
-        raise BizException(ErrorCode.B0007, f"文档上传失败: {e}")
-    finally:
-        # 临时文件兜底清理：无论成功/失败均删除，避免 /tmp 残留（rag-service-final-fix 5.1）
-        try:
-            file_path.unlink(missing_ok=True)
-        except OSError as e:
-            logger.warning("upload_temp_cleanup_failed", path=str(file_path), error=str(e))
+        logger.error("upload_failed", error=str(e), exc_info=True)
+        raise BizException(ErrorCode.B0007, "文档上传失败，请稍后重试")
 
 
 @router.get("")
@@ -116,7 +133,6 @@ async def list_documents(
     rate: None = Depends(rate_limiter("kb_list", 60)),
     db: AsyncSession = Depends(get_db),
 ):
-    # 分页双支持（对齐 step5/02）：page_size 优先，size 兼容回退，默认 20，最大 100
     resolved_size = page_size or size or 20
     doc_repo = DocRepo(db)
     items, total = await doc_repo.list_by_category(
@@ -136,13 +152,6 @@ async def get_document(
     rate: None = Depends(rate_limiter("kb_detail", 60)),
     db: AsyncSession = Depends(get_db),
 ):
-    """查询文档详情（V4 新增响应字段 `summary`，其余为存量接口保持不变）。
-
-    - 存量字段不变：id/title/category/content/status/version/chunks_count/create_time/update_time；
-    - **新增（V4）**：响应新增 `summary`（str，可空，来源 PG kb_documents.summary 权威源，
-      存量/无摘要文档为 null）；文档列表接口不新增该字段，保持负载不变；
-    - doc_id 不存在/已归档 → B0004。
-    """
     try:
         uid = uuid.UUID(doc_id)
     except ValueError:
@@ -154,6 +163,7 @@ async def get_document(
         raise BizException(ErrorCode.B0004, f"文档不存在: {doc_id}")
 
     chunks_count = await doc_repo.get_chunks_count(uid)
+    assets = await AssetRepo(db).get_by_doc(uid)
     return success_response({
         "id": str(doc.id),
         "title": doc.title,
@@ -164,8 +174,19 @@ async def get_document(
         "chunks_count": chunks_count,
         "create_time": doc.create_time.isoformat() if doc.create_time else "",
         "update_time": doc.update_time.isoformat() if doc.update_time else "",
-        # V4 新增：文档级摘要（PG 权威源，可空；存量/无摘要文档为 null）
         "summary": doc.summary,
+        "ingest_stage": doc.ingest_stage,
+        "ingest_progress": doc.ingest_progress,
+        "ingest_error": doc.ingest_error,
+        "assets": [
+            {
+                "asset_type": a.asset_type,
+                "page": a.page,
+                "storage_path": a.storage_path,
+                "mime_type": a.mime_type,
+            }
+            for a in assets
+        ],
     })
 
 
@@ -188,7 +209,7 @@ async def delete_document(
 
     milvus = get_milvus_client()
     es = get_es_client()
-    embed = get_embed_client()
+    embed = await get_embed_client()
     ingest = _get_ingest_service(db, milvus, es, embed)
     try:
         await ingest.delete_by_doc(doc_id)
@@ -212,6 +233,7 @@ async def reindex_document(
     es: ESClient = Depends(get_es_client),
     embed: EmbedClient = Depends(get_embed_client),
 ):
+    """重新索引（同步）：默认仅按 PG 正文重切，不重建多模态资产。"""
     try:
         uid = uuid.UUID(doc_id)
     except ValueError:
@@ -233,7 +255,6 @@ async def reindex_document(
     except Exception as e:
         logger.warning("es_delete_failed", doc_id=doc_id, error=str(e))
 
-    # V5: reindex 前级联清理旧资产（kb_doc_assets 记录 + 本地资产目录，重试 2 次 + 告警，不阻断）
     await _delete_assets_with_retry(doc_id, doc_repo)
 
     await doc_repo.update_status(uid, "processing")
@@ -243,7 +264,8 @@ async def reindex_document(
     chunks = chunk_service.split(cleaned_text, doc.category)
     if not chunks:
         await doc_repo.update_status(uid, "failed")
-        await db.rollback()
+        await doc_repo.mark_failed(uid, "文档重新分块后无有效内容")
+        await db.commit()
         raise BizException(ErrorCode.A3002, "文档重新分块后无有效内容")
 
     import uuid as uuid_mod
@@ -252,13 +274,15 @@ async def reindex_document(
         chunk["id"] = str(chunk_uuids[i])
         chunk["doc_id"] = doc_id
 
+    milvus_written = False
     try:
         texts = [c["content"] for c in chunks]
         vectors = await embed.batch_embed(texts)
     except Exception as e:
-        await doc_repo.update_status(uid, "failed")
-        await db.rollback()
-        raise BizException(ErrorCode.A3003, f"向量入库失败: {e}")
+        await doc_repo.mark_failed(uid, "向量入库失败")
+        await db.commit()
+        logger.error("reindex_embed_failed", doc_id=doc_id, error=str(e))
+        raise BizException(ErrorCode.A3003, "向量入库失败")
 
     try:
         metadata = [
@@ -266,10 +290,12 @@ async def reindex_document(
             for c in chunks
         ]
         vector_ids = await milvus.insert(vectors, metadata)
+        milvus_written = True
     except Exception as e:
-        await doc_repo.update_status(uid, "failed")
-        await db.rollback()
-        raise BizException(ErrorCode.A3003, f"向量入库失败: {e}")
+        await doc_repo.mark_failed(uid, "向量入库失败")
+        await db.commit()
+        logger.error("reindex_milvus_failed", doc_id=doc_id, error=str(e))
+        raise BizException(ErrorCode.A3003, "向量入库失败")
 
     for i, c in enumerate(chunks):
         c["vector_id"] = vector_ids[i]
@@ -281,16 +307,21 @@ async def reindex_document(
                 "content": c["content"],
                 "doc_id": c["doc_id"],
                 "category": c["category"],
-                # V4：重建 ES 时回读 PG 权威源 doc.summary，保持两端摘要一致（rag-service-final-fix 4.1）
                 "doc_summary": doc.summary or "",
             }
             for c in chunks
         ]
         await es.index_docs(es_docs)
     except Exception as e:
-        await doc_repo.update_status(uid, "failed")
-        await db.rollback()
-        raise BizException(ErrorCode.A3003, f"ES 索引写入失败: {e}")
+        if milvus_written:
+            try:
+                await milvus.delete_by_doc(doc_id)
+            except Exception as milvus_e:
+                logger.warning("reindex_orphan_milvus_cleanup_failed", doc_id=doc_id, error=str(milvus_e))
+        await doc_repo.mark_failed(uid, "ES 索引写入失败")
+        await db.commit()
+        logger.error("reindex_es_failed", doc_id=doc_id, error=str(e))
+        raise BizException(ErrorCode.A3003, "ES 索引写入失败")
 
     chunk_entities = [
         {
@@ -305,6 +336,7 @@ async def reindex_document(
     ]
     await chunk_repo.batch_create(chunk_entities)
     await doc_repo.update_status(uid, "active")
+    await doc_repo.clear_ingest_progress(uid)
 
     await db.commit()
     if settings.KB_CACHE_ENABLED:
@@ -313,6 +345,7 @@ async def reindex_document(
         "doc_id": doc_id,
         "chunks_count": len(chunks),
         "status": "active",
+        "assets_rebuilt": False,
     })
 
 
@@ -325,14 +358,6 @@ async def update_document_summary(
     db: AsyncSession = Depends(get_db),
     es: ESClient = Depends(get_es_client),
 ):
-    """V4 新增：补全/更新文档摘要（存量文档、多模态异步入库后补场景）。
-
-    - 请求体 {"summary": str}，长度超 KB_SUMMARY_MAX_LEN（默认 200）由模型校验返回 B0001；
-    - doc_id 不存在/已归档（is_delete='1'）→ B0004；
-    - 写入顺序 ES（检索副本）→ PG（权威源），ES 写失败退避重试 3 次（1s/2s/4s），
-      重试仍失败返回失败（复用 A3003 语义），PG 不写（无半状态）；
-    - 全部成功失效该文档 category 的查询缓存。
-    """
     try:
         uid = uuid.UUID(doc_id)
     except ValueError:
