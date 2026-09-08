@@ -12,14 +12,21 @@
 |---|---|---|---|
 | v0.1 | 2026-08-18 | 初稿骨架，仅分层与防护链路 | — |
 | v1.0 | 2026-08-19 | 填充四层架构图、7 系统边界、依赖图、技术栈、部署拓扑、目录结构；Text2SQL 移出 MVP | 规范定稿 |
+| v1.1 | 2026-09-08 | 补充集成分层准则（Agent=MCP / 管理API=HTTP / 异步=事件） | Ellis Guo |
+| v1.2 | 2026-09-08 | 公共能力层去「RAG∈common」歧义；补实现深度与容量模型口径（platform-arch-unification-v5） | Ellis Guo |
 
 ## 一、设计原则
 
 1. 权责分离：传统系统负责流程调度、数据落库、业务执行；AI 仅负责认知判断、打分、建议输出，隔离大模型幻觉带来的业务风险。
 2. 链路分离：实时交互链路低延迟优先，不经过数据中台；离线计算链路统一走数据中台，保障口径一致与性能稳定。
-3. 模块解耦：七大子系统独立部署、独立迭代，通过标准化 HTTP/WS 接口交互，单个模块故障不影响全局业务；禁止跨模块直接 import 代码。
+3. 模块解耦：七大子系统独立部署、独立迭代；管理面走 HTTP/WS，Agent 取证走 MCP（见原则 6）；禁止跨模块直接 import 代码。
 4. 规范优先：所有架构决策不得违背 openspec/specs 宪法层与 step1 全局口径，冲突时以宪法层为准并同步修订。
-5. 最小闭环优先：M1 阶段先跑通"数据中台 + RAG + 质检"小闭环，其余子系统积木式叠加。
+5. 最小闭环优先：M1 阶段先跑通"数据中台 + RAG + 质检"小闭环，其余子系统积木式叠加。**实现深度口径**：当前深做切片为 `rag-service` 与 `complaint-service`；其余五个子系统可为 health 占位直至对应里程碑，不得表述为七系统业务功能已全部完备。
+6. 集成分层（platform-integration-boundaries）：
+   - **Agent / 工作流工具取证** → MCP（节点禁止散落直连下游 HTTP；MCP Server 内部可再 HTTP 调 rag/qc/业务系统）；
+   - **服务管理面 / CRUD / 人机 API** → HTTP/JSON（经网关或内网公共接口）；
+   - **异步通知**（通话结束、质检完成、回流）→ 事件（Redis Pub-Sub 或等价）；
+   - 禁止跨服务 `import` 内部包；共享能力下沉 `common/`（配置、安全、trace、LLM **transport/reliability/guardrails** 等跨切面）。**`rag-service`(8002) 是独立业务子系统，不是 `common` 库；混合检索/入库/Gradio 归属 rag-service。**
 
 ## 二、技术分层架构
 
@@ -27,16 +34,18 @@
 flowchart TB
     A[接入层<br/>Vue3前端 / 呼叫中心 / RTC语音流] --> GW[网关层<br/>nginx/traefik 生成X-Trace-Id]
     GW --> SVC[服务层 7大子系统<br/>各为Controller→Service→Repository]
-    SVC --> COM[公共能力层<br/>LLM工具/Guardrails/RAG组件/RTC工具/异常告警日志]
-    COM --> STO[存储层<br/>PostgreSQL public+dw / Milvus / Redis / 对象存储]
+    SVC --> COM[公共能力层<br/>LLM transport·reliability·Guardrails / RTC工具 / 安全·trace·日志]
+    SVC --> RAG[rag-service 8002<br/>混合检索·入库·多模态·Gradio]
+    COM --> STO[存储层<br/>PostgreSQL public+dw / Redis / 对象存储]
+    RAG --> STO2[Milvus / ES / PG / Redis]
 ```
 
 | 层 | 职责 | 延迟要求 |
 |---|---|---|
 | 接入层 | 前端交互、呼叫中心对接、RTC 语音流接入 | — |
 | 网关层 | 路由、鉴权、限流、生成并透传 X-Trace-Id | 网关损耗 < 50ms |
-| 服务层 | 7 子系统业务实现，每服务内 Controller→Service→Repository(DAO) 单向依赖 | 实时应答 ≤1.5s，质检告警 ≤3s |
-| 公共能力层 | LLM 调用、Guardrails 前后置、RAG 检索、RTC/VAD/状态机、异常告警日志 | 公共组件不持业务状态 |
+| 服务层 | 7 子系统业务实现（含 **rag-service 知识库产品**），每服务内 Controller→Service→Repository(DAO) 单向依赖 | 实时应答 ≤1.5s，质检告警 ≤3s |
+| 公共能力层 | LLM HTTP transport / reliability / Guardrails 钩子、RTC/VAD/状态机工具类、安全脱敏审计、trace/告警日志 | **不含** RAG 产品（检索/入库属 rag-service）；公共组件不持业务状态 |
 | 存储层 | PostgreSQL public（业务）+ dw（中台）双 schema、Milvus 向量、Redis 缓存、对象存储录音 | 普通查询 P95 < 500ms |
 
 ## 三、七大子系统服务边界
@@ -75,18 +84,20 @@ graph LR
     case --> pg
     case -->|用户特征| dp
     comp[complaint-service] --> pg
-    comp -->|合规知识| rag
-    comp -->|质检记录| qc
+    comp -->|合规知识经 MCP rag_kb| rag
+    comp -->|质检经 MCP call_qc| qc
     rv[review-service] --> pg
     rv -->|宽表| dp
 ```
 
+> 依赖图中 call→rag / qc→rag 为管理面或旁路 **HTTP**；complaint→rag / complaint→qc 为 Agent **MCP**（Server 内部可再 HTTP）。详见 step3/02。
+
 ### 3.2 职责边界要点
 
 - data-platform：不参与实时通话链路，不持业务写权限（仅读业务库 + 写 dw schema）。
-- rag-service：只管理知识内容与检索，不关心业务流程；检索 score<0.6 返回空并标记，由调用方兜底。
+- rag-service：**独立业务子系统（8002）**，只管理知识内容与检索/入库，不关心催收流程；检索 score<0.6 返回空并标记，由调用方兜底。能力不放在 `common/`。
 - qc-service：只做检测与打分，不做业务决策；告警走 Redis Pub-Sub，不阻塞主通话。
-- call-service：话术生成必经 RAG 检索 + Guardrails 校验；confidence<0.7 转人工；15 轮熔断；50 路并发限流。
+- call-service：话术生成必经 RAG 检索 + Guardrails 校验；confidence<0.7 转人工；15 轮熔断；**单节点外呼并发上限 50 路**（见容量模型）。
 - case/complaint/review：AI 只输出判断与建议，不直接改写业务核心数据。
 
 ## 四、LLM 安全防护链路
@@ -101,13 +112,25 @@ graph LR
 
 ## 五、公共能力层
 
-- LLM 通用调用工具：qwen-plus 结构化输出封装（temperature 0.1 / response_format json_object）；
-- Guardrails 合规护栏：前置拦截 + 后置校验，红线对齐 openspec/specs/00；
-- RAG 检索公共组件：混合检索（Milvus 稠密 + Elasticsearch BM25 稀疏 + bge-reranker 重排序）、score<0.6 降级；
-- RTC 语音公共工具：VAD 静音检测、语音打断、会话状态机；
-- 全局异常、告警、日志埋点组件：trace_id 全链路透传。
+`common/` 只放**跨服务真正共享**的能力；**不含**混合检索产品实现。
+
+- LLM：`common.llm.transport`（HTTP 执行）+ reliability / Provider 组合（重试、降级键）；结构化输出参数约定（temperature 0.1 / response_format json_object 等）；
+- Guardrails：共享前后置钩子（敏感词/红线），红线对齐 openspec/specs/00；领域规则可由各服务注册；
+- RTC 语音公共工具：VAD 静音检测、语音打断、会话状态机（工具类，非独立业务服务）；
+- 安全 / 配置 / trace：脱敏、审计、平台 Settings、X-Trace-Id 全链路透传、异常告警日志。
+
+**RAG 归属（勿混）：** 混合检索（Milvus 稠密 + Elasticsearch BM25 + rerank）、多模态入库、Gradio 工作台均在 **`services/rag-service`**。其他服务经 HTTP `/kb/*`（管理面）或 MCP `rag_kb`（Agent）调用，不 `import` rag 内部包。
 
 > Text2SQL 组件仅 M5+ 引入，MVP 期间账单查询走 RAG + 结构化接口，不启用 Text2SQL。
+
+### 5.1 MVP 容量模型（口径表）
+
+| 链路类型 | MVP/Demo 口径 | 说明 |
+|----------|---------------|------|
+| 单节点外呼并发 | **50 路** | step1/01、call-service 限流；与「质检吞吐」不是同一指标 |
+| 质检/转写吞吐 | 需求文档可出现「约 100 路」类表述 | **旁路/离线能力目标**，不等于外呼 50 路并发；实现以 qc-service 里程碑为准 |
+| 投诉研判压测基线 | 约 20 并发持续 / 峰值约 100 工单/小时 | 见 DD-05；非知识库篇数规模 |
+| 知识库规模 | MVP 种子级（百～千篇量级演示） | **未验证**「10 万篇 / 月 10 万工单」；简历勿写为已测事实 |
 
 ## 六、技术栈锁定
 
@@ -182,7 +205,7 @@ ai_collection/
 │   ├── case-service/        # 8005
 │   ├── complaint-service/   # 8006
 │   └── review-service/      # 8007
-├── common/                  # 公共能力层（config/db/security/llm/speech/callcenter/trace/errors/utils）
+├── common/                  # 跨切面公共能力（config/db/security/llm transport·reliability/…）；不含 RAG 产品
 ├── deploy/                  # embedding-service + rerank-service Dockerfile
 ├── migrations/              # Alembic 迁移脚本
 ├── scripts/                # smoke 脚本、seed 数据、敏感词初始化
@@ -192,4 +215,4 @@ ai_collection/
 └── demand/                  # 历史参考（只读，不参与运行）
 ```
 
-每个服务内部统一为 `api（Controller）/ service / repository（DAO）/ schemas / tests` 五段，遵循 openspec/specs/01 三层单向依赖；跨服务禁止互相 import 内部代码，必须走 HTTP/WS 接口。
+每个服务内部统一为 `api（Controller）/ service / repository（DAO）/ schemas / tests` 五段，遵循 openspec/specs/01 三层单向依赖；跨服务禁止互相 import 内部代码，必须走 HTTP/WS（管理面）或 MCP（Agent 取证），见原则 6。

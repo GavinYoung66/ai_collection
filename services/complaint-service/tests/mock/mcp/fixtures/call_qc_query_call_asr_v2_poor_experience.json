@@ -1,0 +1,15 @@
+[
+  {
+    "call_session_id": "S-V2-POOR-001",
+    "call_start_time": "2026-09-05T10:30:00+08:00",
+    "call_duration": 180,
+    "asr_text_with_timestamp": [
+      {"ts": "10:30:05", "speaker": "agent", "text": "请尽快还款，按合同约定执行。"},
+      {"ts": "10:30:30", "speaker": "user", "text": "我想问一下分期方案能不能调整？"},
+      {"ts": "10:30:45", "speaker": "agent", "text": "我说了按合同，你听清楚没有。"},
+      {"ts": "10:31:10", "speaker": "user", "text": "你打断我了，语气能不能好一点。"}
+    ],
+    "agent_role": "agent",
+    "scenario": "v2_poor_experience"
+  }
+]

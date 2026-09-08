@@ -13,9 +13,10 @@ import time
 
 import structlog
 from redis.asyncio import Redis
-from redis.exceptions import RedisError
 
-from common.config.settings import settings
+from app.settings import settings
+from common.guardrails import postcheck_text, precheck_text
+from common.llm.reliability import RedisDegradeTracker
 from common.trace.middleware import get_trace_id
 
 logger = structlog.get_logger()
@@ -60,8 +61,13 @@ class LLMService:
         self._sem = asyncio.Semaphore(
             max_concurrency if max_concurrency is not None else settings.LLM_MAX_CONCURRENCY
         )
-        self._failure_count = 0
         self._words_cache: tuple[set[str], float] | None = None
+        self._degrade = RedisDegradeTracker(
+            redis,
+            key=_DEGRADED_KEY,
+            failure_threshold=_FAILURE_THRESHOLD,
+            ttl_seconds=_CIRCUIT_TTL,
+        )
 
     async def _get_provider(self):
         """并发加锁懒加载 Provider（对齐 ASR 懒加载模式）。"""
@@ -74,31 +80,18 @@ class LLMService:
         return self._provider
 
     async def _is_degraded(self) -> bool:
-        if self._redis is None:
-            return False
-        try:
-            return await self._redis.exists(_DEGRADED_KEY) > 0
-        except (RedisError, OSError) as e:
-            logger.warning("llm_degraded_probe_failed", error=str(e))
-            return False
+        return await self._degrade.is_degraded()
 
     async def _on_success(self) -> None:
-        self._failure_count = 0
+        await self._degrade.on_success()
 
     async def _on_failure(self, error: Exception) -> None:
-        self._failure_count += 1
-        if self._failure_count >= _FAILURE_THRESHOLD:
-            if self._redis is not None:
-                try:
-                    await self._redis.setex(_DEGRADED_KEY, _CIRCUIT_TTL, "1")
-                except (RedisError, OSError) as e:
-                    logger.warning("llm_degraded_set_failed", error=str(e))
-            logger.error(
-                "llm_circuit_break_open",
-                failures=self._failure_count,
-                error=str(error),
-                trace_id=get_trace_id(),
-            )
+        await self._degrade.on_failure(error)
+        logger.error(
+            "llm_circuit_break_open",
+            error=str(error),
+            trace_id=get_trace_id(),
+        )
 
     async def _get_words(self) -> set[str]:
         if self._word_provider is None:
@@ -113,7 +106,8 @@ class LLMService:
         words = await self._get_words()
         if not words:
             return False
-        return any(w in text for w in words)
+        # 组合 common.guardrails（领域词表仍由服务注入）
+        return not postcheck_text(text, words=sorted(words)).ok
 
     async def generate_answer(
         self, query: str, context: list[dict], answer_requested: bool
@@ -162,12 +156,13 @@ class LLMService:
         # 常引用违禁词示例，不应误拦 LLM。
         _REDLINE_BLOCK_CATEGORIES = frozenset({"case"})
         _REDLINE_BLOCK_SOURCES = frozenset({"asr"})
+        redline_words = sorted(await self._get_words())
         for c in context:
             cat = (c.get("category") or "").lower()
             src = (c.get("source") or "").lower()
             if cat not in _REDLINE_BLOCK_CATEGORIES and src not in _REDLINE_BLOCK_SOURCES:
                 continue
-            if await self._contains_redline(c["content"]):
+            if redline_words and not precheck_text(c["content"], words=redline_words).ok:
                 logger.warning(
                     "llm_pre_redline_blocked",
                     doc_id=c.get("doc_id"),

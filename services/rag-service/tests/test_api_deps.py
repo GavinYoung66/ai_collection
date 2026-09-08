@@ -9,7 +9,7 @@ import pytest
 
 from app.api import documents as docs_module
 from app.api.documents import upload_document
-from common.config.settings import settings
+from app.settings import settings
 
 
 class TestUploadStagingBehavior:

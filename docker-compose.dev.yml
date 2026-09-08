@@ -283,8 +283,14 @@ services:
       PG_PORT: "5432"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      REDIS_DB: "6"
+      MCP_GATEWAY_MODE: inline
+      # Mock 默认：不设 RAG_SERVICE_URL；真路径需 USE_MOCK_MCP=false + RAG_SERVICE_URL=http://rag-service:8000
+      # 并显式 depends_on rag-service（见 docker-compose.complaint.yml / external-deps README）。
+      USE_MOCK_MCP: "true"
     volumes:
       - ./services/complaint-service/app:/app/app
+      - ./services/complaint-service/tests:/app/tests
       - ./common:/app/common
     command:
       [
@@ -299,6 +305,8 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+      # Mock MCP（USE_MOCK_MCP=true）下法规/质检走 fixture，不需要拉起 rag-service 及其向量栈。
+      # 接真 rag_kb MCP→HTTP 时再用 compose profile / 显式 depends_on 加回。
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s

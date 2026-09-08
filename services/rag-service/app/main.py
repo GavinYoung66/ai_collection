@@ -291,7 +291,7 @@ async def startup():
 
 async def _sweep_stale_ingest_jobs() -> None:
     """启动时将超时 processing 文档置 failed，避免进程重启丢 task 后永久卡住。"""
-    from common.config.settings import settings
+    from app.settings import settings
     from common.db.session import async_session_factory
     from app.repositories.doc_repo import DocRepo
 

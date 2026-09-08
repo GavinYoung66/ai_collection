@@ -16,7 +16,7 @@ from app.parsers.asset_extractor import (
     table_extract_enabled,
 )
 from app.services.asset_service import AssetService
-from common.config.settings import settings
+from app.settings import settings
 
 
 def _png_bytes() -> bytes:

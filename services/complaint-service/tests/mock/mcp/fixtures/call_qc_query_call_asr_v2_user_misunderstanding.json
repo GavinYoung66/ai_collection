@@ -1,0 +1,14 @@
+[
+  {
+    "call_session_id": "S-V2-MIS-001",
+    "call_start_time": "2026-09-05T14:05:00+08:00",
+    "call_duration": 200,
+    "asr_text_with_timestamp": [
+      {"ts": "14:05:10", "speaker": "user", "text": "我不是已经申请提前结清了吗，怎么还在扣利息？"},
+      {"ts": "14:05:40", "speaker": "agent", "text": "结清要等款到账后系统才会停息，审批中仍按日计息。"},
+      {"ts": "14:06:20", "speaker": "user", "text": "那你们等于多收了，我要求核对后退还。"}
+    ],
+    "agent_role": "agent",
+    "scenario": "v2_user_misunderstanding"
+  }
+]

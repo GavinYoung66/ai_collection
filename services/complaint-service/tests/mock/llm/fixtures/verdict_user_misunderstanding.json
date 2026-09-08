@@ -1,0 +1,8 @@
+{
+  "verdict": "user_misunderstanding",
+  "confidence": 0.85,
+  "reasoning": "坐席行为合规，用户对计息规则存在误解。",
+  "conflicts": [],
+  "conflict_highlight": false,
+  "per_case_verdicts": {}
+}

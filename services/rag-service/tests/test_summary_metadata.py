@@ -24,7 +24,7 @@ from app.parsers import ParserFactory
 from app.services import query_cache
 from app.services.search_service import SearchService
 from app.services.summary_service import SummaryService
-from common.config.settings import settings
+from app.settings import settings
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
 from structlog.testing import capture_logs

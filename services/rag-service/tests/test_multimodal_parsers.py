@@ -96,7 +96,7 @@ class TestIngestDegradedFallback:
     @pytest.mark.asyncio
     async def test_degraded_keep_text_writes_es_not_a3003(self, monkeypatch):
         """KB_EMBED_DEGRADED_KEEP_TEXT=true 时 Embedding 失败 → 写 ES，不抛 A3003。"""
-        from common.config.settings import settings
+        from app.settings import settings
         monkeypatch.setattr(settings, "KB_EMBED_DEGRADED_KEEP_TEXT", True)
 
         from app.services.ingest_service import IngestService
@@ -132,7 +132,7 @@ class TestIngestDegradedFallback:
     @pytest.mark.asyncio
     async def test_switch_off_raises_a3003(self, monkeypatch):
         """KB_EMBED_DEGRADED_KEEP_TEXT=false 时 Embedding 失败 → 抛 A3003（V1 一致）。"""
-        from common.config.settings import settings
+        from app.settings import settings
         monkeypatch.setattr(settings, "KB_EMBED_DEGRADED_KEEP_TEXT", False)
 
         from app.services.ingest_service import IngestService

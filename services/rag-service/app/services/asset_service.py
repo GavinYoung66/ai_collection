@@ -8,7 +8,7 @@ import structlog
 
 from app.models.orm import KbDocAsset
 from app.parsers.asset_extractor import image_extract_enabled, table_extract_enabled
-from common.config.settings import settings
+from app.settings import settings
 
 logger = structlog.get_logger()
 

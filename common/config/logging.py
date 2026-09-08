@@ -17,8 +17,19 @@ def _mask_processor(_, __, event_dict):
     return event_dict
 
 
-def setup_logging(env: str = "dev") -> None:
-    log_level = logging.DEBUG if env == "dev" else logging.INFO
+def setup_logging(env: str = "dev", level: str | None = None) -> None:
+    """初始化 structlog。
+
+    - ``level``：显式日志级别名（如 DEBUG/INFO/WARN/ERROR），优先于 env 推断。
+    - 未传 ``level`` 时：``env=="dev"`` → DEBUG，否则 INFO。
+    """
+    if level:
+        log_level = getattr(logging, str(level).upper(), None)
+        if not isinstance(log_level, int):
+            # WARN 在 stdlib 为 WARNING
+            log_level = logging.WARNING if str(level).upper() == "WARN" else logging.INFO
+    else:
+        log_level = logging.DEBUG if env == "dev" else logging.INFO
 
     structlog.configure(
         processors=[

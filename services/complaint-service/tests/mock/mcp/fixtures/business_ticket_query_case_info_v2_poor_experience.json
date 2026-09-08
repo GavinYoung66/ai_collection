@@ -1,0 +1,13 @@
+{
+  "case_id": "case-v2-poor-exp-001",
+  "overdue_amount": 1500.0,
+  "overdue_days": 12,
+  "repayment_records": [
+    {"date": "2026-08-28", "amount": 300}
+  ],
+  "customer_name": "王*假",
+  "product_type": "personal_loan",
+  "create_time": "2026-07-01T00:00:00+08:00",
+  "scenario": "v2_poor_experience",
+  "notes": "虚构案件：短逾期、流程合规，投诉指向服务态度"
+}

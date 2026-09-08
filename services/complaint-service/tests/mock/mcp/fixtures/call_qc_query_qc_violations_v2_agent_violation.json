@@ -1,0 +1,28 @@
+[
+  {
+    "qc_id": "QC-V2-AGENT-001",
+    "alert_id": "QC-V2-AGENT-001",
+    "violation_type": "threat_and_privacy",
+    "violation_rule_id": "RULE-THREAT-01",
+    "call_session_id": "S-V2-AGENT-001",
+    "start_ts": "23:19:10",
+    "end_ts": "23:19:40",
+    "snippet_text": "去你家 / 告诉单位同事",
+    "description": "疑似威胁上门并扬言向单位泄露欠款信息（虚构质检告警）",
+    "score": 0.96,
+    "scenario": "v2_agent_violation"
+  },
+  {
+    "qc_id": "QC-V2-AGENT-002",
+    "alert_id": "QC-V2-AGENT-002",
+    "violation_type": "off_hours_call",
+    "violation_rule_id": "RULE-001",
+    "call_session_id": "S-V2-AGENT-001",
+    "start_ts": "23:18:00",
+    "end_ts": "23:22:00",
+    "snippet_text": "23:18 禁止时段致电",
+    "description": "禁止时段（22:00后）致电债务人（虚构质检告警）",
+    "score": 0.93,
+    "scenario": "v2_agent_violation"
+  }
+]

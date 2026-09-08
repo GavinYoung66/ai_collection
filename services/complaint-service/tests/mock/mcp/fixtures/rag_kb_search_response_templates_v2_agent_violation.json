@@ -1,0 +1,9 @@
+[
+  {
+    "template_id": "TPL-V2-AGENT-001",
+    "title": "坐席违规致歉与升级模板（V2）",
+    "template_text": "尊敬的客户：经核查相关通话存在不当话术与禁止时段致电问题，我们深表歉意，已启动内部问责与停止致电联动（虚构模板）。",
+    "doc_id": "TPL-V2-AGENT-001",
+    "applicable_scenarios": ["agent_violation", "v2_agent_violation"]
+  }
+]

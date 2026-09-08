@@ -6,7 +6,8 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.services.llm_providers.base import LLMAnswer, LLMProvider, build_answer_prompt
-from common.config.settings import settings
+from app.settings import settings
+from common.llm.transport import message_content_from_completions, post_chat_completions
 
 logger = structlog.get_logger()
 
@@ -60,35 +61,29 @@ class LocalOpenAIProvider(LLMProvider):
             raise RuntimeError("LLM service is in circuit-break state")
 
         system, user = build_answer_prompt(context, query)
-        headers = {
-            "Authorization": f"Bearer {settings.LLM_LOCAL_API_KEY or ''}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": settings.LLM_MODEL,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        }
-
         client = await self._get_client()
         for attempt in range(3):
             try:
-                resp = await client.post(
-                    f"{settings.LLM_LOCAL_BASE_URL.rstrip('/')}/chat/completions",
-                    headers=headers,
-                    json=payload,
+                body = await post_chat_completions(
+                    base_url=settings.LLM_LOCAL_BASE_URL,
+                    api_key=settings.LLM_LOCAL_API_KEY or "",
+                    model=settings.LLM_MODEL,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
                     timeout=timeout,
+                    client=client,
                 )
-                resp.raise_for_status()
-                text = resp.json()["choices"][0]["message"]["content"]
+                text = message_content_from_completions(body)
+                if not text:
+                    raise ValueError("empty LLM content")
                 await self._on_success()
                 return LLMAnswer(
                     text=text,
                     citations=sorted({c["doc_id"] for c in context if c.get("doc_id")}),
                 )
-            except (httpx.HTTPError, KeyError, ValueError, IndexError) as e:
+            except (httpx.HTTPError, KeyError, ValueError, IndexError, RuntimeError) as e:
                 if attempt < 2:
                     await asyncio.sleep(1.0 * (2 ** attempt))
                 else:

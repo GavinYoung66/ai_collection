@@ -11,7 +11,7 @@ import pytest
 from app.models.orm import KBDocument
 from app.services.asset_service import remove_assets_dir
 from app.services.ingest_service import _delete_assets_with_retry
-from common.config.settings import settings
+from app.settings import settings
 
 
 class TestDeleteAssetsWithRetry:

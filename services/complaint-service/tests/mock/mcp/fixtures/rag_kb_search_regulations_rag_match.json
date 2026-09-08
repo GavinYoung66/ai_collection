@@ -1,0 +1,18 @@
+[
+  {
+    "doc_id": "REG-001",
+    "title": "催收时段管理规定",
+    "content_snippet": "禁止在22:00-08:00致电债务人",
+    "source_type": "regulation",
+    "score": 0.92,
+    "source_url": "https://kb.example.com/reg/001"
+  },
+  {
+    "doc_id": "REG-002",
+    "title": "催收行为规范",
+    "content_snippet": "禁止使用威胁、恐吓性语言",
+    "source_type": "regulation",
+    "score": 0.88,
+    "source_url": "https://kb.example.com/reg/002"
+  }
+]

@@ -12,7 +12,7 @@ import os
 import structlog
 from elasticsearch import AsyncElasticsearch
 
-from common.config.settings import settings
+from app.settings import settings
 
 logger = structlog.get_logger()
 

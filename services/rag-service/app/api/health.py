@@ -16,7 +16,7 @@ import structlog
 from fastapi import APIRouter
 from sqlalchemy import text
 
-from common.config.settings import settings
+from app.settings import settings
 from common.db.session import async_session_factory
 from common.trace.middleware import get_trace_id
 

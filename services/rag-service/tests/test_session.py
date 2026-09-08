@@ -131,7 +131,7 @@ class TestSessionGetRecent:
     @pytest.mark.asyncio
     async def test_history_cap_trims(self, fake_redis, monkeypatch):
         """超过 SESSION_HISTORY_CAP 的旧记录被 LTRIM 截断。"""
-        from common.config.settings import settings
+        from app.settings import settings
         monkeypatch.setattr(settings, "SESSION_HISTORY_CAP", 3)
         svc = SessionService(fake_redis)
         for i in range(5):

@@ -1,0 +1,217 @@
+# complaint-service 生产基线编排（批次11 / 模块13.2）
+#
+# 用法：
+#   构建+启动全部：docker compose -f docker-compose.complaint.yml up -d --build
+#   查看状态：    docker compose -f docker-compose.complaint.yml ps
+#   看日志：      docker compose -f docker-compose.complaint.yml logs -f complaint-service-a
+#   停止：        docker compose -f docker-compose.complaint.yml down
+#
+# 设计要点（对齐 design.md D2/D3/D5，REQ-CJ-053）：
+#   - complaint-service 采用「具名双实例」complaint-service-a / complaint-service-b
+#     （不使用 Swarm deploy.replicas，以便本机 docker compose 直接验收多实例）；
+#     端口分别映射 8006 / 8007，容器内均监听 8000。
+#   - MCP 网关 prod 独立容器：mcp-gateway-a / mcp-gateway-b，双副本，内网 9000，
+#     不暴露公网端口；network alias 统一为 mcp-gateway（complaint-service 通过
+#     MCP_GATEWAY_URL=http://mcp-gateway:9000 访问非 rag_kb 工具）。当前为 stub。
+#   - 真路径 MCP（USE_MOCK_MCP=false）：rag_kb 走进程内 bridge → RAG_SERVICE_URL
+#     （POST /api/v1/kb/search）；故 complaint **depends_on rag-service**。
+#     Mock 演示请用 docker-compose.dev.yml（complaint **不**硬绑 rag-service）。
+#   - rag-service 此处仍为 stub HTTP；Apply-4 再替换真镜像并做联调 smoke。
+#   - 资源规格（REQ-CJ-053）：complaint-service 4c8g，postgres 4c8g/100GB，
+#     redis 2c4g（DB6），mcp-gateway 2c4g。本机资源不足时可注释 deploy.resources。
+#   - REDIS_DB=6 与其他服务隔离。
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_USER: ai_collection
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-change_me}
+      POSTGRES_DB: ai_collection
+    volumes:
+      # REQ-CJ-053：生产规格 100GB SSD。
+      # 落档说明：Compose 命名卷无法在无特权驱动下强制 100GB 配额；
+      # 生产部署须将本卷挂到 ≥100GB 块设备/云盘（或换用带 size 的 volume driver）。
+      # 本机验收可用默认命名卷（容量不强制），勿当作生产已满足 100GB。
+      - complaint_pg_data:/var/lib/postgresql/data
+    labels:
+      # 规格元数据（供运维/编排读取；非运行时强制）
+      ai_collection.req_cj_053.disk: "100GB"
+      ai_collection.req_cj_053.component: "postgres"
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8g
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_collection"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    command: redis-server --maxmemory 2gb --maxmemory-policy allkeys-lru --appendonly yes
+    environment:
+      REDIS_DB: "6"
+    volumes:
+      - complaint_redis_data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4g
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # MCP 网关 stub（双副本）—— 生产替换为真实 MCP 网关镜像
+  mcp-gateway-a:
+    image: python:3.11.15-slim
+    command:
+      - python
+      - -c
+      - |
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200); self.end_headers(); self.wfile.write(b'{"status":"ok"}')
+            def log_message(self, *a): pass
+        HTTPServer(("0.0.0.0", 9000), H).serve_forever()
+    expose: ["9000"]
+    networks:
+      default:
+        aliases: [mcp-gateway]
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9000/health',timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  mcp-gateway-b:
+    image: python:3.11.15-slim
+    command:
+      - python
+      - -c
+      - |
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200); self.end_headers(); self.wfile.write(b'{"status":"ok"}')
+            def log_message(self, *a): pass
+        HTTPServer(("0.0.0.0", 9000), H).serve_forever()
+    expose: ["9000"]
+    networks:
+      default:
+        aliases: [mcp-gateway]
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9000/health',timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # rag-service stub —— 生产替换为真实 rag-service 镜像
+  rag-service:
+    image: python:3.11.15-slim
+    command:
+      - python
+      - -c
+      - |
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200); self.end_headers(); self.wfile.write(b'{"status":"ok"}')
+            def log_message(self, *a): pass
+        HTTPServer(("0.0.0.0", 8000), H).serve_forever()
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  complaint-service-a:
+    build:
+      context: .
+      dockerfile: services/complaint-service/Dockerfile
+    ports: ["8006:8000"]
+    env_file: services/complaint-service/config/prod.env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB: "6"
+      MCP_GATEWAY_MODE: standalone
+      MCP_GATEWAY_URL: http://mcp-gateway:9000
+      RAG_SERVICE_URL: http://rag-service:8000
+      USE_MOCK_MCP: "false"
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8g
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rag-service: { condition: service_started }
+      mcp-gateway-a: { condition: service_started }
+      mcp-gateway-b: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  complaint-service-b:
+    build:
+      context: .
+      dockerfile: services/complaint-service/Dockerfile
+    ports: ["8007:8000"]
+    env_file: services/complaint-service/config/prod.env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB: "6"
+      MCP_GATEWAY_MODE: standalone
+      MCP_GATEWAY_URL: http://mcp-gateway:9000
+      RAG_SERVICE_URL: http://rag-service:8000
+      USE_MOCK_MCP: "false"
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8g
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rag-service: { condition: service_started }
+      mcp-gateway-a: { condition: service_started }
+      mcp-gateway-b: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+volumes:
+  complaint_pg_data:
+  complaint_redis_data:

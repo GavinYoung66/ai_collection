@@ -1,0 +1,16 @@
+{
+  "samples": [
+    {"id": "g01", "complaint_text": "坐席在催收过程中使用辱骂性语言", "expected_verdict": "agent_violation"},
+    {"id": "g02", "complaint_text": "坐席未按规范流程核实用户身份", "expected_verdict": "agent_violation"},
+    {"id": "g03", "complaint_text": "坐席承诺了无法兑现的优惠", "expected_verdict": "agent_violation"},
+    {"id": "g04", "complaint_text": "用户未听清语音提示导致误解扣费", "expected_verdict": "user_misunderstanding"},
+    {"id": "g05", "complaint_text": "用户对账单计算方式存在误解", "expected_verdict": "user_misunderstanding"},
+    {"id": "g06", "complaint_text": "用户误操作导致业务办理异常", "expected_verdict": "user_misunderstanding"},
+    {"id": "g07", "complaint_text": "业务合规但坐席服务态度冷淡", "expected_verdict": "compliant_but_poor_experience"},
+    {"id": "g08", "complaint_text": "流程合规但响应速度慢用户体验差", "expected_verdict": "compliant_but_poor_experience"},
+    {"id": "g09", "complaint_text": "坐席按规范处理但用户仍不满意体验一般", "expected_verdict": "compliant_but_poor_experience"},
+    {"id": "g10", "complaint_text": "当前材料证据不足待核实后再判", "expected_verdict": "pending"},
+    {"id": "g11", "complaint_text": "信息不全无法判断责任归属", "expected_verdict": "pending"},
+    {"id": "g12", "complaint_text": "催收态度恶劣需要严肃处理", "expected_verdict": "agent_violation"}
+  ]
+}

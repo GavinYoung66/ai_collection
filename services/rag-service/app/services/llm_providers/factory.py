@@ -5,7 +5,7 @@ from app.services.llm_providers.base import LLMAnswer, LLMProvider, build_answer
 from app.services.llm_providers.dashscope_provider import DashScopeProvider
 from app.services.llm_providers.deepseek_provider import DeepSeekProvider
 from app.services.llm_providers.local_openai_provider import LocalOpenAIProvider
-from common.config.settings import settings
+from app.settings import settings
 
 
 class LLMFactory:

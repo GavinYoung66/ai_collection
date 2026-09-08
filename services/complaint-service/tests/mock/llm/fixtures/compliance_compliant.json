@@ -1,0 +1,16 @@
+{
+  "opinions": [
+    {
+      "behavior": "14:00致电提醒还款",
+      "is_violation": false,
+      "regulation_refs": [
+        "REG-001"
+      ],
+      "reasoning": "在允许时段内致电"
+    }
+  ],
+  "regulation_refs": [
+    "REG-001"
+  ],
+  "overall_compliance": "compliant"
+}

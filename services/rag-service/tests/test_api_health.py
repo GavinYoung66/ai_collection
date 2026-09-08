@@ -69,7 +69,7 @@ class TestHealthProbe:
     async def test_health_degraded_mode_dependency_down_not_unhealthy(self, monkeypatch):
         """降级模式（KB_HEALTH_DEGRADED_MODE=true）：依赖失败只告警 → status=degraded 而非 unhealthy，
         checks 保留真实状态（HTTP 200，不触发容器重启）。"""
-        from common.config.settings import settings as global_settings
+        from app.settings import settings as global_settings
 
         monkeypatch.setattr(global_settings, "KB_HEALTH_DEGRADED_MODE", True)
         monkeypatch.setattr("app.api.health._check_database", AsyncMock(return_value="ok"))
@@ -84,7 +84,7 @@ class TestHealthProbe:
     @pytest.mark.asyncio
     async def test_health_degraded_mode_all_up_still_healthy(self, monkeypatch):
         """降级模式下四项依赖全部正常 → 仍为 healthy（降级开关不影响正常路径）。"""
-        from common.config.settings import settings as global_settings
+        from app.settings import settings as global_settings
 
         monkeypatch.setattr(global_settings, "KB_HEALTH_DEGRADED_MODE", True)
         monkeypatch.setattr("app.api.health._check_database", AsyncMock(return_value="ok"))

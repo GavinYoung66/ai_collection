@@ -8,7 +8,7 @@ from app.api import documents as documents_api
 from app.api import search as search_api
 from app.models.search import SearchRequest
 from app.services import query_cache
-from common.config.settings import settings
+from app.settings import settings
 
 
 class FakeRedis:

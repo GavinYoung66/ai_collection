@@ -2,7 +2,7 @@
 from app.services.asr_providers.base import ASRProvider
 from app.services.asr_providers.dashscope_provider import DashScopeASRProvider
 from app.services.asr_providers.whisper_provider import WhisperASRProvider
-from common.config.settings import settings
+from app.settings import settings
 
 
 class ASRFactory:

@@ -35,8 +35,8 @@ class TestSettings:
         s = Settings()
         assert s.CALL_MAX_CONCURRENCY == 50
         assert s.MAX_DIALOG_TURNS == 15
-        assert s.RAG_SCORE_THRESHOLD == 0.6
         assert s.LLM_CONFIDENCE_THRESHOLD == 0.7
+        # RAG_SCORE_THRESHOLD 已迁至 rag-service RagSettings
 
 
 class TestLogging:

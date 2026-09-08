@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.services.asr_client import ASRClient
-from common.config.settings import settings
+from app.settings import settings
 
 _RULES_PATH = Path(__file__).resolve().parent.parent / "conf" / "asr_opening_rules.yaml"
 

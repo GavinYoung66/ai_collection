@@ -1,0 +1,27 @@
+{
+  "case_id": "C-2026-0001",
+  "case_info": {
+    "overdue_amount": 5000.0,
+    "overdue_days": 30,
+    "repayment_records": [
+      {
+        "date": "2026-07-15",
+        "amount": 1000
+      }
+    ],
+    "product_type": "personal_loan"
+  },
+  "call_evidence": [],
+  "history_tickets": [
+    {
+      "evidence_id": "HT-001",
+      "source": "history_ticket",
+      "content": "2026-07-10 催收工单",
+      "confidence": 1.0,
+      "confidence_level": "high",
+      "is_corrupted": false
+    }
+  ],
+  "history_complaints": [],
+  "qc_alerts": []
+}

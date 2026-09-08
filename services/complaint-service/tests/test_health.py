@@ -10,9 +10,12 @@ class TestHealth:
         resp = client.get("/health")
         assert resp.status_code == 200
         body = resp.json()
-        assert body["status"] == "healthy"
+        assert body["status"] == "ok"
         assert body["service"] == "complaint-service"
         assert body["version"] == "1.0.0"
+        assert "pg" in body
+        assert "redis" in body
+        assert "mcp" in body
 
     def test_health_trace_id(self):
         client = TestClient(app)
@@ -23,4 +26,8 @@ class TestHealth:
         client = TestClient(app)
         resp = client.get("/api/v1/health")
         assert resp.status_code == 200
-        assert resp.json()["status"] == "healthy"
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert "pg" in body
+        assert "redis" in body
+        assert "mcp" in body

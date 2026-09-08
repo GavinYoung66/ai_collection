@@ -1,11 +1,11 @@
-"""错误码全集（84 条）。
+"""错误码全集（85 条）。
 
 域分配：
   A1 = call-service      A1001~A1013 (13)
   A2 = qc-service        A2001~A2006 (6)
   A3 = rag-service       A3001~A3006 (6)
   A4 = case-service      A4001~A4015 (15)
-  A5 = complaint-service A5001~A5013 (13)
+  A5 = complaint-service A5001~A5014 (14)
   A6 = review-service    A6001~A6015 (15)
   A7 = data-platform     A7001~A7006 (6)
   B  = 系统级            B0001~B0010 (10)
@@ -62,7 +62,7 @@ class ErrorCode(str, Enum):
     A4014 = "A4014"  # 状态机非法流转
     A4015 = "A4015"  # 分案冲突
 
-    # === A5: complaint-service（投诉）A5001~A5013 ===
+    # === A5: complaint-service（投诉）A5001~A5014 ===
     A5001 = "A5001"  # 投诉工单不存在
     A5002 = "A5002"  # 工单状态非法
     A5003 = "A5003"  # 关联取证失败
@@ -76,6 +76,7 @@ class ErrorCode(str, Enum):
     A5011 = "A5011"  # 投诉沉淀统计失败
     A5012 = "A5012"  # MQ 建议推送失败
     A5013 = "A5013"  # 判责样本回流失败
+    A5014 = "A5014"  # 模式切换失败/回滚
 
     # === A6: review-service（复盘）A6001~A6015 ===
     A6001 = "A6001"  # 复盘案例不存在
@@ -169,6 +170,7 @@ ERROR_MESSAGES: dict[str, str] = {
     "A5011": "投诉沉淀统计失败",
     "A5012": "MQ 建议推送失败",
     "A5013": "判责样本回流失败",
+    "A5014": "模式切换失败/回滚",
     "A6001": "复盘案例不存在",
     "A6002": "案例分类失败",
     "A6003": "话术提炼失败",

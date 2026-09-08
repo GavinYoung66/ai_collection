@@ -30,7 +30,7 @@ from app.vectorstore.embed_client import EmbedClient
 from app.vectorstore.es_client import ESClient
 from app.vectorstore.milvus_client import MilvusClient
 from app.vectorstore.rerank_client import RerankClient
-from common.config.settings import settings
+from app.settings import settings
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
 from common.trace.middleware import get_trace_id

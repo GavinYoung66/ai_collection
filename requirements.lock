@@ -17,7 +17,7 @@ pymilvus==2.4.0
 elasticsearch==8.11.0
 rank-bm25==0.2.2
 # langchain==0.1.17          # 延后安装，依赖冲突
-# langgraph==0.0.40           # 延后安装，依赖 langchain
+# langgraph==0.0.40           # 全局延后；complaint-service 真图见 services/complaint-service/requirements.runtime.txt
 # sentence-transformers==2.2.2  # 延后安装，依赖较重
 
 # === HTTP 客户端 ===

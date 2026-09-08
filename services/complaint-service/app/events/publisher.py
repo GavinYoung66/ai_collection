@@ -1,0 +1,59 @@
+"""事件发布（批次7 stub → 批次9 扩展为单真相源）。
+
+禁止另建 app/service/event_publisher.py。
+本批不接真实 Pub-Sub，内存列表可断言；后续替换为真实 MQ。
+"""
+from __future__ import annotations
+
+import threading
+import uuid
+from dataclasses import dataclass, field
+from typing import Any
+
+# 4 主频道 + 扩展 topic
+CHANNELS = (
+    "complaint.judged",
+    "complaint.closed",
+    "complaint.insight.weekly",
+    "complaint.mode.switched",
+    "complaint.degraded",
+    "case.risk.upgraded",
+    "callback.requested",  # V4 凡投诉必回电
+    "qc.violation.reported",  # V4 坐席违规质检
+)
+
+
+@dataclass
+class EventRecord:
+    topic: str
+    payload: dict[str, Any]
+
+
+@dataclass
+class EventPublisher:
+    """内存 stub publisher，线程安全；payload 强制含 trace_id。"""
+
+    _events: list[EventRecord] = field(default_factory=list)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def publish(self, topic: str, payload: dict[str, Any]) -> None:
+        if "trace_id" not in payload:
+            payload = {**payload, "trace_id": str(uuid.uuid4())}
+        with self._lock:
+            self._events.append(EventRecord(topic=topic, payload=payload))
+
+    def list_events(self, topic: str | None = None) -> list[EventRecord]:
+        with self._lock:
+            if topic is None:
+                return list(self._events)
+            return [e for e in self._events if e.topic == topic]
+
+    def clear(self) -> None:
+        with self._lock:
+            self._events.clear()
+
+
+# 全局单例（测试可替换/断言）
+publisher = EventPublisher()
+# 兼容别名（旧代码若引用 event_publisher）
+event_publisher = publisher

@@ -8,7 +8,7 @@ from app.api import documents as docs_module
 from app.api.documents import upload_document
 from app.repositories.doc_repo import STAGE_PROGRESS
 from app.services.ingest_service import sanitize_ingest_error
-from common.config.settings import settings
+from app.settings import settings
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
 

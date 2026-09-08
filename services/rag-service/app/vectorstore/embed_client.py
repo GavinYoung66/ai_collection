@@ -5,7 +5,7 @@ import httpx
 import structlog
 from redis.asyncio import Redis
 
-from common.config.settings import settings
+from app.settings import settings
 
 logger = structlog.get_logger()
 

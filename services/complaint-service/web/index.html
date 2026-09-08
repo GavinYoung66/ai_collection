@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Complaint Review (V4)</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>投诉人审</h1>
+      <p class="sub">V4 演示（定责 + 回电）· API <code id="apiLabel"></code></p>
+      <p class="sub warn-line">工单与链路追踪存于服务进程内存：重启后端后列表/追踪会清空，需重新「模拟推送」。</p>
+    </div>
+    <div class="top-actions">
+      <label class="field inline">
+        API_BASE
+        <input id="apiBase" type="text" value="http://localhost:8006" />
+      </label>
+      <button type="button" id="btnRefresh" class="btn">刷新列表</button>
+      <button type="button" id="btnSeed" class="btn primary">模拟数据中台推送（3 条）</button>
+    </div>
+  </header>
+
+  <p id="toast" class="toast" hidden></p>
+
+  <main class="layout">
+    <section class="panel" id="listPanel">
+      <h2>工单列表</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>摘要</th>
+              <th>状态</th>
+              <th>判责</th>
+              <th>创建时间</th>
+            </tr>
+          </thead>
+          <tbody id="listBody">
+            <tr><td colspan="5" class="muted">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" id="detailPanel" hidden>
+      <div class="detail-head">
+        <button type="button" id="btnBack" class="btn ghost">← 返回列表</button>
+        <h2 id="detailTitle">详情</h2>
+      </div>
+
+      <ol id="statusStrip" class="status-strip" aria-label="生命周期状态条"></ol>
+      <p id="judgeBanner" class="judge-banner" hidden>研判进行中（真图可能需数十秒）…完成后自动刷新本页</p>
+      <p id="pendingBanner" class="pending-banner" hidden></p>
+
+      <div class="grid">
+        <div>
+          <h3>基本信息</h3>
+          <dl class="kv" id="detailMeta"></dl>
+          <h3>投诉文本</h3>
+          <pre id="detailText" class="box"></pre>
+          <h3>答辩草稿</h3>
+          <pre id="detailDraft" class="box"></pre>
+        </div>
+        <div>
+          <h3>操作</h3>
+          <p class="hint disposition-note">定责针对 <strong>AI 结论与证据</strong>，不是「驳回用户投诉」。请先核对下方链路追踪再确认成立性。</p>
+          <label class="field">复核人
+            <input id="reviewer" type="text" value="Ellis Guo" />
+          </label>
+          <fieldset id="verdictFieldset" class="verdict-fieldset">
+            <legend>成立性确认（定责）</legend>
+            <label class="radio"><input type="radio" name="establishment" value="agent_violation" /> 坐席违规</label>
+            <label class="radio"><input type="radio" name="establishment" value="user_misunderstanding" /> 用户误解</label>
+            <label class="radio"><input type="radio" name="establishment" value="compliant_but_poor_experience" /> 体验差（合规）</label>
+          </fieldset>
+          <label class="field">改判原因
+            <input id="overrideReason" type="text" placeholder="与 AI 初选不一致时必填" />
+          </label>
+          <label class="field">备注
+            <input id="comment" type="text" placeholder="可选" />
+          </label>
+            <div class="btn-row">
+            <button type="button" id="btnConfirmVerdict" class="btn primary" title="提交成立性确认，进入待回电">确认定责</button>
+            <button type="button" id="btnScheduleCallback" class="btn primary" title="安排回电并发布 callback.requested">确认回电安排</button>
+            <button type="button" id="btnReject" class="btn warn" title="退回 AI 重新研判（不是驳回用户）">退回 AI 重跑</button>
+            <button type="button" id="btnRejudge" class="btn" title="显式再次跑真图研判">重新研判</button>
+            <button type="button" id="btnClose" class="btn" title="结束工单；须定责且回电完成后">关单</button>
+          </div>
+          <p class="hint"><a href="#traceTimeline" id="linkEvidence">↓ 核对证据 / 链路追踪</a></p>
+          <h3 id="evidenceHeading">违规证据清单</h3>
+          <p class="hint" id="evidenceHint">人审确认「坐席违规」后展示；不含处罚档位选择。</p>
+          <ol id="evidenceList" class="evidence-list">
+            <li class="muted">定责为坐席违规后显示有序证据…</li>
+          </ol>
+          <ul class="hint-list">
+            <li><strong>确认定责</strong>：显式选择坐席违规 / 用户误解 / 体验差 → <code>pending_callback</code></li>
+            <li><strong>确认回电安排</strong>：发布 <code>callback.requested</code>；若坐席违规另发 <code>qc.violation.reported</code></li>
+            <li><strong>退回 AI 重跑</strong>：退回再跑研判；针对 AI，非驳用户</li>
+            <li><strong>关单</strong>：仅 <code>resolved</code>（已回电）可点；未回电不可关单</li>
+            <li>AI=<code>pending</code>：横幅引导再跑 + 补证（录音 / 电话 / 短信）；关单不可用</li>
+          </ul>
+
+          <h3 id="traceHeading">链路追踪</h3>
+          <p class="hint" id="traceHint">本地时间线（不依赖 LangSmith）</p>
+          <a id="btnLangSmith" class="btn ghost langsmith-link" href="#" target="_blank" rel="noopener noreferrer" hidden>在 LangSmith 打开</a>
+          <ol id="traceTimeline" class="trace-timeline">
+            <li class="muted">打开详情后加载…</li>
+          </ol>
+
+          <h3>
+            <button type="button" id="btnToggleLogs" class="linkish">Agent logs ▾</button>
+          </h3>
+          <pre id="detailLogs" class="box logs" hidden>加载中…</pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>

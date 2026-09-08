@@ -13,7 +13,7 @@ from structlog.testing import capture_logs
 from app.parsers import ParserFactory
 from app.services.chunk_service import ChunkService
 from app.services.ingest_service import IngestService
-from common.config.settings import settings
+from app.settings import settings
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
 

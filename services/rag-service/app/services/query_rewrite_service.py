@@ -12,7 +12,8 @@ import structlog
 from redis.asyncio import Redis
 
 from app.models.search import RewriteResult
-from common.config.settings import settings
+from app.settings import settings
+from common.llm.transport import post_json
 
 logger = structlog.get_logger()
 
@@ -135,10 +136,6 @@ class RewriteService:
             logger.info("rewrite_circuit_break_short_circuit")
             return RewriteResult(rewritten_query=query, confidence=0.0, degraded=True)
 
-        headers = {
-            "Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}",
-            "Content-Type": "application/json",
-        }
         payload = {
             "model": settings.LLM_MODEL,
             "input": {
@@ -152,15 +149,16 @@ class RewriteService:
         client = await self._get_client()
         for attempt in range(3):
             try:
-                resp = await client.post(
-                    settings.LLM_DASHSCOPE_ENDPOINT,
-                    headers=headers,
-                    json=payload,
-                    timeout=settings.LLM_TIMEOUT,
+                body = await post_json(
+                    url=settings.LLM_DASHSCOPE_ENDPOINT,
+                    api_key=settings.DASHSCOPE_API_KEY,
+                    payload=payload,
+                    timeout=float(settings.LLM_TIMEOUT),
+                    client=client,
+                    error_label="DashScopeRewrite",
                 )
-                resp.raise_for_status()
                 await self._on_success()
-                text = resp.json()["output"]["text"]
+                text = body["output"]["text"]
                 parsed = self._parse_rewrite_json(text)
                 if parsed is None:
                     # LLM 输出非严格 JSON → 降级返回原 query
@@ -186,7 +184,7 @@ class RewriteService:
                     confidence=confidence,
                     degraded=False,
                 )
-            except (httpx.HTTPError, KeyError, ValueError) as e:
+            except (httpx.HTTPError, KeyError, ValueError, RuntimeError) as e:
                 if attempt < 2:
                     await asyncio.sleep(1.0 * (2 ** attempt))
                     continue

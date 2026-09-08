@@ -11,7 +11,7 @@ import pytest
 
 from app.parsers.asset_extractor import AssetExtractor
 from app.services.asset_service import AssetService
-from common.config.settings import settings
+from app.settings import settings
 
 
 class TestTableAssetBuild:

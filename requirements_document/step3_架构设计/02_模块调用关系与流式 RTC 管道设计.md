@@ -12,11 +12,13 @@
 |---|---|---|---|
 | v0.1 | 2026-08-18 | 初稿骨架，仅调用关系与 RTC 管道 | — |
 | v1.0 | 2026-08-19 | 补跨模块调用矩阵、通信协议、实时/离线数据流图、X-Trace-Id 全链路追踪、通话状态机 | 规范定稿 |
+| v1.1 | 2026-09-08 | 集成分层：complaint Agent 取证改为 MCP；协议表补 Agent/MCP（platform-integration-boundaries） | Ellis Guo |
+| v1.2 | 2026-09-08 | 澄清 call→rag 为 HTTP 调 rag-service；补充 2 深切片实现深度口径 | Ellis Guo |
 
 ## 一、模块调用关系
 
 1. case-service 输出策略配置 → call-service；
-2. call-service 内部调用公共 RAG 组件检索话术；
+2. call-service 经 **HTTP** 调 **rag-service** `/kb/search` 检索话术（非 `common` 内嵌 RAG 库）；
 3. call-service 会话结束，事件推送录音 & ASR 文本 → qc-service、review-service、data-platform；
 4. review-service 输出画像更新 → data-platform，反向供给 case-service；
 5. complaint-service 接收投诉/通话文本，输出研判结果落库 + 推送 data-platform。
@@ -32,8 +34,8 @@
 | call-service | data-platform | 事件 | 通话结束事件 | 喂入通话数据 |
 | qc-service | rag-service | HTTP | /kb/documents?category=regulation | 加载规则词库 |
 | case-service | data-platform | HTTP | /data/features/{case_id} | 取用户特征 |
-| complaint-service | rag-service | HTTP | /kb/search | 合规知识 |
-| complaint-service | qc-service | HTTP | /qc/records | 质检记录 |
+| complaint-service | rag_kb（MCP）→ rag-service | MCP（内部可 HTTP） | rag_kb.search_regulations 等 | Agent 取证/合规知识；节点不直连 rag HTTP；MCP Server 可再调 /kb/* |
+| complaint-service | call_qc（MCP）→ qc-service | MCP（内部可 HTTP） | call_qc.query_call_asr / query_qc_violations 等 | Agent 取证通话/质检；节点不直连 qc HTTP；MCP Server 可再调 /qc/* |
 | review-service | data-platform | HTTP | /reports/*、宽表 | 复盘与画像 |
 | data-platform | 业务库 | LISTEN-NOTIFY | — | 消费业务库变更 |
 
@@ -44,9 +46,10 @@
 | 场景 | 协议 | 说明 |
 |---|---|---|
 | 前端 ↔ 网关 ↔ 服务 | HTTP/JSON | 统一响应包 `{"code":"0","message","data","trace_id"}`，详见 step5/02 |
-| 服务间同步调用 | HTTP/JSON（内部网络） | 5s 超时 + 3 次指数退避（1s/2s/4s） |
+| 服务间同步调用（管理面/CRUD） | HTTP/JSON（内部网络） | 5s 超时 + 3 次指数退避（1s/2s/4s） |
+| Agent / 工作流工具取证 | MCP | LangGraph 等节点经 MCP Client 调 tool；Server 可内部再 HTTP 调下游服务 |
 | 实时语音流 / 实时字幕 / 实时质检 | WebSocket | /calls/{id}/stream、/qc/check/stream |
-| 实时告警推送 | Redis Pub-Sub | channel `qc.alert.{agent_id}` |
+| 异步跨服务通知 | 事件（Redis Pub-Sub / 等价） | 如通话结束、质检完成；channel 例 `qc.alert.{agent_id}` |
 | 数据同步触发 | PostgreSQL LISTEN-NOTIFY | 监听 call_records/dialog_turns 变更 |
 | 离线任务调度 | APScheduler（进程内） | 定时 + 事件驱动 |
 

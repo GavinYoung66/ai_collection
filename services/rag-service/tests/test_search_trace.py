@@ -4,7 +4,7 @@ import os
 import pytest
 
 from app.services.search_trace import SearchTraceCollector, configure_langsmith_env
-from common.config.settings import settings
+from app.settings import settings
 
 
 class TestSearchTraceCollector:

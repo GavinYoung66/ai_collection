@@ -10,7 +10,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 import pytest
 
 from app.services.search_service import SearchService
-from common.config.settings import settings
+from app.settings import settings
 
 _MOCK_DOC_ID = str(uuid.uuid4())
 _MOCK_CHUNK_ID = str(uuid.uuid4())

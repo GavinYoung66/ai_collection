@@ -4,7 +4,7 @@ import unicodedata
 
 import structlog
 
-from common.config.settings import settings
+from app.settings import settings
 
 logger = structlog.get_logger()
 

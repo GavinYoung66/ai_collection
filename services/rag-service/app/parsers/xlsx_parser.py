@@ -3,7 +3,7 @@ import asyncio
 from pathlib import Path
 
 from app.parsers.base import DocumentParser
-from common.config.settings import settings
+from app.settings import settings
 
 
 class XlsxParser(DocumentParser):

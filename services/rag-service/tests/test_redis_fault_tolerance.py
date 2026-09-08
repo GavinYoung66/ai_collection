@@ -8,7 +8,7 @@
 import pytest
 
 from app.services.search_service import SearchService
-from common.config.settings import settings
+from app.settings import settings
 
 
 class MockMilvus:

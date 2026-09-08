@@ -80,7 +80,7 @@ class TestWeightingSwitchBypass:
 
     def test_weighting_not_called_when_switch_off(self, monkeypatch):
         """KB_WEIGHTING_ENABLED=False → SearchService 不调用 WeightingService.apply。"""
-        from common.config.settings import settings
+        from app.settings import settings
         monkeypatch.setattr(settings, "KB_WEIGHTING_ENABLED", False)
 
         # 构造 SearchService，注入 spy WeightingService

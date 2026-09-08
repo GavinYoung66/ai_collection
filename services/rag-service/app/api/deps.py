@@ -12,7 +12,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
-from common.config.settings import settings
+from app.settings import settings
 from common.db.session import async_session_factory
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException

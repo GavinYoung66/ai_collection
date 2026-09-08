@@ -1,0 +1,23 @@
+{
+  "evidence_chain": [
+    {
+      "evidence_id": "CALL-001",
+      "source": "call",
+      "content": "23:05通话录音",
+      "confidence": 0.95,
+      "confidence_level": "high",
+      "is_corrupted": false
+    }
+  ],
+  "verdict_report": "经核实，坐席于23:05致电用户，违反催收时段规定，并使用威胁性语言。",
+  "response_draft": "尊敬的用户您好，关于您反映的催收时段问题，经核查坐席确有违规，我们深表歉意，将对相关坐席进行处罚。",
+  "internal_improvement": "加强坐席催收时段培训，设置系统时段拦截。",
+  "regulation_refs": [
+    "REG-001",
+    "REG-002"
+  ],
+  "rag_source_ids": [
+    "RAG-DOC-001",
+    "RAG-DOC-002"
+  ]
+}

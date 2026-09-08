@@ -15,7 +15,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.services.asr_providers import ASRFactory
-from common.config.settings import settings
+from app.settings import settings
 from common.trace.middleware import get_trace_id
 
 logger = structlog.get_logger()

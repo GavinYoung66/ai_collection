@@ -1,0 +1,20 @@
+{
+  "timeline": [
+    {
+      "event_time": "2026-09-01T10:00:00",
+      "source": "complaint",
+      "content": "用户提交投诉"
+    },
+    {
+      "event_time": "2026-08-15T23:05:00",
+      "source": "call",
+      "content": "坐席23:05致电用户"
+    },
+    {
+      "event_time": "2026-06-01T00:00:00",
+      "source": "case",
+      "content": "案件创建"
+    }
+  ],
+  "summary": "2026-06-01案件创建，2026-08-15 23:05坐席致电，2026-09-01用户投诉。"
+}

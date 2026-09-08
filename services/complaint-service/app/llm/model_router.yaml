@@ -1,0 +1,84 @@
+# M3 投诉研判 LLM 模型路由表
+# agent_role -> primary_model + fallback_chain
+# 四级降级链：primary -> fallback_1 -> fallback_2 -> rule_based -> circuit_break
+
+routes:
+  # 调度 Agent：不调用 LLM
+  orchestrator:
+    use_llm: false
+
+  # 反思 / 事实 / 用户诉求：优先 DeepSeek（本地 DashScope 免费额度常耗尽）
+  reflection:
+    primary: deepseek-chat
+    fallback_chain: [deepseek-r1, qwen-turbo, qwen-plus, rule_based]
+  fact:
+    primary: deepseek-chat
+    fallback_chain: [deepseek-r1, qwen-turbo, qwen-plus, rule_based]
+  user_demand:
+    primary: deepseek-chat
+    fallback_chain: [deepseek-r1, qwen-turbo, qwen-plus, rule_based]
+
+  # 合规判定 / 综合判责：推理模型
+  compliance:
+    primary: deepseek-r1
+    fallback_chain: [deepseek-chat, qwen-plus, qwen-turbo, rule_based]
+  verdict:
+    primary: deepseek-r1
+    fallback_chain: [deepseek-chat, qwen-plus, qwen-turbo, rule_based]
+
+  # 产出物生成：优先 DeepSeek chat（稳定产出答辩稿）
+  generate_package:
+    primary: deepseek-chat
+    fallback_chain: [deepseek-r1, qwen-plus, qwen-turbo, rule_based]
+
+# 熔断配置
+breaker:
+  deepseek_r1:
+    fail_max: 3          # 连续失败次数
+    p95_threshold_ms: 15000  # P95 > 15s
+    recovery_timeout: 60     # 恢复观察期 1 分钟（秒）
+  qwen_plus:
+    fail_max: 3
+    p95_threshold_ms: 800    # P95 > 800ms 触发降级
+    recovery_timeout: 60
+
+# 多环境差异（批次4 增量；router.route() 默认不读取，配置预留）
+environments:
+  dev:
+    model_aliases:
+      deepseek-r1: deepseek-r1
+      qwen-plus: qwen-plus
+      qwen-turbo: qwen-turbo
+    api_base:
+      deepseek: https://api.deepseek.com
+      qwen: https://dashscope.aliyuncs.com/compatible-mode/v1
+  pre:
+    model_aliases:
+      deepseek-r1: deepseek-r1-pre
+      qwen-plus: qwen-plus-pre
+      qwen-turbo: qwen-turbo-pre
+  prod:
+    model_aliases:
+      deepseek-r1: deepseek-r1
+      qwen-plus: qwen-plus
+      qwen-turbo: qwen-turbo
+
+# 供应商差异配置（批次4 增量）
+provider_configs:
+  deepseek:
+    base_url: https://api.deepseek.com
+    reasoning_content: true       # 解析 reasoning_content 字段
+    reasoning_token_billing: true # reasoning token 单独计费
+  qwen:
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    reasoning_content: false
+    reasoning_token_billing: false
+
+# 降级标记
+degradation:
+  compliance:
+    model_degraded: true
+    requires_human_review: true
+  verdict:
+    model_degraded: true
+    requires_human_review: true

@@ -7,7 +7,7 @@ import structlog
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from common.config.settings import settings
+from app.settings import settings
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
 from common.trace.middleware import get_trace_id

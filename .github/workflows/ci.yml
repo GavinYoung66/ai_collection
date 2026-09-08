@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/complaint-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-asyncio pytest-cov httpx nest-asyncio fastapi uvicorn locust
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f ../../requirements.lock ]; then pip install -r ../../requirements.lock || true; fi
+
+      - name: Optional lint (ruff/bandit/mypy — 有配置则启用)
+        continue-on-error: true
+        run: |
+          if command -v ruff >/dev/null 2>&1; then ruff check app tests || true; else echo "ruff skip"; fi
+          if command -v bandit >/dev/null 2>&1; then bandit -q -r app || true; else echo "bandit skip"; fi
+          if command -v mypy >/dev/null 2>&1; then mypy app || true; else echo "mypy skip"; fi
+
+      - name: Unit + Integration (D8 核心覆盖率 ≥85%)
+        env:
+          PYTHONPATH: ../..:$PYTHONPATH
+          USE_REAL_INFRA: "0"
+        run: |
+          pytest tests/unit/ tests/integration/ \
+            --cov=app.models.state --cov=app.graph.edges \
+            --cov=app.mcp.client --cov=app.mcp.errors \
+            --cov=app.utils.evidence_helper --cov=app.service.recovery_service \
+            --cov-report=term-missing --cov-fail-under=85 -q
+
+      - name: E2E tests
+        env:
+          PYTHONPATH: ../..:$PYTHONPATH
+        run: pytest tests/e2e/ -q
+
+      - name: Prompt regression
+        env:
+          PYTHONPATH: ../..:$PYTHONPATH
+        run: pytest tests/regression/ -q
+
+      - name: Smoke test
+        env:
+          PYTHONPATH: ../..:$PYTHONPATH
+          PORT: "8006"
+        run: |
+          uvicorn app.main:app --port 8006 &
+          sleep 4
+          bash ../../scripts/smoke/smoke_complaint_service.sh
+          kill %1 || true
+
+      - name: PR self-check summary
+        if: always()
+        run: |
+          echo "## PR Self-Check" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] Unit + Integration（D8 核心 cov ≥85%，非整包 app）" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] E2E journey zero failure" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] Prompt regression（golden 真跑判责路径，一致率 ≥95%）" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] Smoke script exit 0" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] Error codes follow common.errors.codes" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] 未新建 app/service/event_publisher.py" >> $GITHUB_STEP_SUMMARY

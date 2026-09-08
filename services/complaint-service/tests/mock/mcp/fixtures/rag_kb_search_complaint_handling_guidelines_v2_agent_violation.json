@@ -1,0 +1,10 @@
+[
+  {
+    "doc_id": "GUIDE-V2-AGENT-001",
+    "title": "威胁类投诉处置指引（虚构）",
+    "content_snippet": "出现威胁上门/泄露隐私话术：优先停催、保全证据、升级合规复核。",
+    "source_type": "guideline",
+    "score": 0.92,
+    "scenario": "v2_agent_violation"
+  }
+]

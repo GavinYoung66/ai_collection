@@ -70,7 +70,7 @@ def _build_search_service_with_spies():
 @pytest.fixture
 def all_switches_off(monkeypatch):
     """所有 7 个 V2 开关关闭（=V1 行为）。"""
-    from common.config.settings import settings
+    from app.settings import settings
     monkeypatch.setattr(settings, "KB_QUERY_REWRITE_ENABLED", False)
     monkeypatch.setattr(settings, "KB_ROUTING_ENABLED", False)
     monkeypatch.setattr(settings, "KB_WEIGHTING_ENABLED", False)

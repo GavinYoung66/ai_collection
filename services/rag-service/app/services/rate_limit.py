@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 
-from common.config.settings import settings
+from app.settings import settings
 from common.trace.middleware import get_trace_id
 
 logger = structlog.get_logger()

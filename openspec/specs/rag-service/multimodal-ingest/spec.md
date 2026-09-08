@@ -191,16 +191,31 @@ OCR / ASR 解析产出纯文本后，系统 SHALL/MUST 复用 V1 IngestService �
 系统 SHALL 支持从 PDF、DOCX、PPTX 中解析内嵌表格并**保留行列结构**，由 `KB_TABLE_EXTRACT_ENABLED`（默认 false）门控，关闭时=表格按既有文本化处理、V4 行为：
 
 - **独立门控**：本开关只决定表格资产。`KB_TABLE_EXTRACT_ENABLED=false` 时 MUST NOT 产生结构化表格 chunk，也 MUST NOT 产生 `asset_type=table` 的 `kb_doc_assets` 记录，即使 `KB_IMAGE_EXTRACT_ENABLED=true`；
-- **结构化入库**：表格按"保留行列结构、不打散"原则解析，每行序列化为 `列名1:值1, 列名2:值2,...` 文本 chunk 入库（含表格上下文前缀），问答可命中表格**任意单元格**；
-- **元数据**：表格解析记录 MUST 落 `kb_doc_assets`（asset_type=table，含 doc_id、页码 page、storage_path、ocr_text 序列化文本、mime_type、content_json 行列结构化 JSON）；content_json 为表格预览渲染的单一数据源（供 Gradio gr.Dataframe 直接渲染，不依赖文本还原）；
-- **预览**：检索命中表格 chunk 时，响应 `results[].assets` MUST 返回该表格预览元数据（asset_type=table、页码 page、storage_path 预览定位、mime_type）；表格行列结构 `content_json` 不随 API 传输，由 Gradio 经共享数据卷按 storage_path 指向的 content_json 文件读取渲染（不依赖文本还原），供前端以表格形式展示（不被打散成零散文本）；
-- **容错**：合并单元格/不规则表格按既有启发式收敛（取左上角表头 + 合并行值保留），解析失败 MUST 不影响正文入库（warning + 跳过该表格）；解析超时沿用 `KB_PARSE_TIMEOUT`；
+- **结构化入库**：表格按"保留行列结构、不打散"原则解析，每行序列化为文本 chunk 入库（含表格上下文前缀），问答可命中表格**任意单元格**；
+- **章节可定位（本变更）**：当抽取开关开启时，每一行序列化文本 MUST 带上可定位上下文，不得只有页码。可定位上下文 MUST 为该表最近的章节标题、文档标题或表名之一（例如 `表格(第0页)[3.1 RAG多模态知识库系统]: 技术类别:…`）。无标题可抽取时 MUST 使用表头拼接或「未命名表」占位，不得省略前缀结构；
+- **列汇总 chunk（本变更）**：每个成功解析的表格 MUST 额外写入至少 1 条汇总 chunk，内容包含该表的可定位上下文，以及至少一列（优先标识列，如「技术类别」「子系统」）的全部非空取值列表，使「某章节有哪些技术类别」可被单条 chunk 回答。汇总 chunk 失败不得阻断行 chunk 入库；
+- **元数据**：表格解析记录 MUST 落 `kb_doc_assets`（asset_type=table，含 doc_id、页码 page、storage_path、ocr_text 序列化文本、mime_type、content_json 行列结构化 JSON）；content_json 为表格预览渲染的单一数据源；
+- **预览**：检索命中表格 chunk 时，响应 `results[].assets` MUST 返回该表格预览元数据（asset_type=table、页码 page、storage_path、mime_type）；content_json 不随检索 API 传输，由 Gradio 经共享数据卷读取；
+- **容错**：合并单元格/不规则表格按既有启发式收敛（取左上角表头 + 合并行值保留），解析失败 MUST 不影响正文入库（warning + 跳过该表格）；单表失败 MUST skip，不得 rollback 整单；解析超时沿用 `KB_PARSE_TIMEOUT`；
 - **回滚契约**：表格文本 chunk 走既有七步流水线，回滚契约与 V1 一致。
+- **存量**：本变更只约束新入库（及用户显式重新抽取资产的路径）。不强制批量回填已 active 文档；存量需重新上传或等价重建资产后才带章节前缀与列汇总。
 
 #### Scenario: 内嵌表格入库且问答命中任意单元格
 
 - **WHEN** 管理员上传一个含"还款计划表"（列：期数/还款日/应还金额/状态）的 DOCX，`KB_TABLE_EXTRACT_ENABLED=true`
 - **THEN** 表格以行列结构化 chunk 入库，检索"第 3 期应还金额"可命中对应行 chunk，返回的表格预览以行列结构展示，不被打散
+
+#### Scenario: 表格行带章节或表名
+
+- **GIVEN** DOCX 中表格位于章节「3.1 RAG多模态知识库系统」下，`KB_TABLE_EXTRACT_ENABLED=true`
+- **WHEN** 文档入库完成
+- **THEN** 该表每行 chunk 的 content 同时含可定位章节/表名与单元格 `列:值`；存在至少一行 content 同时匹配该章节名（或等价表名）与 `技术类别:`
+
+#### Scenario: 表格产生列汇总 chunk
+
+- **GIVEN** 表格含「技术类别」列且有多行取值（如多模态文档解析、语义分块、向量化）
+- **WHEN** 文档入库完成
+- **THEN** kb_chunks 中存在至少 1 条汇总 chunk，content 含该表可定位上下文且列出上述技术类别取值
 
 #### Scenario: 表格预览随检索结果返回
 
@@ -291,3 +306,32 @@ OCR / ASR 解析产出纯文本后，系统 SHALL/MUST 复用 V1 IngestService �
 - **GIVEN** `ASR_PROVIDER=whisper`，本地模型加载成功
 - **WHEN** 管理员上传 `.mp3` / `.wav` 文件
 - **THEN** 系统调用 Whisper Provider 完成转写，对外请求/响应契约不变，处理过程与既有行为一致
+
+### Requirement: 资产阶段与异步入库进度协作
+
+当图/表抽取开关开启且文档含资产时，资产处理（落盘、OCR、表格准备、批量索引）MUST 在文档已返回 `processing` 之后的后台任务中执行，并推进可观测进度至 `asset_index`（与 document-ingest 进度字段语义一致）。单张 OCR / 单表准备失败仍 MUST 仅 skip + warning，MUST NOT 全量 rollback 共享 Session；资产批量 embedding/双写失败仍 MUST 回滚索引 + status=failed + A3003（不削弱既有契约）。
+
+资产文件落 `KB_ASSETS_DIR` 后，MUST 通过 `GET /kb/documents/{id}` 响应中的 `assets` 元数据供 Gradio 在上传页/列表侧预览 image（不新建公网静态下载 API）。
+
+#### Scenario: 含图文档后台推进 asset_index
+
+- **GIVEN** `KB_IMAGE_EXTRACT_ENABLED=true`，上传含内嵌图的 DOCX 已返回 processing
+- **WHEN** 后台进入资产处理
+- **THEN** 进度可见 asset_index（或等价）；完成后 status=active 或因批量失败 failed；抽出的 image 文件可在共享盘按 storage_path 读取
+
+#### Scenario: OCR 不可用时正文与表格仍可完成（异步）
+
+- **GIVEN** 图/表开关开启，OCR 不可达；文档含图与表
+- **WHEN** 后台入库跑完
+- **THEN** 失败图片 skip + warning；正文与表格按既有容错可达 active；不得因 OCR 导致整单仅 B0007 或永久 processing
+
+### Requirement: 重复上传防护（同名/同 hash 仍 processing）
+
+系统 SHALL 在同一文件仍处于 `processing` 时阻止重复入库。**后端 MUST** 拒绝「同 title（文件名）且 status=processing」的重复 `POST /kb/documents`（见 document-ingest「重复上传后端拒绝」）。Gradio MUST 在检测到进行中同名 processing 文档时阻止或强提示。文件 content hash 检测为可选增强，非本版 MUST。
+
+#### Scenario: processing 同名再上传被拦或强提示
+
+- **GIVEN** 已有 title 为 `a.docx` 且 status=processing 的文档
+- **WHEN** 用户再次上传同名 `a.docx`（Gradio 或 API）
+- **THEN** Gradio 阻止或强烈提示；API 返回明确业务错误；不得在无提示下静默启动第二条并行入库
+

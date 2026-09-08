@@ -8,7 +8,7 @@ import pytest
 from unittest.mock import MagicMock
 
 from app.services.search_service import SearchService
-from common.config.settings import settings
+from app.settings import settings
 
 
 def _make_service(dense_scores: list[float] | None, rerank_score: float = 0.9):

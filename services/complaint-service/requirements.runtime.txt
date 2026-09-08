@@ -1,0 +1,10 @@
+# complaint-service Docker 运行时增量依赖
+# 全局 requirements.lock 仍注释旧版 langgraph；真图编排在此单独安装。
+# 版本对齐本机 conda ai_collection（已验证可 ainvoke）
+langgraph==1.2.11
+langgraph-checkpoint-postgres==3.1.2
+psycopg[binary]>=3.2,<4
+psycopg-pool>=3.2,<4
+jinja2>=3.1,<4
+# 真 LLM 默认走 httpx（lock 已有）；openai 可选（common.llm / 本机调试）
+openai>=1.40,<3

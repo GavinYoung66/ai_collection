@@ -1,0 +1,17 @@
+[project]
+name = "complaint-service"
+version = "0.1.0"
+description = "AI 投诉异议智能研判服务 (M3)"
+requires-python = ">=3.11"
+dependencies = [
+    # === LangGraph 编排 ===
+    "langgraph>=0.0.40",
+    "langgraph-checkpoint-postgres",
+    # === 异步 PG 驱动 ===
+    "asyncpg>=0.29.0",
+    # 其余运行时依赖（fastapi/uvicorn/sqlalchemy/pydantic-settings/redis/structlog/pybreaker 等）
+    # 复用全局 requirements.lock 约定，不在此重复声明。
+]
+
+[tool.ruff]
+line-length = 120

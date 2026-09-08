@@ -10,7 +10,7 @@ import openpyxl
 import pytest
 
 from app.parsers.xlsx_parser import XlsxParser
-from common.config.settings import settings
+from app.settings import settings
 
 
 def _make_xlsx(path: Path, sheets: dict[str, list[list]]) -> None:

@@ -12,7 +12,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from common.config.settings import settings
+from app.settings import settings
 
 
 class AudioDecodeError(Exception):

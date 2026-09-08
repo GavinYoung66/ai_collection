@@ -1,0 +1,14 @@
+{
+  "case_id": "case-v2-agent-001",
+  "overdue_amount": 8200.0,
+  "overdue_days": 45,
+  "repayment_records": [
+    {"date": "2026-07-01", "amount": 500},
+    {"date": "2026-08-01", "amount": 500}
+  ],
+  "customer_name": "测*试",
+  "product_type": "personal_loan",
+  "create_time": "2026-05-10T00:00:00+08:00",
+  "scenario": "v2_agent_violation",
+  "notes": "虚构案件：高逾期 + 关联夜间催收投诉"
+}

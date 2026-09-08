@@ -1,4 +1,8 @@
-"""全局配置单例，pydantic-settings + .env 注入。"""
+"""全局配置单例，pydantic-settings + .env 注入。
+
+仅放跨服务平台项（库连接、共享密钥占位、公共超时等）。
+RAG 产品开关与检索/入库参数见 `services/rag-service/app/rag_settings.py`。
+"""
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,129 +25,44 @@ class Settings(BaseSettings):
     REDIS_PASSWORD: str = ""
     REDIS_DB: int = 0
 
-    # Milvus
+    # Milvus / Elasticsearch / Embedding（基础设施；rag 与其它服务可共用）
     MILVUS_HOST: str = "localhost"
     MILVUS_PORT: int = 19530
-
-    # Elasticsearch
     ES_HOST: str = "localhost"
     ES_PORT: int = 9200
-
-    # Embedding / Rerank
     EMBEDDING_SERVICE_URL: str = "http://localhost:8100"
     RERANK_SERVICE_URL: str = "http://localhost:8101"
 
-    # LLM
+    # LLM（跨服务 Key / 默认模型；业务开关不放这里）
     LLM_API_KEY: str = "change_me"
     LLM_MODEL: str = "qwen-plus"
-    LLM_TIMEOUT: int = 5
+    LLM_TIMEOUT: int = 10
     LLM_CONFIDENCE_THRESHOLD: float = 0.7
+    DEEPSEEK_API_KEY: str = ""
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
+    DASHSCOPE_API_KEY: str = ""
 
-    # ASR
+    # ASR / TTS / CCC（呼叫相关公共密钥占位）
     ASR_APP_KEY: str = "change_me"
     ASR_ACCESS_TOKEN: str = "change_me"
-
-    # TTS
     TTS_APP_KEY: str = "change_me"
     TTS_ACCESS_TOKEN: str = "change_me"
-
-    # CCC
     CCC_ACCESS_KEY_ID: str = "change_me"
     CCC_ACCESS_KEY_SECRET: str = "change_me"
 
-    # AES
+    # AES / JWT
     AES_KEY: str = "change_me"
-
-    # JWT
     JWT_SECRET: str = "change_me"
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_HOURS: int = 24
 
-    # RAG Service
-    KB_CHUNK_SIZE: int = 500
-    KB_CHUNK_OVERLAP: int = 50
-    KB_CHUNK_MIN_LENGTH: int = 10
-    KB_RETRIEVAL_TOP_N: int = 20
-    KB_DOC_CHUNK_KEEP: int = 5  # RRF 后同 doc_id 保留 chunk 数上限；实际 N = min(top_k, keep)
-    KB_RRF_K: int = 60
-    KB_RERANK_THRESHOLD: float = 0.35
-    KB_CACHE_TTL: int = 3600
-    KB_CACHE_ENABLED: bool = True
-    # 文档入库限制（对齐 DD-03 §8：上传大小上限 20MB、解析超时 30s）
-    KB_MAX_FILE_SIZE: int = 20 * 1024 * 1024  # 上传文件大小上限（字节），超限返回 B0001
-    KB_PARSE_TIMEOUT: float = 30.0            # 单文件解析超时（秒），超时按解析失败 A3001 处理
-    KB_INGEST_JOB_TIMEOUT: float = 1800.0     # 后台入库总时限（秒），超时置 failed
-    KB_INGEST_STAGING_DIR: str = "data/ingest_staging"  # 异步入库临时文件目录
-    KB_HEALTH_DEGRADED_MODE: bool = False     # /health 降级模式：true 时依赖探活失败只告警，status=degraded 不判 unhealthy（不触发容器重启）
-    RAG_REDIS_DB: int = 2
-    # 超时与请求级时限（对齐 step6/01 §4：通用外部调用 5s/3 次重试）
-    EMBED_TIMEOUT: float = 5.0  # 单条向量化超时（秒），规范值
-    EMBED_BATCH_TIMEOUT: float = 30.0  # 批量向量化超时上限（秒），CPU 部署可调大
-    RERANK_TIMEOUT: float = 10.0  # rerank 超时（秒）：实测冷启动约 5s 留余量，GPU 部署可收紧至 5s
-    KB_SEARCH_TIMEOUT: float = 15.0  # 检索请求级总时限（秒），防慢调用堆积
-
-    # === RAG V2 功能开关（默认全 false = V1 行为） ===
-    KB_QUERY_REWRITE_ENABLED: bool = False       # Query 改写（LLM 纠错/术语归一/扩展）
-    KB_ROUTING_ENABLED: bool = False             # 动态路由（意图规则分类→权重调整）
-    KB_WEIGHTING_ENABLED: bool = False           # 业务加权（新通话 ×1.5、高危 ×1.3）
-    KB_ROW_LEVEL_ENABLED: bool = False           # 行级权限（角色/部门过滤 KB 分类）
-    KB_MULTITURN_ENABLED: bool = False           # 多轮对话（Redis session 上下文）
-    KB_EMBED_DEGRADED_KEEP_TEXT: bool = False    # Embedding 失败降级入库（仅 ES，无向量）
-    ES_DUAL_WRITE: bool = False                  # ES 双写过渡（kb_bm25 + kb_chunks_bm25）
-
-    # === RAG V3 功能开关（默认全 false = V2 行为） ===
-    KB_OCR_ASR_DEGRADED_KEEP_TEXT: bool = False  # OCR/ASR 解析失败降级入库（跳过解析/占位入库）
-    KB_ES_DEGRADED_KEEP_MILVUS: bool = False     # ES 索引失败降级（保留 Milvus + 异步补索引）
-
-    # === RAG V4 功能开关（默认全 false = V3 行为） ===
-    KB_SUMMARY_ENABLED: bool = False       # 摘要元数据检索增强（ES doc_summary 加权 + 响应 summary 填充）
-    KB_SUMMARY_ES_BOOST: float = 1.0       # 摘要字段 BM25 加权分（默认 1.0 = 与正文同权）
-    KB_SUMMARY_MAX_LEN: int = 200          # 摘要长度上限（字符），超限返回 B0001
-    KB_ASR_OPENING_TRIM_ENABLED: bool = False  # ASR 通话开场白规则裁剪（转写文本开头，规则见 conf/asr_opening_rules.yaml）
-
-    # === RAG V5 功能开关与配置（默认全 false = V4 行为；LLM_MODEL / LLM_TIMEOUT 复用既有配置，不改默认值） ===
-    KB_LLM_ANSWER_ENABLED: bool = False       # 检索接入在线大模型回答开关（关闭=V4 行为，零 LLM 调用）
-    LLM_PROVIDER: str = "dashscope"           # LLM Provider：dashscope / deepseek / local
-    DEEPSEEK_API_KEY: str = ""                # DeepSeek API Key（亦兼容 .env 中 DeepSeek_API_KEY）
-    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
-    # LangSmith 链路追踪（可选，与 PG kb_search_logs 并存）
-    LANGSMITH_ENABLED: bool = False
-    LANGSMITH_API_KEY: str = ""
-    LANGSMITH_PROJECT: str = "rag-service"
-    LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
-    LLM_MAX_CONCURRENCY: int = 4              # LLM 回答并发上限（信号量，超限排队等待，不降级）
-    LLM_LOCAL_BASE_URL: str = ""              # local Provider 基址（未配置按不可用降级）
-    LLM_LOCAL_API_KEY: str = ""               # local Provider 密钥
-    KB_IMAGE_EXTRACT_ENABLED: bool = False    # PDF/DOCX/PPTX 内嵌图片抽取 + OCR 文搜图
-    KB_TABLE_EXTRACT_ENABLED: bool = False    # 内嵌表格结构化解析（保留行列结构，命中任意单元格）
-    KB_EXCEL_SHEET_ALL: bool = True           # Excel 全部 sheet 入库（false=仅首个 sheet）
-    KB_EXCEL_HEADER_ROW: int = 1              # Excel 表头行号（首行=表头，行切块列名前缀）
-    KB_ASR_AMR_WMA_ENABLED: bool = False      # AMR/WMA ffmpeg 解码接入开关（关闭=白名单外 A3001，V4 行为）
-    KB_ASSETS_DIR: str = "data/assets"        # 内嵌资产本地存储目录（Docker 挂载 volume，与 Gradio 共享预览源）
-    KB_ASSETS_MAX_SIZE: int = 1024            # 图片渲染最大边长（px，等比缩放）
-
-    # === RAG V2 OCR/ASR/LLM 配置 ===
-    OCR_ENDPOINT: str = "http://ocr-service:8200/ocr"
-    OCR_TIMEOUT: int = 30
-    ASR_PROVIDER: str = "dashscope"  # dashscope | whisper
-    ASR_TIMEOUT: int = 60
-    LLM_DASHSCOPE_ENDPOINT: str = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-    LLM_TIMEOUT: int = 10
-    DASHSCOPE_API_KEY: str = ""  # 从 env 读，可选，未配置则 Rewrite/ASR 走 disabled
-
-    # === RAG V2 Session 配置 ===
-    SESSION_TTL_SECONDS: int = 1800       # 会话 TTL 30min
-    SESSION_HISTORY_CAP: int = 10         # 每会话最多保存 10 轮
-    SESSION_REWRITE_LOOKBACK: int = 3     # Query 改写时回看最近 3 轮
-
-    # 业务参数
+    # 业务参数（外呼 / 质检 / 熔断）
     CALL_ALLOWED_HOURS: str = "08:00-21:00"
     CALL_DAILY_LIMIT_PER_USER: int = 3
     CALL_RETRY_INTERVAL_MIN: int = 30
     CALL_MAX_RETRY: int = 3
     CALL_MAX_CONCURRENCY: int = 50
     MAX_DIALOG_TURNS: int = 15
-    RAG_SCORE_THRESHOLD: float = 0.6
     QC_RESPONSE_TIMEOUT: int = 3
     LLM_CIRCUIT_BREAKER_THRESHOLD: int = 3
     LLM_CIRCUIT_BREAKER_RECOVERY: int = 60
@@ -166,6 +85,7 @@ class Settings(BaseSettings):
         if self.DEEPSEEK_API_KEY:
             return self.DEEPSEEK_API_KEY
         import os
+
         return os.environ.get("DeepSeek_API_KEY", "")
 
 

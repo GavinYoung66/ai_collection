@@ -1,6 +1,7 @@
 # AI 电话催收生态赋能系统
 
-> 规范驱动开发（Specification-Driven Development）项目，7 个 AI 大模型应用子系统。
+> 规范驱动开发（Specification-Driven Development）项目，规划 7 个 AI 子系统。  
+> **实现深度（求职/Demo 口径）：2 个深切片 + 5 个占位** — `rag-service`、`complaint-service` 已深做；其余服务在对应里程碑前可为 health 脚手架，**不是**七系统业务功能全部完备。
 
 ## 技术栈
 
@@ -44,17 +45,19 @@ make smoke
 
 ## 7 服务端口
 
-| # | 服务 | 端口 | 里程碑 |
-|---|---|---|---|
-| 1 | data-platform | 8001 | M1 |
-| 2 | rag-service | 8002 | M1 |
-| 3 | qc-service | 8003 | M1 |
-| 4 | call-service | 8004 | M2 |
-| 5 | case-service | 8005 | M2 |
-| 6 | complaint-service | 8006 | M3 |
-| 7 | review-service | 8007 | M4 |
+| # | 服务 | 端口 | 里程碑 | 实现深度（当前） |
+|---|---|---|---|---|
+| 1 | data-platform | 8001 | M1 | 占位 / 脚手架 |
+| 2 | rag-service | 8002 | M1 | **深做**（混合检索等） |
+| 3 | qc-service | 8003 | M1 | 占位 / 脚手架 |
+| 4 | call-service | 8004 | M2 | 占位 / 脚手架 |
+| 5 | case-service | 8005 | M2 | 占位 / 脚手架 |
+| 6 | complaint-service | 8006 | M3 | **深做**（LangGraph 研判等） |
+| 7 | review-service | 8007 | M4 | 占位 / 脚手架 |
 
 辅助服务：embedding-service (8100) / rerank-service (8101) / Elasticsearch (9200)
+
+`common/` = 跨切面（config / security / llm transport·reliability / trace 等），**不含** RAG 产品实现（RAG 在 `services/rag-service`）。新服务接入见 `docs/platform/new-service-checklist.md`。
 
 ## 目录结构
 

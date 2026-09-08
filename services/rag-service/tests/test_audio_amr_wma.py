@@ -10,7 +10,7 @@ import pytest
 
 from app.parsers.audio_parser import AudioParser
 from app.services.audio_decoder import AudioDecodeError
-from common.config.settings import settings
+from app.settings import settings
 
 
 class TestAudioAmrWma:

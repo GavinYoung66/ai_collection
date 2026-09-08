@@ -18,7 +18,7 @@ import structlog
 from app.repositories.doc_repo import DocRepo
 from app.services import query_cache
 from app.vectorstore.es_client import ESClient
-from common.config.settings import settings
+from app.settings import settings
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
 from common.trace.middleware import get_trace_id

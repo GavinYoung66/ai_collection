@@ -1,0 +1,30 @@
+{
+  "case_id": "C-2026-0001",
+  "case_info": {},
+  "call_evidence": [
+    {
+      "evidence_id": "CALL-001",
+      "source": "call",
+      "case_id": "C-2026-0001",
+      "turn_number": 1,
+      "timestamp": "2026-08-15T23:05:01",
+      "content": "坐席：你要是再不还钱，我就去你家。",
+      "confidence": 0.95,
+      "confidence_level": "high",
+      "is_corrupted": false
+    }
+  ],
+  "history_tickets": [],
+  "history_complaints": [],
+  "qc_alerts": [
+    {
+      "evidence_id": "QC-001",
+      "source": "qc",
+      "case_id": "C-2026-0001",
+      "content": "禁止时段来电违规",
+      "confidence": 0.9,
+      "confidence_level": "high",
+      "is_corrupted": false
+    }
+  ]
+}

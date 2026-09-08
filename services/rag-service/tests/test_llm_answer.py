@@ -19,7 +19,7 @@ from app.services.llm_providers.base import (
     build_answer_prompt,
 )
 from app.services.llm_service import LLMService, mask_sensitive
-from common.config.settings import settings
+from app.settings import settings
 
 
 class FakeRedis:

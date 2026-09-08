@@ -1,0 +1,24 @@
+# complaint-service 限流配置（批次9 9.5）
+# 不硬编码，运行时可热加载
+
+complaint:
+  max_active: 20           # 工单接入并发 Semaphore
+  queue_max: 500            # csmp:queue:pending 最大长度
+  queue_timeout_minutes: 10 # 排队超时
+  lock_ttl_seconds: 1800    # 单工单 SETNX 锁 TTL（30min）
+
+mcp:
+  qps:
+    business_ticket: 50     # 业务工单 MCP
+    call_quality: 30        # 通话质检 MCP
+    rag: 20                 # RAG MCP
+
+llm:
+  qps:
+    deepseek_r1: 5
+    qwen_plus: 10
+    qwen_turbo: 30
+
+queue:
+  dynamic_consume: true     # 高投诉涌入动态消费速率
+  base_consume_rate: 5      # 基础每批消费条数

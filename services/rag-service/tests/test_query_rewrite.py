@@ -36,7 +36,7 @@ def fake_redis():
 @pytest.fixture
 def api_key(monkeypatch):
     """注入 DASHSCOPE_API_KEY。"""
-    from common.config.settings import settings
+    from app.settings import settings
     monkeypatch.setattr(settings, "DASHSCOPE_API_KEY", "sk-test-key")
 
 
@@ -102,7 +102,7 @@ class TestRewriteDegraded:
     @pytest.mark.asyncio
     async def test_no_api_key_degraded(self, fake_redis, monkeypatch):
         """未配置 DASHSCOPE_API_KEY → 直接降级。"""
-        from common.config.settings import settings
+        from app.settings import settings
         monkeypatch.setattr(settings, "DASHSCOPE_API_KEY", "")
         svc = RewriteService(redis=fake_redis)
         result = await svc.rewrite("测试")
@@ -130,7 +130,7 @@ class TestRewriteSwitchBypass:
     @pytest.mark.asyncio
     async def test_search_not_call_rewrite_when_switch_off(self, monkeypatch):
         """KB_QUERY_REWRITE_ENABLED=False → SearchService 不调用 RewriteService.rewrite。"""
-        from common.config.settings import settings
+        from app.settings import settings
         monkeypatch.setattr(settings, "KB_QUERY_REWRITE_ENABLED", False)
 
         from app.services.search_service import SearchService

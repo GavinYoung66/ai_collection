@@ -1,0 +1,10 @@
+[
+  {
+    "doc_id": "GUIDE-V2-MIS-001",
+    "title": "计息争议处置指引（虚构）",
+    "content_snippet": "用户主张多收利息：核对结清申请与到账时点，出具对账说明后再研判。",
+    "source_type": "guideline",
+    "score": 0.88,
+    "scenario": "v2_user_misunderstanding"
+  }
+]
