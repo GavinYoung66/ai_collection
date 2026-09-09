@@ -23,7 +23,7 @@
 
 | 主题                            | 权威文件 | 本 PRD 引用要点                                                                      |
 | :------------------------------ | :------- | :----------------------------------------------------------------------------------- |
-| 错误码全集（84 条）             | step6/01 | A3xxx 知识库域 + B0001~B0010；禁止私自编号                                           |
+| 错误码全集（A 58 + B 10 = 共 68 条编码位） | step6/01 | A3xxx 知识库域 + B0001~B0010；禁止私自编号                                           |
 | 统一响应包 / HTTP 状态码 / 分页 | step5/02 | `{code,message,data,trace_id}`；业务错误 200、系统错误 5xx、参数 422；page/page_size |
 | 向量库/ES/Rerank Schema         | step4/02 | kb_vectors 6 字段、kb_chunks_bm25、bge-reranker 约束                                 |
 | Redis key / DB 分配 / Pub-Sub   | step4/03 | rag 前缀 DB2、键命名冒号分隔、`kb.sensitive_updated`                                 |

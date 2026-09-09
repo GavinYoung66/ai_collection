@@ -1,10 +1,10 @@
 # 大模型 Prompt 与 Structured Output 开发规范
 
 > 文档类型：技术规范（规范层）
-> 版本：v1.0
+> 版本：v1.5
 > 状态：定稿
-> 更新日期：2026-08-19
-> 约束声明：本文件为 LLM Prompt 编写与结构化输出单一事实源；遵循 step1/01 全局统一口径与 openspec/specs/05、04；LLM 调用统一经 common/llm/provider.py，业务层不得绕过；推理参数硬编码 temperature=0.1/top_p=0.9/seed=42，禁止业务层覆盖。
+> 更新日期：2026-09-09
+> 约束声明：本文件为 LLM Prompt 编写与结构化输出单一事实源；遵循 step1/01 全局统一口径与 openspec/specs/05、04；LLM 调用统一经 common/llm/provider.py，业务层不得绕过；推理参数按场景分层（评测分支 temperature=0.1/top_p=0.9/seed=42 固定；生产对话生成 temperature 默认 0.3、范围 0.1~0.5 可配置），禁止业务层硬编码覆盖（见 §6.2）。
 
 ## 修订记录
 
@@ -12,6 +12,10 @@
 |---|---|---|---|
 | v0.1 | 2026-08-18 | 初稿骨架，6 条规则 | — |
 | v1.0 | 2026-08-19 | 补标准 Prompt 七段结构、Pydantic Schema 校验链、CoT 剥离与加密、置信度门控、调用审计、熔断参数、Prompt 模板示例 | 规范定稿 |
+| v1.1 | 2026-09-09 | P1-9 §3.4 枚举表 verdict 去除 'normal'，改为 'compliant_but_poor_experience'（4 值，对齐 complaint-service VerdictType 实际交付） | Ellis Guo |
+| v1.2 | 2026-09-09 | P1-16 §8.2 敏感词端点统一 /sensitive-words/current.dict → /api/v1/sensitive-words/current.dict（决策A执行） | Ellis Guo |
+| v1.3 | 2026-09-09 | P1-18 §7.3 兜底话术来源改为双层：rag-service 标准答案库为热更新主源 + common/llm/prompts/fallback_scripts.yml 为只读灾难快照（随版本发布、禁止日常编辑）；§7.2 代码注释同步修正（决策A执行） | Ellis Guo |
+| v1.5 | 2026-09-09 | 对齐 DD-02 V1.4：§3.4 增 grade / qc_status / redline_tag；§3.3 登记 qc-service LLMReviewer 置信度门控豁免 | Ellis Guo |
 
 ## 一、Prompt 配置化管理
 
@@ -132,6 +136,8 @@ Pydantic Schema 校验（必填字段 + 类型 + 枚举 + 长度）
 | 长度校验 | answer 长度 ≤ 500 字 | 截断 + 标记 |
 | 置信度门控 | confidence < 0.7 禁止直接回复 | 走兜底或转人工 |
 
+> **豁免（qc-service LLMReviewer）**：质检 LLM 输出不直达客户，允许跳过本步门控，但必须保留 JSON Schema、幻觉校验（evidence turn_id 存在、reason 不含编造金额）、熔断降级为 AC+规则。`llm_call_logs.status=qc_review_exemption`。该豁免不适用于 call-service / complaint-service。Schema 仍输出 `confidence` 供审计。
+
 ### 3.4 枚举限定场景
 
 质检、打分、标签、分类、投诉研判、风险判定场景严格固定枚举输出，禁止自定义文字结果：
@@ -140,10 +146,13 @@ Pydantic Schema 校验（必填字段 + 类型 + 枚举 + 长度）
 |---|---|---|
 | 对话意图 | intent | willing_to_pay / extension_request / financial_difficulty / stalling / rejection / anger / complaint / uncertain |
 | 质检结果 | qc_result | compliant / violation / pending_review |
+| 合规档位 | grade | EXCELLENT / PASS / WARNING / SERIOUS |
+| 质检状态 | qc_status | DONE / PENDING_REVIEW / REVIEWED / PARTIAL |
+| 红线标签 | redline_tag | threat / fake_identity / stop_call / fake_commit / legal_overstate / unverified / data_fabrication / privacy_leak |
 | 风险等级 | risk_level | low / medium / high |
 | 案件账龄 | account_stage | M0 / M1 / M2 / M3 |
 | 案件状态 | case_status | pending / processing / paid / bad_debt / lost |
-| 投诉判责 | verdict | agent_violation / user_misunderstanding / normal / pending |
+| 投诉判责 | verdict | agent_violation / user_misunderstanding / compliant_but_poor_experience / pending |
 | 复盘分类 | category | good / bad / violation / ineffective |
 
 ## 四、CoT 剥离与加密
@@ -193,7 +202,7 @@ class LLMProvider:
     ) -> LLMResponse:
         """
         统一 LLM 调用入口：
-        1. 组装推理参数（temperature=0.1, top_p=0.9, seed=42）
+        1. 组装推理参数（按场景分层：评测分支 temperature=0.1/top_p=0.9/seed=42；生产对话 temperature=0.3 默认可配置，见 §6.2）
         2. 强制 response_format=json_object
         3. 5s 超时 + 3 次指数退避
         4. JSON 解析 + Pydantic 校验
@@ -203,16 +212,17 @@ class LLMProvider:
         """
 ```
 
-### 6.2 推理参数（硬编码）
+### 6.2 推理参数（评测/生产分层）
 
-| 参数 | 值 | 说明 |
-|---|---|---|
-| temperature | 0.1 | 低随机性，确保输出稳定 |
-| top_p | 0.9 | 核采样 |
-| seed | 42 | 固定种子，可复现 |
-| response_format | {"type": "json_object"} | 强制 JSON 输出 |
+| 场景 | 参数 | 值 | 说明 |
+|---|---|---|---|
+| 评测/回归集 | temperature | 0.1 | 低随机性，保证评测可复现（评测分支固定） |
+| 评测/回归集 | seed | 42 | 固定种子，评测可复现 |
+| 生产对话生成 | temperature | 0.3（默认，可配置 0.1~0.5） | 兼顾话术多样性与可控性；seed 不固定（对话实时生成不要求可复现） |
+| 通用 | top_p | 0.9 | 核采样 |
+| 通用 | response_format | {"type": "json_object"} | 强制 JSON 输出 |
 
-> 以上参数硬编码在 provider.py，业务层无法覆盖。
+> 温度分层：评测/回归集固定 temperature=0.1+seed=42（仅评测分支）；生产对话生成默认 0.3、范围 0.1~0.5，由 provider 统一注入（可配置化，禁止业务层硬编码覆盖）。生产用 0.1 会导致话术过度机械并放大"3 轮内重复话术转人工"的误触发（见 step3/03）。
 
 ### 6.3 超时与重试
 
@@ -248,7 +258,7 @@ class LLMProvider:
 | token_usage | SDK 返回 | token 消耗统计 |
 | latency_ms | 计时 | 调用延迟 |
 | confidence | LLM 输出 | 置信度 |
-| temperature | 硬编码 | 0.1 |
+| temperature | 按场景分层注入 | 评测 0.1 / 生产默认 0.3（见 §6.2） |
 | status | 内部判定 | success/failed/timeout/circuit_open |
 | error_msg | 异常信息 | 失败原因 |
 
@@ -277,14 +287,19 @@ class RuleBasedScriptEngine:
     ) -> FallbackResponse:
         """
         根据意图标签和对话轮次返回兜底话术。
-        所有话术存储在 common/llm/prompts/fallback_scripts.yml
+        灾难快照话术（rag 故障时）存储在 common/llm/prompts/fallback_scripts.yml
         """
 ```
 
-### 7.3 兜底话术来源
+### 7.3 兜底话术来源（双层：热更新主源 + 灾难快照）
 
-- 兜底话术统一维护在 `common/llm/prompts/fallback_scripts.yml`；
-- 禁止硬编码在业务代码（详见 step1/03 兜底话术表）；
+兜底话术采用双层来源，避免单一依赖（决策A执行）：
+
+1. **热更新主源（默认）**：rag-service 标准答案库（category=script），支持热更新，业务运行期从知识库检索兜底话术；
+2. **灾难快照（兜底）**：`common/llm/prompts/fallback_scripts.yml`，仅当 rag-service 也故障时由 RuleBasedScriptEngine 读取的只读快照，随版本发布、禁止日常编辑话术。
+
+- 兜底话术统一在 rag-service 标准答案库维护（category=script），禁止硬编码在业务代码（详见 step1/03 兜底话术表）；
+- `common/llm/prompts/fallback_scripts.yml` 为只读灾难快照，仅随版本发布更新，禁止作为日常话术维护入口；
 - 兜底话术须经合规审核，不含任何违规内容。
 
 ## 八、敏感词后置校验
@@ -306,5 +321,5 @@ B0010 拦截 → 记录日志 → 返回合规兜底话术 → 不向下游传�
 ### 8.2 敏感词库
 
 - 敏感词库由 rag-service 维护（sensitive_words 表），三分类：threat / abuse / induce；
-- qc-service 通过 `/sensitive-words/current.dict` 拉取 + Redis Pub-Sub 热刷新（60s 内生效）；
+- qc-service 通过 `/api/v1/sensitive-words/current.dict` 拉取 + Redis Pub-Sub 热刷新（60s 内生效）；
 - 命中即返回 B0010 拦截，详见 step5/04。

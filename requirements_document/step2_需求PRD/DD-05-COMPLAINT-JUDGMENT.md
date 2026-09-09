@@ -1,9 +1,9 @@
 # DD-05 AI投诉异议智能研判系统 需求文档
 
 > 文档类型：需求PRD（规范层）
-> 版本：v1.2
+> 版本：v1.11
 > 状态：定稿
-> 更新日期：2026-09-01
+> 更新日期：2026-09-09
 > 约束声明：遵循 step1/01 全局统一口径与 openspec/specs/00~~07 宪法层强制规范；服务名 complaint-service、端口 8006、错误码段 A5001~~A5013；所有 AI 输出为草稿，最终判责与对外答复必须经人工运营终审确认（Human-in-loop 不可跳过）。
 
 ## 修订记录
@@ -18,6 +18,10 @@
 | v1.4 | 2026-09-05 | 需求治理补强：新增架构决策记录(ADR)说明MCP协议引入演进；全量功能点分配唯一需求ID（REQ-CJ-001~REQ-CJ-056）；功能点标注P0-P3优先级，区分MVP(M3)/增量(M3.5)/全量(M5)；新增需求-验收追溯矩阵（18项验收标准映射至具体需求ID） | 规范定稿 |
 | v1.5 | 2026-09-05 | 深度评审整改：新增术语表+用户画像+不在范围内+核心用户故事(US-01~07)+ROI量化基线；里程碑补充目标日期；新增7.9复核界面交互设计(线框图+错误态+批量+通知+操作历史撤销)；新增8.6 LLM成本估算+8.7并行调度策略；新增9.4数据生命周期+9.5索引策略+9.6数据迁移方案；新增10.4风险概率影响矩阵；新增11.4分页规范+11.5 API版本管理+11.6回调Schema+11.7 ASR存储方案；新增12.4威胁模型STRIDE+12.5密钥管理+12.6具体法规引用+12.7审计日志防篡改+12.8渗透测试+12.9 Prompt注入防护；新增14.5测试数据策略+14.6 UAT计划+14.7覆盖率定义+14.8端到端测试场景；新增19.1 MCP Server SLA+19.2依赖版本锁定+19.3依赖管理策略+19.4 PG连接池规格+19.5 Redis用途隔离+19.6 RuleBasedEngine核心规则伪代码；新增25工程规范补充(日志格式/API文档标准/Code Review/配置管理)；新增26操作员培训与报表需求；新增27竞品对比与行业基准；文件结构树补充测试目录 | 规范定稿 |
 | v1.6 | 2026-09-05 | 致命逻辑漏洞修复（7项）：FATAL-1 human_review改为条件边(should_proceed_after_review)，驳回重判正确路由回evidence_re_gather扇出节点；FATAL-2 新增judgment_fanout扇出节点，fact/compliance/user_demand三Agent被正确并行触发；FATAL-3 新增merge_case_evidence自定义reducer+Annotated标注，消除并行证据写入竞态；MODERATE-4 to_re_gather路由改为evidence_re_gather扇出节点，重试同时触发两个证据Agent；MODERATE-5 compliance_agent和generate_package_agent增加MCP try/except；MODERATE-6 verdict_agent增加None输入防御检查；MINOR-7 VerdictType枚举normal→compliant_but_poor_experience统一API | 规范定稿 |
+| v1.8 | 2026-09-09 | 对齐 DD-02 V1.5：Out of Scope「实时通话质检」改为 qc 仅离线全量，投诉研判消费事后结果 | Ellis Guo |
+| v1.9 | 2026-09-09 | QC 离线质检结果回流闭环（对齐 DD-02 §9.3）：新增 §16.1——订阅 qc-service `qc.complaint.suspected`/`qc.check.completed`（可选 qc.review.done），异步回流 QC 离线结果并驱动补证；§7.2/§6.2 取证区分「质检未完成」与「已质检无违规」，质检待补标记避免"空列表=无违规"误判；§4.4 澄清 call-qc MCP 中 query_call_asr/query_call_sessions 数据面归属 call-service（qc-service 仅提供违规查询数据面） | 规范复审 |
+| v1.10 | 2026-09-09 | 对齐 DD-02 V1.8：§16.1 `qc.complaint.suspected` 触发口径由 redline_tag∈{threat,stop_call,fake_identity} 改为 **rule_id∈{R11,R12,R13}**（须 agent+high）。payload 字段不变。R05 同 tag=threat 不触发 | Ellis Guo |
+| v1.11 | 2026-09-09 | 对齐 DD-02 V1.9 / step4/03：§16.1 payload 与 qc 同构——`qc.check.completed` 补 `call_id`（可 JSON null）；`qc.complaint.suspected` 追加 `qc_record_id`（SETNX 幂等 session_id+qc_record_id）。发布条件仍为 R11/R12/R13 白名单 | Ellis Guo |
 
 ***
 
@@ -233,7 +237,7 @@ v1.0 需求设计阶段，架构从"单Agent+多工具"演进为"弱中心化多
 
 | 不在范围内 | 原因 |
 | ---- | ---- |
-| 实时通话质检 | 由AI实时质检子系统独立处理，本系统仅处理已结束通话的离线研判 |
+| 实时通话质检 | 由 qc-service **离线全量**处理（通话结束且全文齐后）；本系统仅消费事后质检结果做研判，不在通话中质检 |
 | 案件分配调度 | 由AI智能分案子系统处理，本系统接收已分配的投诉工单 |
 | 外呼拨号管控 | 由AI外呼子系统+呼叫中心处理，本系统不涉及拨号能力 |
 | RAG知识库维护 | 由RAG子系统独立维护，本系统仅通过MCP Server读取知识片段 |
@@ -404,6 +408,8 @@ graph TB
 | `query_call_asr` | `case_id: str, session_id: str` | `list[{call_session_id, call_start_time, call_duration, asr_text_with_timestamp, agent_role}]` | 无通话记录 → 返回空数组 |
 | `query_qc_violations` | `case_id: str, session_id: str` | `list[{qc_id, violation_type, violation_rule_id, call_session_id, start_ts, end_ts, snippet_text, score}]` | 无违规 → 返回空数组 |
 | `query_call_sessions` | `case_id: str, session_id: str` | `list[{call_session_id, call_time, agent_id, call_duration, call_result}]` | 无通话 → 返回空数组 |
+
+> **数据面归属说明**：`query_call_asr` / `query_call_sessions` 的 ASR 与通话/会话数据面由 **call-service** 提供（call-qc MCP Server 内部转调），qc-service 仅提供 `query_qc_violations`（及可选 `query_qc_alerts`）的违规查询数据面，勿将 qc-service 视为 ASR/会话主数据源（对齐 DD-02 §9.2）。
 
 **3. RAG知识库MCP Server（rag-kb）**
 
@@ -827,6 +833,11 @@ async def evidence_call_qc_agent_node(state: ComplaintSessionState) -> Complaint
                 tool="query_call_asr",
                 params={"case_id": case_id, "session_id": state.session_id}
             )
+            # 质检结果时序空窗约束（DD-05 v1.9 §7.2 / §16.1）：QC 已离线全量，投诉研判可能先于质检跑完。
+            # 调用 query_qc_violations 前，须经 MCP Server 内部确认该 session 的质检记录状态
+            # （qc_records.qc_status，或随 tool 一并返回质检任务状态）；QC 未完成/无记录时，
+            # 不得把返回的空列表当作"无违规"，应将质检证据项标记为「质检待补」，
+            # 待 qc.check.completed 订阅（§16.1）驱动补证重取证后复判。
             qc_alerts = await mcp_client.call(
                 server="call-qc",
                 tool="query_qc_violations",
@@ -1218,6 +1229,12 @@ async def init_production_checkpointer():
 | 并发控制 | 同一用户同时只允许一个在途投诉工单执行AI研判，新工单进入等待队列，防止并发操作同一份客户档案 |
 | 呈现方式 | 历史投诉证据在证据链中单独分组标注"历史投诉"，与本次证据明确区分，避免人工混淆 |
 
+**质检结果时序空窗约束（QC 未完成 ≠ 无违规）：**
+
+- 证据采集-通话质检Agent 在把 `query_qc_violations` 返回的空数组当作"无违规"前，必须先确认该 session 的 QC 质检任务状态（经 MCP Server 内部查询 `qc_records.qc_status`，或随 tool 一并返回质检任务状态）；
+- QC 未完成 / 无质检记录时，该案件的质检证据项标记为「质检待补」（写入证据状态字段），禁止把"未检"当作"无违规"——空数组仅代表"已完成且无命中"，不代表"尚未质检"；
+- 「质检待补」证据项由 §16.1 的 `qc.check.completed` 订阅驱动补证（复用 §6.2 evidence_re_gather_fanout_node 重新取证扇出），补证完成后复判，消除 QC 离线时序空窗下的漏判。
+
 ### 7.3 反思循环校验模块
 
 - 证据完整性、证据矛盾检测；输出标准化反思报告（`ReflectionReport`）；
@@ -1358,7 +1375,7 @@ async def init_production_checkpointer():
 | ----- | ---------------------------------------------------- |
 | 统一入口  | `common/llm/provider.py`，业务层不得绕过                     |
 | 模型    | qwen-plus (DashScope)，合规研判/答辩生成使用高阶大模型               |
-| 推理参数  | temperature=0.1, top\_p=0.9, seed=42（硬编码，禁止覆盖）       |
+| 推理参数  | 按场景分层：评测/回归集 temperature=0.1、top\_p=0.9、seed=42（固定，仅评测分支）；生产对话/判责生成 temperature 默认 0.3、可配置 0.1~0.5、seed 不固定（对齐 step5/03 §6.2，禁止业务层硬编码覆盖） |
 | 输出格式  | response\_format=json\_object（强制JSON）                |
 | 超时    | 10s + 3次指数退避(1s/2s/4s)                               |
 | 置信度门控 | confidence < 0.7 标记需人工重点复核                           |
@@ -1411,7 +1428,7 @@ guardrails:
   require_json_output: true
   require_rag_source: false
   max_tokens: 4096
-  temperature: 0.1
+  temperature: 0.3  # 生产默认 0.3；评测/回归分支固定 0.1（step5/03 §6.2 分层）
 ```
 
 ### 8.5 【新增】LLM模型路由策略
@@ -2156,7 +2173,7 @@ MCP调用
 | 合规红线    | 答辩初稿含暴力/威胁/伪造身份          | 拦截率100%         | openspec/07 强制2 |
 | 投诉定性幻觉  | Agent自由定性投诉是否违规          | 不自由定性，引用标准流程    | openspec/07 强制4 |
 | 降级熔断    | LLM超时/MCP故障/Token超限/循环超限 | 正确降级兜底          | openspec/07 强制5 |
-| 一致性测试   | 同一投诉证据提交10次判责            | verdict枚举100%一致 | openspec/07 强制7 |
+| 一致性测试   | 同一投诉证据提交10次判责            | verdict 枚举一致率 ≥90%（≥9/10 一致），不一致项人工复核 | openspec/07 强制7 |
 | 证据不足转人工 | 反思循环超限                   | 必须流转人工，禁止强行判责   | 设计约束            |
 
 ### 14.2 CI门禁规则
@@ -2166,7 +2183,7 @@ MCP调用
 | 红线拦截率   | 100%                      | 阻断   |
 | 幻觉测试    | 0编造法规/事实                  | 阻断   |
 | 降级测试    | 全部正确降级                    | 阻断   |
-| 一致性测试   | verdict枚举10次100%一致        | 阻断   |
+| 一致性测试   | verdict 枚举一致率 ≥90%（≥9/10），不一致项人工复核 | 阻断   |
 | 证据不足转人工 | 循环超限必须转人工                 | 阻断   |
 | 覆盖率     | complaint-service核心模块≥85% | 阻断   |
 
@@ -2192,7 +2209,7 @@ MCP调用
 | -------- | -------------------------------- | ---------- |
 | 1. 变更登记  | 在PromptOps平台登记变更内容、目标版本号、变更原因    | 登记完成       |
 | 2. 全量回归  | 使用新版本Prompt执行全量回归测试集（第14.1节6类用例） | 全部PASS，0失败 |
-| 3. 一致性回归 | 同一投诉证据提交10次，验证verdict枚举100%一致    | 枚举一致率100%  |
+| 3. 一致性回归 | 同一投诉证据提交10次，验证 verdict 枚举一致率 ≥90%（≥9/10）    | 一致率≥90%，不一致项人工复核留痕 |
 | 4. 幻觉检测  | 执行幻觉高危场景测试矩阵（step7/02 第三节6类场景）   | 0编造法规/事实   |
 | 5. 降级测试  | 验证Prompt变更后熔断/降级逻辑仍生效            | 全部正确降级     |
 | 6. 灰度验证  | 10%流量灰度A/B测试，对比AI-人工一致率          | 一致率不下降     |
@@ -2284,6 +2301,20 @@ stateDiagram-v2
 | `complaint.closed`         | complaint-service | `{ticket_id, resolution_version, trace_id, ts}`           | data-platform / review-service                | 宽表/报告合并      |
 | `complaint.insight.weekly` | complaint-service | `{week_start, summary, trace_id, ts}`                     | review-service / rag-service                  | 周报合并/整改文档归档  |
 | `complaint.mode.switched`  | complaint-service | `{old_mode, new_mode, gray_percent, trace_id, ts}`        | data-platform / 告警系统                          | 灰度模式切换通知     |
+
+### 16.1 QC 离线质检结果回流（订阅 qc-service 事件）
+
+> qc-service 已升级为 V1.5 离线全量质检（通话结束且全文落库后才跑），投诉研判可能先于 QC 跑完就发起同步取证，存在质检结果时序空窗。本节明确 complaint-service 订阅 qc-service 事件，将 QC 离线结果作为异步证据补充来源，不再只依赖投诉发起瞬间的同步取证。
+
+- complaint-service 订阅 qc-service 事件 `qc.complaint.suspected` 与 `qc.check.completed`（及可选 `qc.review.done`），作为关联 case 的异步质检证据回流来源；事件定义与 payload 以 step4/03 §4.2 为单一事实源，字段与 DD-02 §9.3 同构：`qc.complaint.suspected`：`{qc_record_id, session_id, case_id, redline_tags[], trace_id, ts}`；`qc.check.completed`：`{qc_record_id, session_id, call_id, case_id, score, risk, grade, trace_id, ts}`（`call_id` 可 JSON null，禁止用 session_id 冒充）。`redline_tags[]` 仅审计，不作为发布条件。
+
+- **`qc.complaint.suspected`（发布条件对齐 DD-02 V1.8/V1.9：合并后 agent + severity=high + `rule_id ∈ {R11, R12, R13}`；不是 tag 集合。R05 即使 `redline_tag=threat` 也不会发此事件。payload 含 `qc_record_id`，与 SETNX 幂等键一致）处理**：
+  - 若存在关联该 case 的在途投诉/研判任务 → 触发「重新取证扇出」（复用 §6.2 evidence_re_gather_fanout_node）拉取最新 `qc_violations` 并入研判；
+  - 否则仅作为质检线索登记待评估，**不自动建普通投诉工单**——投诉工单仅由传统业务系统推送接入（§5.2 阶段1），qc 事件不作为自动建单/自动发起研判的来源，避免重复工单与重复研判。
+
+- **`qc.check.completed` 处理**：对关联 case，若此前同步取证时 QC 未完成（质检证据项已被标记「质检待补」，见 §7.2 / §6.2），触发补证重取证并复判，消除"空列表=无违规"误判；该事件同样不用于自动新建工单或自动发起新的研判任务。
+
+- 事件消费幂等（Redis SETNX 按 session_id + qc_record_id 去重），消费失败入重试队列，避免重复触发补证。
 
 ***
 

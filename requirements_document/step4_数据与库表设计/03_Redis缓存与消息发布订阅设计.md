@@ -1,9 +1,9 @@
 # Redis 缓存与消息发布订阅设计
 
 > 文档类型：数据设计（规范层）
-> 版本：v1.0
+> 版本：v1.10
 > 状态：定稿
-> 更新日期：2026-08-19
+> 更新日期：2026-09-09
 > 约束声明：本文件为 Redis 缓存与 Pub-Sub 单一事实源；遵循 step1/01 全局口径与 openspec/specs/03、06；Redis 7（redis:7-alpine，端口 6379）；7 服务按 DB 0-7 隔离；demand/ 旧文档仅作参考。
 
 ## 修订记录
@@ -12,6 +12,14 @@
 |---|---|---|---|
 | v0.1 | 2026-08-18 | 初稿骨架，仅 DB 分配与基础键 | — |
 | v1.0 | 2026-08-19 | 整合 7 个 demand 设计文档全部 Redis 键模式、Pub-Sub 频道、TTL 策略、熔断标识、分布式锁、连接配置、安全合规 | 规范定稿 |
+| v1.1 | 2026-09-09 | P0-2 修复 §3.1/§3.2 标题 DB 编号与 §1.2 分配表矛盾（rag-service DB1→DB2、data-platform DB2→DB1，以 §1.2 分配表为准） | Ellis Guo |
+| v1.2 | 2026-09-09 | P1-13 补 call+qc LLM 熔断标识：§3.3 加 qc:llm_degraded、§3.4 加 call:llm_degraded、§6.1 加两行（决策A执行） | Ellis Guo |
+| v1.3 | 2026-09-09 | P1-16 §5.2 词库热刷新敏感词端点统一 /sensitive-words/current.dict → /api/v1/sensitive-words/current.dict（决策A执行） | Ellis Guo |
+| v1.4 | 2026-09-09 | P2-22 §4.2 频道矩阵补登记 system.alert.raised / system.alert.resolved 两个全局告警频道（对齐 step6/02 §3.2），§十验收"21 个频道"→"23 个频道" | Ellis Guo |
+| v1.7 | 2026-09-09 | 对齐 DD-02 V1.5：qc:session→qc:job；删 call:qc_stream 与 qc.escalate.human；call.session.ended 增订 qc；qc.alert 仅事后主管 | Ellis Guo |
+| v1.8 | 2026-09-09 | §3.3 qc:llm_degraded TTL 注释「永不过期」改 SET/DEL 自管理（熔断 OPEN 时 SET，60s 后半开探测成功 DEL，无固定 EXPIRE，对齐 DD-02 §6.2 熔断状态机）；§9.2 频道归属补 system.* 全局告警频道豁免（允许各服务异常处理器含 qc 发布） | 规范复审 |
+| v1.9 | 2026-09-09 | 对齐 DD-02 V1.9：`qc.complaint.suspected` 追加 `qc_record_id`（投诉 SETNX 幂等）；发布条件改为 rule_id∈{R11,R12,R13}（agent+high），`redline_tags[]` 仅审计；`qc.review.done.sample_type`∈{positive,negative,corrected}；`call_id` 无则 JSON null | Ellis Guo |
+| v1.10 | 2026-09-09 | `qc:job:{session_id}` JSON 增订 `skipped_rules[]` + `qc_record_id`（对齐 DD-02 V1.11，不加 qc_records 列） | Ellis Guo |
 
 ## 一、Redis 实例与 DB 分配
 
@@ -80,7 +88,7 @@
 
 ## 三、各服务 Key 清单
 
-### 3.1 rag-service（DB 1）
+### 3.1 rag-service（DB 2）
 
 | Key | 结构 | TTL | 用途 |
 |---|---|---|---|
@@ -88,7 +96,7 @@
 | `rag:sensitive_words:version` | STRING | 永不过期 | 当前敏感词库版本号，自增 |
 | `rag:documents` | STRING（JSON） | 1h | 热点文档内容缓存 |
 
-### 3.2 data-platform（DB 2）
+### 3.2 data-platform（DB 1）
 
 | Key | 结构 | TTL | 用途 |
 |---|---|---|---|
@@ -106,6 +114,9 @@
 | `qc:words:version` | STRING | 永不过期 | 敏感词当前版本号（与 rag:sensitive_words:version 对齐） |
 | `qc:rules:active` | STRING（JSON） | 6h | qc_rules active 版本 ID + payload，DB 为权威源 |
 | `qc:alerts:new_count` | STRING（INT） | 永不过期 | SUPERVISOR 前端未读告警计数 |
+| `qc:llm_degraded` | STRING（"1"） | SET/DEL 自管理（熔断 OPEN 时 SET，60s 后半开探测成功 DEL；无固定 EXPIRE，非常驻业务键，对齐 DD-02 §6.2） | LLM 熔断标识，1=熔断中（P1-13 补，DD-02 已申请） |
+| `qc:job:{session_id}` | STRING（JSON） | 24h | 离线质检任务态。JSON：`status`（WAIT_TEXT/RUNNING/DONE）+ 终态时 `qc_record_id` + `skipped_rules[]`（对齐 DD-02 V1.11；耐久副本在 audit_logs） |
+| `qc:replay:run:{session_id}` | STRING | 7d | 回放/重跑幂等 |
 
 ### 3.4 call-service（DB 4）
 
@@ -117,7 +128,7 @@
 | `call:throttle:global` | STRING（INT） | 永不过期 | 并发 50 路令牌桶，DECR 出呼 INCR 结束 |
 | `call:simulate:run:{idempotency}` | STRING | 7d | 模拟器幂等锁，返回已有 call_id |
 | `call:rag_hits:{session_id}:{turn}` | STRING（JSON） | 24h | RAG 命中缓存，排错用 |
-| `call:qc_stream:{session_id}` | STRING | 24h | 与 qc-service 的 WS 旁路订阅标识 |
+| `call:llm_degraded` | STRING（"1"） | 永不过期 | LLM 熔断标识，1=熔断中（P1-13 补，call-service 是 LLM 最大使用方） |
 | `call:transfer:{session_id}` | STRING | 10min | 转人工状态 IN_PROGRESS/DONE，防重复触发 |
 
 ### 3.5 case-service（DB 5）
@@ -173,11 +184,14 @@
 | `kb.version.switched` | rag-service | `{doc_id, old_version, new_version, trace_id, ts}` | rag-service 内部 | 检索版本切换 |
 | `etl.task.done` | data-platform | `{run_id, stage, backfill_date?, trace_id, ts}` | qc-service / case-service / review-service | 触发补检/重打分/批量复盘 |
 | `strategy.updated` | data-platform | `{version, strategy_type, trace_id, ts}` | call-service / case-service / qc-service | 策略版本热更新 |
-| `call.session.ended` | call-service | `{session_id, case_id, result, intent_tags[], trace_id, ts}` | data-platform / case-service / review-service | ODS 追加 / 二次分案 / 单通复盘 |
-| `qc.alert.raised` | qc-service | `{alert_id, session_id, call_id, level, evidence, trace_id, ts}` | 前端 / 坐席服务 / supervisor | 高危弹窗 |
-| `qc.escalate.human` | qc-service | `{session_id, call_id, reason, hits_count, trace_id, ts}` | call-service | 宪法 1.3 敏感词 ≥2 立即转人工 |
-| `qc.check.completed` | qc-service | `{quality_id, call_id, case_id, score, risk, grade, trace_id, ts}` | data-platform / review-service / complaint-service | 宽表 / 复盘 / 投诉触发 |
-| `qc.review.done` | qc-service | `{quality_id, action, revised_score, trace_id, ts}` | rag-service / data-platform | 优质/违规沉淀 / 人工结果回流 |
+| `call.session.ended` | call-service | `{session_id, case_id, result, intent_tags[], trace_id, ts}` | data-platform / case-service / review-service / **qc-service** | ODS 追加 / 二次分案 / 单通复盘 / **离线质检开工（文本未齐则等 ETL）** |
+| `system.alert.raised` | 各服务异常处理器 | `{alert_id, level, event, service, description, error_code, trace_id, ts}` | 前端 / supervisor / 运维 | 全局告警推送（对齐 step6/02 §3.2） |
+| `system.alert.resolved` | 各服务恢复探测 | `{alert_id, service, ts}` | 前端 / supervisor / 运维 | 全局告警恢复（对齐 step6/02 §3.2） |
+| `qc.alert.raised` | qc-service | `{alert_id, session_id, call_id, level, evidence, trace_id, ts}` | 事后主管 / 运营前端 | 高危告警（**不**弹通话页）。`call_id` 无则 JSON null |
+| `qc.check.completed` | qc-service | `{qc_record_id, session_id, call_id, case_id, score, risk, grade, trace_id, ts}` | data-platform / review-service | 宽表 / 复盘；**不**自动建投诉工单。`call_id`=`call_records.id` UUID，无则 JSON null，禁止用 session_id 冒充 |
+| `qc.complaint.suspected` | qc-service | `{qc_record_id, session_id, case_id, redline_tags[], trace_id, ts}` | complaint-service | **发布条件**：agent + high + `rule_id∈{R11,R12,R13}`（不是 tag 集合；R05 即使 tag=threat 也不发）。`redline_tags[]` 仅审计。complaint 决定是否建单 |
+| `qc.stop_call.detected` | qc-service | `{session_id, case_id, evidence, trace_id, ts}` | case-service（call 可旁听） | 写 cases.stop_call_status（通话已结束，非事中强拆） |
+| `qc.review.done` | qc-service | `{qc_record_id, action, revised_score, redline_tags, evidence_masked, sample_type, trace_id, ts}` | rag-service / data-platform | 优质/违规沉淀 / 人工结果回流。`sample_type`∈{positive,negative,corrected}（CONFIRM/DISMISS/CORRECT） |
 | `case.assigned` | case-service | `{assignment_id, case_id, type:AI\|AGENT, agent_id?, trace_id, ts}` | call-service / data-platform | AI 入队 / 宽表 |
 | `case.reassigned` | case-service | `{assignment_id, case_id, action, needs_review, trace_id, ts}` | 前端 / data-platform | 运营通知 / 宽表 |
 | `case.risk.upgraded` | case-service | `{case_id, from_level, to_level, trace_id, ts}` | call-service / review-service | 转人工/安抚 / 风险复盘 |
@@ -200,9 +214,9 @@
 └────┬─────┘  │ kb.version.switched   └────┬─────┘
      │        │ (内部)                      │
      │        ▼                             │ qc.check.completed
-     │   ┌─────────┐                       │ qc.alert.raised
-     │   │  call   │◀──────────────────────┤ qc.escalate.human
-     │   │ service │──call.session.ended──┬─▶(前端/坐席)
+     │   ┌─────────┐                       │ qc.alert.raised（事后主管）
+     │   │  call   │──call.session.ended──┬─▶ qc（离线开工）
+     │   │ service │                      ├─▶(事后主管)
      │   └────┬────┘                      │
      │        │ call.session.ended        │
      │        ├───────────────────────────┼─▶┌──────────┐
@@ -245,7 +259,7 @@
 
 1. **DB 为权威源**：所有缓存数据以 PostgreSQL 为准，Redis 仅作加速层；缓存未命中时回源 DB 查询并回填；
 2. **先写 DB 后 DEL 缓存**：更新操作先落 PostgreSQL，成功后 DEL Redis key（Cache-Aside 模式），禁止先 DEL 后写 DB（防并发回填脏数据）；
-3. **词库热刷新**：rag-service 更新 sensitive_words 后，DEL `rag:sensitive_words:version` → INCR 版本号 → PUBLISH `kb.sensitive_updated`；qc-service 订阅后 60s 内拉取 `/sensitive-words/current.dict` 重建 AC 自动机；
+3. **词库热刷新**：rag-service 更新 sensitive_words 后，DEL `rag:sensitive_words:version` → INCR 版本号 → PUBLISH `kb.sensitive_updated`；qc-service 订阅后 60s 内拉取 `/api/v1/sensitive-words/current.dict` 重建 AC 自动机；
 4. **规则热切换**：qc-service 更新 qc_rules 后，DEL `qc:rules:active` → 下次读取时从 DB 回填新版本；
 5. **策略版本变更**：data-platform 更新 strategy_versions 后，PUBLISH `strategy.updated` → 各服务订阅后刷新本地策略缓存。
 
@@ -265,6 +279,8 @@
 |---|---|---|---|
 | `csmp:llm_degraded` | complaint-service | "1" | 投诉判责 LLM 熔断，走规则兜底 |
 | `rv:llm_degraded` | review-service | "1" | 复盘分类 LLM 熔断，走规则兜底 |
+| `call:llm_degraded` | call-service | "1" | 外呼对话 LLM 熔断，走 RuleBasedScriptEngine 兜底（P1-13 补） |
+| `qc:llm_degraded` | qc-service | "1" | 质检 LLM 审查熔断，走规则引擎审查（P1-13 补，DD-02 已申请） |
 
 > 熔断窗口期内（连续 3 次失败触发），停止调用 LLM，走固定兜底话术/规则决策；窗口期（60s）过后自动清除标识（DEL），恢复 LLM 调用。
 
@@ -333,7 +349,7 @@ end
 REDIS_HOST=redis
 REDIS_PORT=6379
 REDIS_DB=1                    # 按 DB 分配表
-REDIS_PASSWORD=               # MVP 不设密码，内网隔离
+REDIS_PASSWORD=               # dev/staging 可空（内网隔离）；prod 必须经 docker secrets 注入
 REDIS_MAX_CONNECTIONS=50
 REDIS_SOCKET_TIMEOUT=3
 REDIS_SOCKET_CONNECT_TIMEOUT=2
@@ -360,9 +376,10 @@ REDIS_SOCKET_CONNECT_TIMEOUT=2
 | 约束 | 说明 |
 |---|---|
 | 服务间 DB 隔离 | 各服务仅访问自己分配的 DB，禁止跨 DB 读写 |
-| Pub-Sub 频道归属 | 发布者只能发布自己归属的频道前缀（如 qc-service 只能 publish `qc.*`） |
+| Pub-Sub 频道归属 | 发布者只能发布自己归属的频道前缀（如 qc-service 只能 publish `qc.*`）；全局告警频道 `system.*`（system.alert.raised / system.alert.resolved）属例外，允许各服务异常处理器（含 qc-service 在 LLM 熔断时）发布，对齐 DD-02 §9.3、step6/02 §3.2 |
 | 管理命令限制 | 生产环境禁止 FLUSHALL / FLUSHDB / KEYS，用 SCAN 替代 KEYS |
 | 测试环境清理 | 独立测试后 `FLUSHDB` 仅限测试 DB，生产 DB 禁止 |
+| 生产认证 | prod 必须开启 ACL/密码（requirepass + 最小权限用户），经 docker secrets 注入；dev/staging 可空（内网隔离） |
 
 ### 9.3 X-Trace-Id 透传
 
@@ -377,7 +394,7 @@ REDIS_SOCKET_CONNECT_TIMEOUT=2
 | DB 隔离 | 7 服务各用独立 DB，`redis-cli INFO keyspace` 确认无跨 DB 写入 |
 | 键命名 | 全部 key 符合 `<prefix>:<entity>:<id>` 格式，无裸 key |
 | TTL 覆盖 | 所有缓存 key 均设 TTL（永不过期的除外），无裸 key 泄漏 |
-| Pub-Sub 联通 | `redis-cli PSUBSCRIBE` 能收到全部 21 个频道的测试消息 |
+| Pub-Sub 联通 | `redis-cli PSUBSCRIBE` 能收到频道矩阵内测试消息（**不含**已删除的 `qc.escalate.human`） |
 | 熔断恢复 | SET llm_degraded "1" 后 60s 自动 DEL，LLM 恢复调用 |
 | 分布式锁 | `SET NX EX` 原子加锁，Lua 脚本释放，并发 pick 同一工单只有一个成功 |
 | 脱敏验证 | `redis-cli GET` 任意缓存 key，不含明文手机号/身份证/姓名 |

@@ -1,9 +1,9 @@
 # 催收合规拦截与安全护栏 Guardrails 规范
 
 > 文档类型：技术规范（规范层）
-> 版本：v1.0
+> 版本：v1.4
 > 状态：定稿
-> 更新日期：2026-08-19
+> 更新日期：2026-09-09
 > 约束声明：本文件为 Guardrails 合规拦截单一事实源；遵循 step1/01 全局统一口径与 openspec/specs/00（红线）、04（护栏）；红线本体以 openspec/specs/00_biz_redline.md（S0·全局最高）为唯一源；兜底话术统一在 rag-service 知识库维护，禁止硬编码。
 
 ## 修订记录
@@ -12,6 +12,9 @@
 |---|---|---|---|
 | v0.1 | 2026-08-18 | 初稿骨架，仅双校验与拦截动作 | — |
 | v1.0 | 2026-08-19 | 补五层护栏架构、AC 自动机实现、拦截动作矩阵、降级链路、停止致电状态机、规则配置化、审计追溯、回归测试门禁 | 规范定稿 |
+| v1.1 | 2026-09-09 | P1-15 §七停止致电标记落库改为引用 cases.stop_call_status 字段（含 5 值枚举 + audit_logs 留痕），消除"case_status 或专用标记"歧义（决策A执行） | Ellis Guo |
+| v1.2 | 2026-09-09 | P1-16 §4.3 敏感词端点统一 /sensitive-words/current.dict → /api/v1/sensitive-words/current.dict（决策A执行） | Ellis Guo |
+| v1.4 | 2026-09-09 | 对齐 DD-02 V1.5：L5 事中告警改 system.alert.raised；禁止 qc.alert.raised；追溯链去掉「LLM→质检→TTS」 | Ellis Guo |
 
 ## 一、合规红线（与 openspec/specs/00 逐条对齐，S0）
 
@@ -74,7 +77,7 @@
 ┌─────────────────────────────────────────────────┐
 │ L5 出口护栏（post-output）                        │
 │ · TTS 合成前最终校验                              │
-│ · 告警推送（高危 → Redis Pub-Sub qc.alert.raised）│
+│ · 告警推送（高危 → Redis Pub-Sub system.alert.raised；**不是** qc.alert.raised）│
 │ · 审计落库（llm_call_logs + audit_logs）          │
 │ · 停止致电标记写入                                │
 └─────────────────────────────────────────────────┘
@@ -103,6 +106,7 @@
 | 伪造身份 | 角色关键词 + 语义 | 替换为标准答案库内容 | — |
 | 编造金额/账单 | 与 DB 数据比对 | 提示以坐席核实为准 | — |
 | 自定义减免政策 | 关键词 + 语义 | 提示以坐席核实为准 | — |
+| 法规来源校验 | 输出引用 source_id 是否存在/有效（查 kb_documents，须附原文片段） | 无 source_id 或无效 → 拦截 + 兜底话术（视为幻觉） | B0010 |
 
 ### 3.3 校验链路
 
@@ -111,7 +115,7 @@
   → L2 前置校验（AC + 意图 + 脱敏）
     → 通过 → LLM 推理
       → L3 结构化校验（JSON + Schema + 置信度 + 熔断）
-        → 通过 → L4 后置校验（AC + 语义 + 数据比对）
+        → 通过 → L4 后置校验（AC + 语义 + 数据比对 + 法规来源校验）
           → 通过 → L5 出口护栏（TTS 前终检 + 告警 + 审计）
             → 输出客户
           → 不通过 → 兜底话术
@@ -153,7 +157,7 @@ class SensitiveWordFilter:
         self._automaton: Automaton  # pyahocorasick.Automaton
 
     def load_words(self, words: list[dict]) -> None:
-        """从 rag-service /sensitive-words/current.dict 加载并构建自动机"""
+        """从 rag-service /api/v1/sensitive-words/current.dict 加载并构建自动机"""
 
     def scan(self, text: str) -> list[SensitiveHit]:
         """扫描文本，返回命中列表 [{word, category, severity, position}]"""
@@ -166,7 +170,7 @@ class SensitiveWordFilter:
 
 | 触发场景 | 红线 | 处置动作 | 兜底话术 | 错误码 | 告警 |
 |---|---|---|---|---|---|
-| 暴力/威胁/骚扰 | 红线1 | 立即转人工 + 结束通话 | "为了更好地为您服务，正在为您转接专属顾问" | B0010 | 高危告警 qc.alert.raised |
+| 暴力/威胁/骚扰 | 红线1 | 立即转人工 + 结束通话 | "为了更好地为您服务，正在为您转接专属顾问" | B0010 | 高危告警 `system.alert.raised`（call 事中；`qc.alert.raised` 仅事后质检） |
 | 伪造身份 | 红线2 | 替换为标准答案库内容 | "我是XX平台的智能助手" | B0010 | 中危告警 |
 | 停止致电 | 红线3 | 终止外呼 + 写停止标记 | "好的，您的要求我们已记录" | A1001 | 记录 |
 | 自定义减免承诺 | 红线4 | 提示以坐席核实为准 | "具体优惠政策请与专属顾问核实" | B0010 | 中危告警 |
@@ -183,7 +187,7 @@ class SensitiveWordFilter:
 | 级别 | 触发条件 | 降级动作 | 依据 |
 |---|---|---|---|
 | L1 LLM 调用失败 | 超时/熔断/报错 | 返回预设兜底话术（RuleBasedScriptEngine） | step3/03 |
-| L2 知识库检索无果 | score<0.6 或为空 | 使用标准 FAQ 兜底，不自由作答 | step3/03 |
+| L2 知识库检索无果 | score<0.6（精排后最终融合分数口径，见 step3/03 §一.2）或为空 | 使用标准 FAQ 兜底，不自由作答 | step3/03 |
 | L3 合规拦截触发 | 前置/后置校验不通过 | 返回合规兜底话术，记告警，违规内容不向下游传递 | step3/03 |
 
 ### 6.2 降级链路
@@ -222,7 +226,7 @@ Guardrails 校验
 （已投诉客户）降强度 → 投诉工单闭环后 → 恢复可外呼
 ```
 
-- 停止致电标记写入客户档案（`cases.case_status` 或专用标记）；
+- 停止致电标记写入客户档案 `cases.stop_call_status`（VARCHAR(20) CHECK IN ('callable','stop_requested','stopped','permanent_stop','reduced_intensity')，默认 'callable'，见 step4/01 cases DDL；状态流转经 audit_logs 留痕 who/when/why/action）；
 - call-service 外呼调度与 case-service 分案分流在发呼前强制校验该标记，命中即拦截；
 - 已投诉客户降低催收强度、禁止继续施压，强度恢复须等投诉工单闭环。
 
@@ -261,9 +265,10 @@ Guardrails 校验
 ### 9.2 追溯能力
 
 - 所有 AI 会话、话术、研判结果、质检结果必须可追溯、可复盘、可回滚、可审计；
-- 单 trace_id 可串联：用户请求 → ASR → 意图 → LLM → 质检 → TTS → 审计日志全链路；
+- 单 trace_id 可串联：用户请求 → ASR → 意图 → LLM → Guardrails → TTS → 审计日志；**质检不在 TTS 前**，通话结束后 qc 用同一 `session_id`/`trace_id` 离线串上 `qc_records`；
 - `GET /api/v1/audit-logs?trace_id=` 支持单案件全流程串联查询；
 - reasoning_encrypted 仅 role=admin 可解密，解密操作记 audit_logs。
+- **RAG 来源溯源**：输出引用的 source_id（kb_chunks.doc_id / kb_documents.id）随 llm_call_logs.prompt 内 RAG 上下文标注与 dialog_turns 话术落库，单 trace_id 可追溯至知识库原文（对齐 step4/02 v2.3）；source_id 无着落即视为幻觉，由 §3.2 法规来源校验 B0010 拦截。
 
 ## 十、回归测试门禁
 
