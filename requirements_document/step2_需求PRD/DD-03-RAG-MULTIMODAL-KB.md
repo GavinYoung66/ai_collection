@@ -3,10 +3,10 @@
 > 子系统编号：第 3 号
 > 服务名：`rag-service`
 > 监听端口：**8002**
-> 里程碑归属：**M1（最小闭环 RAG 流程跑通）**
-> 上游约束：step1/01~03 全局口径、step3/01~03 架构与降级、step4/01~04 数据设计、step5/01~04 技术规范、step6/01~02 异常容错与可观测性
-> 复杂版参考：DD-03-RAG-MULTIMODAL-KB.md（V2.0，含多模态/复杂路由/Query改写/LangSmith，本期不实现）
-> 本文档状态：**与 rag-service V1~V4 已实现代码对齐**（缓存/限流/权限/敏感词/降级/多模态 OCR-ASR/摘要均已落地并通过全量测试）；**V5 为本期规划**（新增 Excel/PPT 格式、内嵌图片/表格抽取、AMR/WMA 音频、Gradio 浏览器前端、在线大模型回答开关）
+> 里程碑归属：**M1（最小闭环 RAG 流程跑通；M1 验收仅 Milvus 稠密检索，见 step1/04「检索边界」）**
+> 上游约束：step1/01~04 全局口径（含检索边界）、step3/01~03 架构与降级、step4/01~04 数据设计、step5/01~04 技术规范、step6/01~02 异常容错与可观测性
+> 复杂版参考：DD-03-RAG-MULTIMODAL-KB.md（V2.0，含多模态/复杂路由/Query改写/LangSmith，本期不实现；**不得作为里程碑 M1 开工依据**）
+> 本文档状态：**与 rag-service V1~V4 已实现代码对齐**（缓存/限流/权限/敏感词/降级/多模态 OCR-ASR/摘要均已落地并通过全量测试）；**V5 为本期规划**（新增 Excel/PPT 格式、内嵌图片/表格抽取、AMR/WMA 音频、Gradio 浏览器前端、在线大模型回答开关；**不得作为里程碑 M1 开工依据**）
 
 ---
 
@@ -18,16 +18,23 @@
 | V1.1 | 2026-08-21 | AI 产品架构师 | 评审优化：删除代码骨架冗余；补齐边界契约；修正敏感词契约（text/plain）；深化 §10 V1→V2 演进与 §11 任务拆分                                                                                                                                                                              |
 | V1.2 | 2026-08-21 | AI 产品架构师 | **全局规范对齐版**：逐条核对 step1/03/04/05/06 规范，修正 B0001 状态码、双阈值闸门（0.6/0.35）、Milvus/ES schema 差异、敏感词数据源差异、Redis key 收录状态、kb_search_logs 类型规范冲突、数据中台对接与监控；全部差异以"规范契约 / V1 实现 / 差异与演进"三段式标注                     |
 | V1.3 | 2026-08-25 | AI 产品架构师 | **V5 需求合并版**：新增 V5 多模态混合检索增强（Excel/PPT 格式、PDF/PPT/Word 内嵌图片与表格抽取、AMR/WMA 音频扩展）、Gradio 浏览器前端入口、RAG 检索接入在线大模型（开关门控）；同步融入 §1.4 边界、§2 技术栈、§3 目录、§4 存储、§5 接口、§6 流程、§8 配置、§10 演进路线、§11.5 任务清单 |
+| V1.4 | 2026-09-10 | Ellis Guo | 数据模型收口：kb_documents.status 四值与 kb_search_logs 已收录 step4/01；degraded/is_fallback/cache_hit 为 CHAR(1) 禁止 BOOLEAN；A7/A12 关闭 |
+| V1.5 | 2026-09-10 | Ellis Guo | 删除 A12 旧行；V2 存储整改不再把 kb_search_logs BOOLEAN 当待办（类型已收口 step4/01） |
+| V1.6 | 2026-09-10 | Ellis Guo | 审阅 17/18：M1 验收仅 Milvus；ES+RRF+Rerank 标非一期强制；Embedding 失败与 step6/01 对齐为 failed+A3003 |
+| V1.7 | 2026-09-10 | Ellis Guo | 审阅 32/35/36：探活仅 GET /health；A3004/A3006 与 step6 一致禁止作 HTTP code；分页仅 page_size、立即废弃 size |
+| V1.8 | 2026-09-10 | Ellis Guo | 审阅 40：词库热刷新 60s 句加「stale 时钟见 step6/02」（不改 V2-T9 实现范围） |
+| V1.9 | 2026-09-10 | Ellis Guo | 审阅 48：文首加强 V2.0/V5 **不得作为里程碑 M1 开工依据** |
 
 ### 0.1 规范对齐声明（单一事实源）
 
 | 主题                            | 权威文件 | 本 PRD 引用要点                                                                      |
 | :------------------------------ | :------- | :----------------------------------------------------------------------------------- |
 | 错误码全集（A 58 + B 10 = 共 68 条编码位） | step6/01 | A3xxx 知识库域 + B0001~B0010；禁止私自编号                                           |
-| 统一响应包 / HTTP 状态码 / 分页 | step5/02 | `{code,message,data,trace_id}`；业务错误 200、系统错误 5xx、参数 422；page/page_size |
-| 向量库/ES/Rerank Schema         | step4/02 | kb_vectors 6 字段、kb_chunks_bm25、bge-reranker 约束                                 |
+| 统一响应包 / HTTP 状态码 / 分页 | step5/02 | `{code,message,data,trace_id}`；业务错误 200、系统错误 5xx、参数 422；仅 `page`/`page_size`，禁止 `size` 别名 |
+| 向量库/ES/Rerank Schema         | step4/02 | kb_vectors 6 字段、kb_chunks_bm25、bge-reranker 约束；**一期仅 Milvus**，ES/rerank 为二期预案 |
+| 一期检索边界                    | step1/01、step1/04 | M1 验收只要求 Milvus 稠密检索；ES BM25 / RRF / rerank 开关默认关，不强制部署 |
 | Redis key / DB 分配 / Pub-Sub   | step4/03 | rag 前缀 DB2、键命名冒号分隔、`kb.sensitive_updated`                                 |
-| KB 表 DDL / 类型规范            | step4/01 | kb_documents/kb_chunks/sensitive_words；枚举用 VARCHAR+CHECK                         |
+| KB 表 DDL / 类型规范            | step4/01 | kb_documents（status 四值）/ kb_chunks / kb_search_logs / sensitive_words；枚举用 VARCHAR+CHECK；禁止 BOOLEAN |
 | 降级与兜底分级                  | step3/03 | L1 LLM / L2 检索无果(score<0.6) / L3 合规；兜底话术入 script 标准答案库              |
 | 重试/超时/熔断                  | step6/01 | 5s 超时、3 次指数退避（1s/2s/4s）、3 连失败熔断                                      |
 | 埋点/监控/告警                  | step6/02 | rag 监控项：检索命中率<60%、Embedding 队列积压>100、版本切换失败>0                   |
@@ -42,21 +49,23 @@
 
 ### 1.2 V1 能力边界（已实现，验收基线）
 
+> **一期/M1 验收边界（对齐 step1/04「检索边界」、step4/02）**：M1 只要求 **Milvus 稠密检索** 可跑通。下表中 ES BM25、RRF、Rerank、ES 双索引、ES-only 降级路径为 **V1 代码可含开关的预案**，覆盖矩阵一期默认关；**M1 不强制部署 ES / rerank-service**。禁止把混合检索当作 M1 部署条件。
+
 | #   | 能力                | 说明                                                                       | 状态 |
 | :-- | :------------------ | :------------------------------------------------------------------------- | :--- |
-| 1   | 文档上传 + 解析入库 | PDF/DOCX/MD/TXT，解析→清洗→分块→向量化→双索引（Milvus+ES）                 | ✅   |
+| 1   | 文档上传 + 解析入库 | PDF/DOCX/MD/TXT，解析→清洗→分块→向量化→Milvus 索引。ES 双写为 **二期/可选**（开关默认关；代码可保留 client） | ✅   |
 | 2   | 增量更新/删除       | 单文档删除仅操作该文档的向量/索引/chunks，禁止全量重建                     | ✅   |
-| 3   | 混合检索            | Milvus 向量 + ES BM25 → RRF(k=60) 融合 → Rerank 精排                       | ✅   |
-| 4   | Reranker 重排序     | rerank-service:8101；宕机降级 RRF score 排序                               | ✅   |
-| 5   | 低分兜底（防幻觉）  | Top1 rerank_score < 0.35 → 兜底文案，不送 LLM                              | ✅   |
-| 6   | 溯源引用            | 结果附 doc_id/title/chunk_index/content/score/rerank_score                 | ✅   |
+| 3   | 检索（M1 必做）     | **M1 验收：仅 Milvus 稠密检索**。Milvus + ES BM25 → RRF(k=60) → Rerank 为 **非一期强制**（二期/开关默认关） | ✅   |
+| 4   | Reranker 重排序     | rerank-service:8101；宕机降级 RRF score 排序。**非一期强制**；M1 不部署 rerank-service | ✅（预案） |
+| 5   | 低分兜底（防幻觉）  | M1：Milvus 召回归一化 score < 0.6 → 兜底。闸门 2（rerank_score < 0.35）属二期 rerank 路径 | ✅   |
+| 6   | 溯源引用            | 结果附 doc_id/title/chunk_index/content/score（二期可附 rerank_score）     | ✅   |
 | 7   | 全链路日志          | 每次检索落库 kb_search_logs（15 字段）                                     | ✅   |
 | 8   | 分类隔离            | category ∈ {regulation, script, case, other} 过滤                          | ✅   |
 | 9   | Redis 高频查询缓存  | `rag:cache:query:{md5}` + 按分类失效 + 容错降级                            | ✅   |
 | 10  | 接口限流            | Redis 按用户维度固定窗口，超限 429+B0006                                   | ✅   |
 | 11  | 接口权限校验        | 上传/删除/reindex 需 ADMIN/SUPERVISOR，401+B0002 / 403+B0003               | ✅   |
 | 12  | 敏感词只读接口      | GET /sensitive-words/current.dict（INTERNAL，text/plain）                  | ✅   |
-| 13  | 降级/熔断           | Milvus→ES-only / ES→Milvus-only / 双挂→A3005 / Rerank→RRF / Embedding 熔断 | ✅   |
+| 13  | 降级/熔断           | M1：Milvus 宕机 → A3005（无 ES 兜底义务）。ES-only / Rerank→RRF / 双挂降级矩阵为 **非一期强制** 预案。Embedding 熔断见 §6.4 | ✅   |
 
 ### 1.3 V1 明确不做（延后清单见 §10）
 
@@ -100,7 +109,7 @@ services/rag-service/
 ├── app/                          # 应用主目录（六层架构：api → models → parsers → repositories → services → vectorstore）
 │   ├── main.py                   # FastAPI 入口：路由注册 + 鉴权/限流/异常 handler + startup（Milvus/ES 初始化 + 敏感词基线 + 补索引恢复）+ shutdown 幂等关闭全局客户端 + /health 根探活
 │   ├── api/                      # 路由层（Controller）：先权限 → 再限流 → 再业务
-│   │   ├── health.py             # GET /health：依赖探活（PG/Milvus/Redis/embedding），/health 与 /api/v1/health 双路由共用 probe_health()
+│   │   ├── health.py             # GET /health：依赖探活（PG/Milvus/Redis/embedding）。**仅 `/health` 为探活契约**；实现层若残留 `/api/v1/health` 不算接口规范，不得写成正式契约
 │   │   ├── deps.py               # 依赖注入（db/redis/各客户端）+ success_response 统一响应包 + save_upload_file（≤20MB 校验 + 临时文件清理）
 │   │   ├── documents.py          # 上传/列表/详情/删除/reindex（权限 + 限流 + 缓存失效）
 │   │   ├── search.py             # 混合检索（限流 200/min + 缓存切面 + 请求级超时）
@@ -172,14 +181,14 @@ services/rag-service/
 ### 4.1 PostgreSQL（DDL 单一事实源为 step4/01，本表为差异对照）
 
 - **kb_documents**（status 已扩展）：
-  - ▶ **规范契约**（step4/01）：status CHECK `('active','archived')`，category VARCHAR(50) + CHECK 四值
-  - ▶ **V1 实现**：status CHECK 已扩展为 `('processing','active','archived','failed')`
-  - ▶ **差异与演进**：扩展属合理演进（入库过程状态），需同步 step4/01 DDL 收录
+  - ▶ **规范契约**（step4/01）：status CHECK `('processing','active','archived','failed')`，category VARCHAR(50) + CHECK 四值
+  - ▶ **V1 实现**：与规范一致
+  - ▶ **差异与演进**：**已同步 step4/01**（A12 关闭）
 - **kb_chunks**：id/doc_id(FK CASCADE)/chunk_index/content/vector_id(VARCHAR100)/category/version/公共字段；`UNIQUE(doc_id, chunk_index)` + 唯一索引 vector_id
-- **kb_search_logs**（V1 迁移 0002 新增）：
-  - ▶ **规范契约**（step4/01 §1.2）：枚举/布尔一律 VARCHAR+CHECK，**禁止 BOOLEAN**；本表未收录 step4/01 19 表清单
-  - ▶ **V1 实现**：15 字段（trace_id/query/category/五个计数/max_rerank_score/hit_doc_ids/hit_chunk_ids/latency_ms/degraded/is_fallback/时间/is_delete），其中 degraded/is_fallback 用 BOOLEAN
-  - ▶ **差异与演进**：BOOLEAN 违反全局类型规范，建议 V2 迁移改 VARCHAR('0','1') + CHECK；表定义待 step4/01 收录避免双源漂移
+- **kb_search_logs**（已收录 step4/01）：
+  - ▶ **规范契约**（step4/01）：trace_id/query/category/dense_hit_count/sparse_hit_count/fused_count/reranked_count/max_rerank_score/hit_doc_ids/hit_chunk_ids/latency_ms/degraded/is_fallback/cache_hit/create_time/is_delete；布尔语义 CHAR(1) `'0'|'1'`
+  - ▶ **V1 实现**：与 step4/01 对齐（禁止 BOOLEAN）
+  - ▶ **差异与演进**：**已同步 step4/01**（A7 关闭）
 - **sensitive_words**（规范表）：word(VARCHAR100 UNIQUE)/category(threat/abuse/induce)/severity(high/medium/low)/status(active/disabled)/description —— V1 只读接口数据源为文件而非本表，见 §5.3
 - **kb_doc_assets**（V5 新增表）：id / doc_id(FK CASCADE) / asset_type(image|table) / page(INT) / storage_path / ocr_text / mime_type / created_at —— PDF/DOCX/PPTX 内嵌图片/表格抽取的元数据与存储定位：图片文件落本地磁盘/对象存储（供预览），OCR 文本以 chunk 走既有双索引（文搜图），检索命中 chunk 时按 doc_id+asset 关联返回预览元数据
 
@@ -247,7 +256,7 @@ services/rag-service/
 
 **上传请求**：`file`（≤20MB，超限→B0001）+ `category`（四值之一，非法→B0001）。
 **上传响应**：`{doc_id, chunks_count, status}`。
-**列表分页**：`page`（从 1 起）、`page_size`（默认 20，最大 100）——▶ 对齐 step5/02（实现字段 size 待统一为 page_size，见附录 A.A8）。
+**列表分页**：`page`（从 1 起）、`page_size`（默认 20，最大 100）——▶ 对齐 step5/02。**仅 `page_size`，禁止 `size` 别名**（立即废弃，无兼容回退）。
 
 **边界契约**：
 
@@ -256,7 +265,9 @@ services/rag-service/
 - 删除不存在/已 archived 的 doc_id → B0004（非幂等：重复删除返回资源不存在）
 - reindex 对 failed/archived 文档 → B0004（状态机约束）
 
-### 5.2 混合检索
+### 5.2 混合检索（**非一期强制**；M1 默认仅 Milvus）
+
+> 本节保留混合检索设计，供二期/开关开启后使用。覆盖矩阵一期默认关；**M1 验收只要求** `embed(query) → Milvus 稠密检索 → score<0.6 兜底`。不得将 ES + RRF + Rerank 当作 M1 必部署。
 
 | 方法 | 路径         | 权限                | 限流    | 说明     |
 | :--- | :----------- | :------------------ | :------ | :------- |
@@ -283,7 +294,7 @@ services/rag-service/
 
 **契约**：`Content-Type: text/plain`，原样返回，不包装 JSON；字典缺失/IO 失败 → HTTP 404（不抛 500、不触发全局 handler）；仅输出不做拦截。
 
-- ▶ **规范契约**（step4/01 + step4/03）：敏感词存 sensitive_words 表（word/category/severity/status），版本号 `rag:sensitive_words:version` 自增，更新后 PUBLISH `kb.sensitive_updated`，qc-service 60s 内拉取重建 AC 自动机
+- ▶ **规范契约**（step4/01 + step4/03）：敏感词存 sensitive_words 表（word/category/severity/status），版本号 `rag:sensitive_words:version` 自增，更新后 PUBLISH `kb.sensitive_updated`，qc-service 60s 内拉取重建 AC 自动机（stale 时钟见 step6/02）
 - ▶ **V1 实现**：返回内置 `data/sensitive_words.dict` 文件（50 词，与 M0 seed 表数据一致），无版本号/Pub-Sub
 - ▶ **差异与演进**：数据源与规范不一致（文件 vs DB 表）。V1 以文件简化交付；**V2 必须改为读 sensitive_words 表 + 版本号 + 发布热刷新事件**（qc-service 依赖该机制，见 §10.2 V2-T9）。消费方：qc-service（语音质检比对）、call-service。
 
@@ -308,7 +319,7 @@ services/rag-service/
 
 **V5 扩展**：新增 .xlsx/.pptx 解析走同一七步流水线（source 打标 excel/ppt）；PDF/DOCX/PPTX 内嵌图片经抽取 → OCR 文本以 chunk 入库（source=asset_image）+ 元数据落 kb_doc_assets（文搜图）；内嵌表格结构化解析（保留行列结构）后入库。**回滚契约与 V1 完全一致**（PG 成功但索引失败 → 回滚 + status=failed + A3003）。
 
-- ▶ **与 step6/01 §6.1 差异**：规范口径为"Embedding 失败 → 跳过向量化 + 告警"（降级入库）；V1 采用"失败置 failed + A3003"（防无向量脏数据）。V2 可选支持降级跳过向量化（仅文本索引）
+- ▶ **与 step6/01 §6.1 对齐（审阅 18）**：Embedding/向量化失败 → `kb_documents.status=failed` + 对外/对内 **A3003**，告警可保留。**禁止**以「跳过向量化、文档仍 active/可检索」收场。检索不得命中无向量文档。
 
 ### 6.2 增量删除
 
@@ -317,7 +328,9 @@ DELETE /documents/{doc_id} → 权限/限流 → 删 PG chunks → 删 Milvus ve
 → 删 ES docs → status=archived → invalidate_cache(category)
 ```
 
-### 6.3 混合检索
+### 6.3 混合检索（**非一期强制**）
+
+> M1 简化链路：`POST /search → 限流 → embed(query) → Milvus 稠密召回 → score<0.6 兜底`。下列并行召回 + RRF + Rerank 为二期/开关开启后的设计，**不是 M1 部署条件**。
 
 ```
 POST /search → 限流 → embed(query) → 并行召回(Milvus+ES, 各 top20, category 过滤)
@@ -331,11 +344,11 @@ POST /search → 限流 → embed(query) → 并行召回(Milvus+ES, 各 top20, 
 
 | 故障场景                 | 降级路径             | 响应/错误码                                                  | 告警       |
 | :----------------------- | :------------------- | :----------------------------------------------------------- | :--------- |
-| Milvus 宕机              | ES-only 检索         | degraded=true                                                | Warning    |
-| ES 宕机                  | Milvus-only 检索     | degraded=true                                                | Warning    |
+| Milvus 宕机              | M1：中止检索。ES-only 为 **非一期强制** 预案 | M1：A3005。二期开 ES 开关后可 degraded=true                  | Warning    |
+| ES 宕机                  | Milvus-only 检索（一期默认即此路径） | degraded 可不置（一期无 ES）                                 | Warning    |
 | 双侧宕机                 | 不检索               | A3005                                                        | Critical   |
-| Rerank 宕机              | RRF score 排序       | degraded=true                                                | Warning    |
-| Embedding 宕机（入库侧） | 中止入库             | A3003, status=failed                                         | Critical   |
+| Rerank 宕机              | RRF score 排序（**非一期强制**；M1 不调用 rerank） | degraded=true                                                | Warning    |
+| Embedding 宕机（入库侧） | 中止入库             | A3003, status=failed（禁止跳过向量化仍 active/可检索）       | Critical   |
 | Embedding 宕机（检索侧） | 中止检索             | A3003                                                        | Critical   |
 | Redis 故障（缓存/限流）  | 静默绕过             | 正常返回                                                     | Warning    |
 | 检索融合分 < 0.6         | 判定无匹配（闸门 1） | degraded 保持 false（业务判定非基础设施降级，V1-T17 已接入） | 命中率指标 |
@@ -372,7 +385,7 @@ POST /search (answer=true) → 检索（§6.3）→ 若 KB_LLM_ANSWER_ENABLED=tr
 | B0004  | 资源不存在   | 404     | doc_id 不存在                          | —                 |
 | B0006  | 请求频率超限 | 429     | 超过接口阈值                           | —                 |
 
-- ▶ A3004（相关性不足）与 A3006（rerank 失败）不作为对外返回码：兜底走 code=0+message（对齐 step6-01"业务错误统一 200 封装"），rerank 失败走降级（degraded=true）
+- ▶ A3004（相关性不足）与 A3006（rerank 失败）**仅内部/日志码，禁止作为 HTTP `code` 返回**：对外仍 `code="0"` + message / `degraded=true`（**与 step6/01 一致，不是漏实现**）
 - ▶ V5：LLM 回答失败**不引入新错误码**——超时/熔断/不可用一律降级为纯检索结果（answer=null + degraded=true），与 V4 行为一致（对齐"业务错误统一 200 封装"）
 - ▶ 系统异常（B0007/B0008/B0009）由全局 handler 统一处理，本服务不自行返回
 
@@ -423,13 +436,13 @@ POST /search (answer=true) → 检索（§6.3）→ 若 KB_LLM_ANSWER_ENABLED=tr
 | 解析器            | TXT/MD；PDF 页眉页脚过滤；DOCX 空段过滤                   | test_documents.py / test_pdf_docx_parser.py |
 | 分块              | 段落/句号/硬切；len<10 过滤                               | test_documents.py                           |
 | 入库/删除/reindex | 上传成功；增量删除；reindex 旧删新写                      | test_documents.py / test_reindex.py         |
-| 混合检索          | 双路召回、RRF 去重、溯源、分类过滤                        | test_search.py                              |
+| 检索（M1=Milvus） | M1 验收稠密检索、溯源、分类过滤；双路召回/RRF 为非一期强制 | test_search.py                              |
 | 双闸门兜底        | 闸门 1：稠密相似度<0.6 无匹配；闸门 2：rerank<0.35 兜底   | test_gate_threshold.py / test_search.py     |
-| 分页双支持        | page/page_size 优先、size 兼容回退、默认 20 最大 100      | test_pagination.py                          |
+| 分页              | 仅 page + page_size（默认 20、最大 100）；禁止 size 别名 | test_pagination.py                          |
 | 缓存兜底隔离      | 兜底/降级响应不写缓存                                     | test_query_cache.py                         |
 | 缓存命中落日志    | 命中写 kb_search_logs（cache_hit='1'）                    | test_query_cache.py                         |
 | 兜底              | rerank<0.35 → results=[] + 文案                           | test_search.py                              |
-| 降级              | Milvus→ES-only / ES→Milvus-only / 双挂→A3005 / Rerank→RRF | test_search_degradation.py                  |
+| 降级              | M1：Milvus 宕机→A3005。ES-only / Rerank→RRF 为 **非一期强制** 预案 | test_search_degradation.py                  |
 | 缓存              | 写入/命中/TTL/失效/容错                                   | test_query_cache.py                         |
 | 限流              | 放行/429+B0006/用户维度/故障降级                          | test_rate_limit.py                          |
 | 权限              | B0002 / B0003 / ADMIN+SUPERVISOR 放行                     | test_require_role.py                        |
@@ -449,11 +462,13 @@ POST /search (answer=true) → 检索（§6.3）→ 若 KB_LLM_ANSWER_ENABLED=tr
 V1（已实现基础）             V2（多模态+智能检索）       V3（多模态深化）         V4（摘要+收口）          V5（本期规划）
 ┌───────────────────┐    ┌────────────────────────┐   ┌──────────────────┐   ┌──────────────┐   ┌────────────────────┐
 │ 4格式解析入库       │    │ 图片OCR / 音频ASR        │   │ VAD静音裁剪       │   │ 文档级摘要      │   │ Excel/PPT 新格式    │
-│ 混合检索+RRF+Rerank │──▶│ Query改写 / 动态路由     │──▶│ 开场白规则裁剪     │──▶│ ES摘要加权检索   │──▶│ 内嵌图片/表格抽取   │
-│ 兜底/溯源/日志      │    │ 业务加权 / 行级权限      │   │ 解析失败降级       │   │ 遗留修复(D7/D8) │   │ AMR/WMA 音频扩展    │
-│ 缓存/限流/权限      │    │ 多轮对话               │   │ Embed/ES降级      │   │               │   │ Gradio 前端入口     │
-│ 降级矩阵（5重）     │    │ 敏感词DB表+热刷新        │   │ 摘要元数据        │   │               │   │ 在线大模型(开关)    │
-│ 敏感词只读(文件)    │    │ 双闸门0.6接入/同doc去重  │   │                  │   │               │   │                    │
+│ Milvus稠密检索（M1） │──▶│ Query改写 / 动态路由     │──▶│ 开场白规则裁剪     │──▶│ ES摘要加权检索   │──▶│ 内嵌图片/表格抽取   │
+│ 混合检索+RRF+Rerank  │    │ 业务加权 / 行级权限      │   │ 解析失败降级       │   │ 遗留修复(D7/D8) │   │ AMR/WMA 音频扩展    │
+│ （非一期强制/二期）  │    │ 多轮对话               │   │ Embed/ES降级      │   │               │   │ Gradio 前端入口     │
+│ 兜底/溯源/日志      │    │ 敏感词DB表+热刷新        │   │ 摘要元数据        │   │               │   │ 在线大模型(开关)    │
+│ 缓存/限流/权限      │    │ 双闸门0.6接入/同doc去重  │   │                  │   │               │   │                    │
+│ 降级矩阵（5重）     │    │                          │   │                  │   │               │   │                    │
+│ 敏感词只读(文件)    │    │                          │   │                  │   │               │   │                    │
 └───────────────────┘    └────────────────────────┘   └──────────────────┘   └──────────────┘   └────────────────────┘
 ```
 
@@ -461,10 +476,10 @@ V1（已实现基础）             V2（多模态+智能检索）       V3（�
 
 #### V1（本期）— 最小闭环
 
-- **核心目标**：RAG 检索链路可落地、可验收（已达成：65 测试 + smoke 全 PASS）
-- **能力**：见 §1.2（13 项）；**必做**：文档入库/删除/reindex、混合检索、Rerank、兜底、溯源、日志、分类隔离、缓存、限流、权限、敏感词只读、降级矩阵；**不做**：见 §1.3
-- **技术取舍**：固定 RRF；单轮无会话；PG 日志表替代 LangSmith；ES 落地 BM25（替代内存 pickle 索引）；敏感词文件化；双闸门只实现 rerank 0.35 闸门
-- **风险与已控**：Milvus gRPC 代理坑（docker-compose 清代理变量）；langchain 依赖冲突（延后）；Embedding/Rerank 依赖第三方（超时+重试+熔断）
+- **核心目标**：RAG 检索链路可落地、可验收。**M1 验收只要求 Milvus 稠密检索**（对齐 step1/04）。
+- **能力**：见 §1.2（13 项）；**必做（M1 部署）**：文档入库/删除/reindex（Milvus）、稠密检索、兜底、溯源、日志、分类隔离、缓存、限流、权限、敏感词只读、Embedding 失败置 failed+A3003。**ES BM25 / RRF / Rerank 非一期强制**（代码可含开关，覆盖矩阵一期默认关；M1 不强制部署 ES/rerank-service）。**不做**：见 §1.3
+- **技术取舍**：一期仅 Milvus；固定 RRF / ES BM25 / rerank 0.35 闸门为二期预案；单轮无会话；PG 日志表替代 LangSmith；敏感词文件化
+- **风险与已控**：Milvus gRPC 代理坑（docker-compose 清代理变量）；langchain 依赖冲突（延后）；Embedding 依赖第三方（超时+重试+熔断；失败 failed+A3003）
 
 #### V2 — 多模态 + 智能检索 + 规范整改
 
@@ -477,9 +492,9 @@ V1（已实现基础）             V2（多模态+智能检索）       V3（�
   5. 业务加权（kb_documents 增元数据列 customer_id/agent_id/call_date → 新通话×1.5、高危×1.3）
   6. 行级权限（角色/部门过滤 KB 分类，tenant_id 预留）
   7. 多轮对话（Redis session + 追问澄清）
-  8. **敏感词整改**：文件 → sensitive_words 表 + `rag:sensitive_words:version` + `kb.sensitive_updated` Pub-Sub（qc 60s 热刷新）
+  8. **敏感词整改**：文件 → sensitive_words 表 + `rag:sensitive_words:version` + `kb.sensitive_updated` Pub-Sub（qc 60s 热刷新；stale 时钟见 step6/02）
   9. **检索整改**：双闸门 0.6 接入检索流程；同 doc_id 只保留最高分去重
-  10. **存储整改**：Milvus 增 version/source 字段（一次性重建索引）；kb_search_logs BOOLEAN→VARCHAR；ES 索引名统一；Redis key 冒号化 + 收录 step4/03
+  10. **存储整改**：Milvus 增 version/source 字段（一次性重建索引）；ES 索引名统一；Redis key 冒号化 + 收录 step4/03。kb_search_logs 类型已收口 step4/01 CHAR(1)，不再 BOOLEAN→VARCHAR
 - **技术选型取舍**：OCR/ASR 独立 sidecar 服务（依赖重，不污染主镜像）；Query 改写复用 DashScope（不新增供应商）；意图分类先规则后模型
 - **风险点**：PaddleOCR 体积大/CPU 慢 → 独立服务 + 异步入库 + 队列削峰；LLM 改写不确定性 → 置信度降级；索引重建窗口 → 发布窗口内全量 reindex（接受短时不可用）；多轮无状态 → Redis session + 超时清理
 - **不做**（推 V3）：LangSmith、评估模块、版本灰度
@@ -536,8 +551,8 @@ V1（已实现基础）             V2（多模态+智能检索）       V3（�
 
 | 维度            | 策略                                                                                                                                                                                                                                                                          |
 | :-------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **数据库**      | 只加列/加表，不改既有列语义；status 扩展走 Alembic 增量迁移；kb_search_logs BOOLEAN→VARCHAR 提供默认值，不强制回填；kb_document_versions 新增表                                                                                                                               |
-| **接口**        | 对外契约（路径/响应包/错误码）向后兼容；新能力新增端点或可选字段（缺省=V1 行为）；分页字段 page/size→page_size 兼容期双字段支持；top_k 上界定稿为 20（不随版本放宽）；category 四值边界永不收紧                                                                               |
+| **数据库**      | 只加列/加表，不改既有列语义；status 扩展走 Alembic 增量迁移；kb_search_logs 布尔列已是 CHAR(1) `'0'|'1'`（step4/01）；kb_document_versions 新增表                                                                                                                               |
+| **接口**        | 对外契约（路径/响应包/错误码）向后兼容；新能力新增端点或可选字段（缺省=V1 行为）；分页**仅** `page` + `page_size`，**禁止 `size` 别名**（立即废弃，无兼容期）；top_k 上界定稿为 20（不随版本放宽）；category 四值边界永不收紧                                                                               |
 | **索引**        | Milvus/ES 只增字段不删字段；version/source 增列在发布窗口一次性重建，且校验 kb_documents.status 与索引一致                                                                                                                                                                    |
 | **缓存**        | 缓存 key 引入版本段（`rag:cache:query:v2:{md5}`），旧 key 自然过期不迁移                                                                                                                                                                                                      |
 | **检索行为**    | Query 改写/动态路由/业务加权/双闸门 0.6 均以开关引入（KB_QUERY_REWRITE_ENABLED 等），关闭时行为与 V1 完全一致，灰度期可一键回退                                                                                                                                               |
@@ -574,7 +589,7 @@ V1（已实现基础）             V2（多模态+智能检索）       V3（�
 | V1-T15 | 降级/reindex/PDF-DOCX 测试                                               | P1     | T9       | test_search_degradation/test_reindex/test_pdf_docx_parser | ✅   |
 | V1-T16 | openspec 契约同步                                                        | P1     | T11~15   | openspec/changes/rag-service-v1/specs/\*                  | ✅   |
 | V1-T17 | 整改：双闸门 0.6 接入检索流程（对齐 step1/01）                           | P1     | T6       | search_service 增融合分<0.6 无匹配判定 + 测试             | ✅   |
-| V1-T18 | 整改：分页字段 page/size→page_size 双支持（对齐 step5/02）               | P2     | T7       | models/document.py 兼容字段 + 测试                        | ✅   |
+| V1-T18 | 整改：分页仅 page + page_size，禁止 size 别名（对齐 step5/02；立即废弃兼容回退） | P2     | T7       | models/document.py 去掉 size 别名 + 测试                  | ✅   |
 | V1-T19 | 整改：缓存切面跳过兜底/降级响应（is_fallback 或 degraded=true 不写缓存） | P1     | T11      | query_cache.py is_cacheable 判定 + 测试                   | ✅   |
 | V1-T20 | 整改：缓存命中落 kb_search_logs（cache_hit='1'，保障命中率监控不失真）   | P2     | T19      | 迁移 0003 + log_service/api/search 改造 + 测试            | ✅   |
 
@@ -594,7 +609,7 @@ V1（已实现基础）             V2（多模态+智能检索）       V3（�
 | V2-T8  | 多轮对话（Redis session + 追问）                                                                                | P2     | V1-T11    | session_service.py            |
 | V2-T9  | 敏感词整改：DB 表 + 版本号 + `kb.sensitive_updated` Pub-Sub                                                     | P0     | V1-T12    | 迁移 + publish + 订阅对齐测试 |
 | V2-T10 | 检索整改：同 doc_id 最高分去重（对齐 step4/02）                                                                 | P1     | V1-T6     | search_service 收敛 + 测试    |
-| V2-T11 | 存储整改：Milvus 增 version/source（重建索引）、ES 索引名统一、kb_search_logs BOOLEAN→VARCHAR、Redis key 冒号化 | P1     | V2-T9/T10 | 迁移 0004 + 重建脚本          |
+| V2-T11 | 存储整改：Milvus 增 version/source（重建索引）、ES 索引名统一、Redis key 冒号化（kb_search_logs 类型已收口 step4/01 CHAR(1)） | P1     | V2-T9/T10 | 迁移 0004 + 重建脚本          |
 
 **V2 验收标准**：OCR 图片可检索命中；Query 改写开关关闭时行为与 V1 一致（可回退）；敏感词热刷新 60s 内 qc 侧生效；整改项全量回归 65+ 用例通过。
 
@@ -631,8 +646,8 @@ V1（已实现基础）             V2（多模态+智能检索）       V3（�
 
 - rag-service-v1 变更：47/47 任务完成，openspec validate 通过
 - 全量测试：**77 passed**（含 V1-T17~T20 新增 12 用例）；冒烟：smoke_rag.sh 全链路 PASS
-- 实测：限流 61 次→429+B0006；权限 401/403/放行三态；缓存 2.06s→0.003s；删除后缓存失效正确；**双闸门 0.6 已接入（闸门 1 稠密相似度<0.6 判定无匹配）**；**分页 page_size 双支持实测通过**；**缓存命中落日志实测 cache_hit='1'（1ms）vs 真实检索 cache_hit='0'（2817ms）**；**兜底/降级响应不写缓存**
-- **V1 整改待办已清零**；剩余规范对齐项均为 V2（敏感词 DB 表化、Milvus/ES schema、kb_search_logs BOOLEAN→VARCHAR、Redis key 收录）
+- 实测：限流 61 次→429+B0006；权限 401/403/放行三态；缓存 2.06s→0.003s；删除后缓存失效正确；**双闸门 0.6 已接入（闸门 1 稠密相似度<0.6 判定无匹配）**；**分页仅 page_size（禁止 size 别名）**；**缓存命中落日志实测 cache_hit='1'（1ms）vs 真实检索 cache_hit='0'（2817ms）**；**兜底/降级响应不写缓存**
+- **V1 整改待办已清零**；剩余规范对齐项均为 V2（敏感词 DB 表化、Milvus/ES schema、Redis key 收录）。kb_search_logs 类型与 kb_documents.status **已同步 step4/01**
 - 非 V1 阻断：JWT_SECRET 加载路径统一（服务启动从项目根读 .env）
 
 ---
@@ -649,11 +664,11 @@ V1（已实现基础）             V2（多模态+智能检索）       V3（�
 | A4  | 检索去重                       | 同 doc_id 多分块只保留最高分（step4/02 §四.2）                                                            | 仅按 chunk_id 去重                                                                                               | **V2-T10**                                                   |
 | A5  | Milvus schema                  | 6 字段含 version(INT64)/source(VARCHAR255)（step4/02 §二）                                                | 以 chunk_id_str/doc_id_str 冗余替代，无 version/source                                                           | **V2-T11**                                                   |
 | A6  | ES 索引名                      | kb_chunks_bm25（step4/02 §七）                                                                            | 实现为 kb_bm25                                                                                                   | **V2-T11**                                                   |
-| A7  | 表类型规范                     | 枚举/布尔一律 VARCHAR+CHECK，禁止 BOOLEAN（step4/01 §1.2）                                                | kb_search_logs.degraded/is_fallback 用 BOOLEAN                                                                   | **V2-T11**                                                   |
-| A8  | 分页字段                       | page/page_size（默认 20 最大 100）（step5/02）                                                            | 列表接口实现字段为 size                                                                                          | **V1-T18 ✅**（page_size 优先、size 兼容回退，实测通过）     |
+| A7  | 表类型规范                     | 枚举/布尔一律 VARCHAR+CHECK，禁止 BOOLEAN（step4/01 §1.2）                                                | kb_search_logs.degraded/is_fallback/cache_hit 为 CHAR(1) `'0'|'1'`（step4/01 已收录）                         | **已同步 step4/01**                                          |
+| A12 | kb_documents.status            | CHECK ('processing','active','archived','failed')（step4/01）                                          | 四值状态机                                                                                                       | **已同步 step4/01**                                          |
+| A8  | 分页字段                       | 仅 page/page_size（默认 20 最大 100）；禁止 size 别名（step5/02）                                          | 列表接口曾用 size                                                                                                | **审阅 36**：立即废弃 size，仅 page_size 为现行契约 |
 | A9  | Redis key 收录                 | step4/03 key 清单仅 3 项                                                                                  | V1 新增 `rag:cache:query:*`/`rag:cache:keys:*`/`rag:ratelimit:*`/`rag:embed:degraded`/`rag:rerank:degraded` 5 类 | 待 step4/03 收录                                             |
 | A10 | Redis key 命名（规范自身冲突） | step4/03 要求冒号分隔 `<prefix>:<entity>:<id>`                                                            | 熔断标识用下划线（同 step6/01 `{service}:llm_degraded` 风格）                                                    | 规范层统一，V2 随 T11 调整                                   |
-| A11 | Embedding 失败处理             | "失败→跳过向量化+告警"降级入库（step6/01 §6.1）                                                           | 失败置 status=failed + A3003（防无向量脏数据）                                                                   | §6.1 已标注；V2 可选支持降级入库                             |
-| A12 | kb_documents.status            | CHECK ('active','archived')（step4/01）                                                                   | 扩展 ('processing','active','archived','failed')                                                                 | 合理演进，待 step4/01 同步收录                               |
+| A11 | Embedding 失败处理             | 失败置 `kb_documents.status=failed` + A3003；检索不得命中无向量文档（step6/01 §6.1，已与本文对齐） | 失败置 status=failed + A3003（防无向量脏数据）                                                                   | **已与 step6 对齐**；禁止「跳过向量化仍入库/仍可检索」 |
 | A13 | 数据中台对接                   | 检索日志入 dw（etl_task_logs/llm_call_logs）（step4/02 §四.4）                                            | 仅本地 kb_search_logs 落库，未接订阅/ETL 管道                                                                    | V2 数据管道接通（被动订阅）                                  |
 | A14 | Redis 规范自身 DB 编号         | step4/03 §3.1/3.2 小标题 DB 编号差一位（DB1/DB2 互换）                                                    | —（不影响实现，DB2 已按正文生效）                                                                                | 规范层修正，与本服务无代码改动                               |

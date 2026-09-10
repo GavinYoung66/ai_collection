@@ -1,10 +1,10 @@
 # DD-05 AI投诉异议智能研判系统 需求文档
 
 > 文档类型：需求PRD（规范层）
-> 版本：v1.11
+> 版本：v1.17
 > 状态：定稿
-> 更新日期：2026-09-09
-> 约束声明：遵循 step1/01 全局统一口径与 openspec/specs/00~~07 宪法层强制规范；服务名 complaint-service、端口 8006、错误码段 A5001~~A5013；所有 AI 输出为草稿，最终判责与对外答复必须经人工运营终审确认（Human-in-loop 不可跳过）。
+> 更新日期：2026-09-10
+> 约束声明：遵循 step1/01 全局统一口径与 openspec/specs/00~~07 宪法层强制规范；服务名 complaint-service、端口 8006、错误码段 A5001～A5014（A5013 废弃勿用，模式切换用 A5014，回写用 A5005）；关系库 DDL 以 step4/01 为单一事实源（本文件不私藏另一套 DDL）；所有 AI 输出为草稿，最终判责与对外答复必须经人工运营终审确认（Human-in-loop 不可跳过）。**M3** = 本文 V1 的 P0/P1 主链路（含研判、MCP 契约、人工复核 API；灰度双模/PromptOps 属 M3 P1）。覆盖矩阵 **M3.5 仅** = `DD-05-COMPLAINT-JUDGMENT-V2.md`，不是本文灰度。判责「一致率」三套门槛见 §7.6：告警线 80% / 灰度准入 85% / 互一致 80%，禁止混称。
 
 ## 修订记录
 
@@ -22,6 +22,12 @@
 | v1.9 | 2026-09-09 | QC 离线质检结果回流闭环（对齐 DD-02 §9.3）：新增 §16.1——订阅 qc-service `qc.complaint.suspected`/`qc.check.completed`（可选 qc.review.done），异步回流 QC 离线结果并驱动补证；§7.2/§6.2 取证区分「质检未完成」与「已质检无违规」，质检待补标记避免"空列表=无违规"误判；§4.4 澄清 call-qc MCP 中 query_call_asr/query_call_sessions 数据面归属 call-service（qc-service 仅提供违规查询数据面） | 规范复审 |
 | v1.10 | 2026-09-09 | 对齐 DD-02 V1.8：§16.1 `qc.complaint.suspected` 触发口径由 redline_tag∈{threat,stop_call,fake_identity} 改为 **rule_id∈{R11,R12,R13}**（须 agent+high）。payload 字段不变。R05 同 tag=threat 不触发 | Ellis Guo |
 | v1.11 | 2026-09-09 | 对齐 DD-02 V1.9 / step4/03：§16.1 payload 与 qc 同构——`qc.check.completed` 补 `call_id`（可 JSON null）；`qc.complaint.suspected` 追加 `qc_record_id`（SETNX 幂等 session_id+qc_record_id）。发布条件仍为 R11/R12/R13 白名单 | Ellis Guo |
+| v1.12 | 2026-09-10 | 实体/数据模型收口：DDL 收口 step4/01；judgment_session_id；complaint_id 事件字段；case_ids 主案件；conflict_highlight CHAR(1)；壳表 status↔task_status 映射；废弃 ticket_id；历史工单 history_ticket_id | Ellis Guo |
+| v1.13 | 2026-09-10 | 收口残留：LLM tracing/回调幂等/日志字段用 judgment_session_id；conflict_highlight 赋值 `'1'`；列表筛选区分壳表 status 与 task_status | Ellis Guo |
+| v1.14 | 2026-09-10 | 审阅 19/21：灰度双模/PromptOps 改标 **M3（P1）**，不再叫 M3.5；M3.5 仅指向 V2。M3 验收 MCP Mock 可过；真 call-service 非 M3 阻塞项 | Ellis Guo |
+| v1.15 | 2026-09-10 | 审阅 26/28：A5013 废弃，模式切换改 A5014，文首/REQ-CJ-045 改为 A5001～A5014；§8.2/§10.1 熔断改指向 §8.5 分模型 P95 | Ellis Guo |
+| v1.16 | 2026-09-10 | 审阅 37/38：§7.6 钉死三套一致率门槛（告警线 80% / 准入 85% / 互一致 80%）；A5012 仅告警线；LLM 降级率告警与 step6/02 同为 >15% | Ellis Guo |
+| v1.17 | 2026-09-10 | 审阅 48/51/52/54：REQ-CJ-055/056 标 M5 仅规划；调度「尽可能」收口；合规判定必须 `search_regulations`；边界不验收短清单；`overall_compliance` 与 `qc_result` 禁止混用 | Ellis Guo |
 
 ***
 
@@ -41,6 +47,11 @@
 | RuleBasedEngine | 规则兜底引擎，当所有LLM模型不可用时，基于硬编码规则生成基础研判结果 |
 | trace_id | 全链路追踪ID，贯穿API入口→Agent推理→MCP调用→日志存储，用于审计回溯 |
 | Session | 一次投诉研判的完整生命周期，从工单接入到最终闭环 |
+| judgment_session_id | 投诉研判会话键（complaint_sessions / State / API）。≠ 通话 session_id |
+| session_id（通话） | call_records.session_id，质检/外呼/通话 MCP 业务键 |
+| session_ids[] | 投诉会话上关联的通话 session_id 列表 |
+| complaint_id | 投诉工单主键 complaints.id；事件/API 一律用此名，禁止 ticket_id |
+| case_id（主案件） | complaints.case_id = case_ids[0]；多案件以 case_ids[] 为准 |
 
 ## 零、架构决策记录（ADR）
 
@@ -104,16 +115,17 @@ v1.0 需求设计阶段，架构从"单Agent+多工具"演进为"弱中心化多
 
 | 里程碑  | 阶段     | 交付物                                        | 目标日期 |
 | ---- | ------ | ------------------------------------------ | ------ |
-| M3   | 投诉研判骨架 | 服务骨架 + LangGraph Agent编排 + MCP工具层 + 基础研判流程 | 2026-09-30 |
-| M3.5 | 灰度双模   | 原有单Agent模式 + 新多Agent+MCP模式双开关 + 一致性对比指标    | 2026-10-15 |
+| M3   | 投诉研判 V1（P0/P1） | 服务骨架 + LangGraph Agent编排 + MCP工具层 + 基础研判流程 + 人工复核 API；**灰度双模 / PromptOps 属 M3（P1）**，不是 M3.5 | 2026-09-30 |
 | M5   | 全量上线   | 10维度准入清单全通过，全量切换多Agent模式                   | 2026-11-01 |
+
+> **M3.5 不在本文定义。** 覆盖矩阵 M3.5 = 仅 `DD-05-COMPLAINT-JUDGMENT-V2.md`（假数据增强、真 LLM、人审前端；继续 Mock MCP）。V2 不是灰度双模。
 
 ### 1.3 需求清单与优先级矩阵
 
-> 全量功能点分配唯一需求ID（REQ-CJ-XXX），按P0-P3四级标注优先级，对应里程碑M3(MVP)/M3.5(增量)/M5(全量)。优先级定义：
+> 全量功能点分配唯一需求ID（REQ-CJ-XXX），按P0-P3四级标注优先级，对应里程碑 **M3（V1 主链路，含 P0/P1）** / **M5（全量）**。覆盖矩阵 M3.5 仅见 DD-05-V2，不是本文增量标签。优先级定义：
 > - **P0**：MVP核心阻断，不交付则系统不可运行，M3阶段必须完成
-> - **P1**：M3增量，重要功能但非MVP阻断，M3阶段尽量完成、最晚M3.5补齐
-> - **P2**：M3.5灰度双模配套，支撑灰度切换与PromptOps工程化
+> - **P1**：M3增量，重要功能但非MVP阻断，M3阶段尽量完成（含灰度双模 / PromptOps）
+> - **P2**：M3（P1）灰度双模配套，支撑灰度切换与PromptOps工程化（**仍属 M3，不叫 M3.5**）
 > - **P3**：M5全量上线，压测/备份/灾备演练等运维能力
 
 **P0 — MVP核心（M3阶段必须交付）**
@@ -167,15 +179,15 @@ v1.0 需求设计阶段，架构从"单Agent+多工具"演进为"弱中心化多
 | REQ-CJ-040 | 证据冲突解决规则（优先级排序/低中置信度处理/核心冲突标人工/ASR残缺降级） | 七.3 |
 | REQ-CJ-041 | 复核SLA（3级）+复核权限分级（4角色）+复核界面必显字段（10项） | 七.6 |
 | REQ-CJ-042 | 驳回重判规则（硬上限2次+独立计数+原因结构化枚举） | 七.6 |
-| REQ-CJ-043 | AI-人工一致性统计（实时指标+周月报+一致率<80%告警） | 七.6 |
+| REQ-CJ-043 | AI-人工一致性统计（实时指标+周月报+**AI-人工判责一致率（告警线）**连续两周<80%告警） | 七.6 |
 | REQ-CJ-044 | 可观测运维能力（6项监控指标+告警阈值） | 七.8 |
-| REQ-CJ-045 | 错误码段（A5001-A5013对齐六类异常分类+HTTP码+告警级别） | 十一.3 |
+| REQ-CJ-045 | 错误码段（A5001～A5014 对齐六类异常分类+HTTP码+告警级别；A5013 废弃） | 十一.3 |
 | REQ-CJ-046 | 停止致电状态流转+联动规则（降强度→研判→恢复/永久停止+Pub-Sub通知） | 十五 |
 | REQ-CJ-047 | Pub-Sub事件（4频道：judged/closed/insight/mode_switched） | 十六 |
 | REQ-CJ-048 | 可靠性与可用性（SLA≥99.5%/MTTR≤15min/任务零丢失/数据零丢失） | 二十.4 |
 | REQ-CJ-049 | 多环境差异配置（dev/test/pre/prod四环境+生产禁止开关清单） | 二十二 |
 
-**P2 — M3.5灰度双模配套**
+**P2 — M3（P1）灰度双模 / PromptOps 配套**
 
 | 需求ID | 需求名称 | 来源章节 |
 | ---- | ---- | ---- |
@@ -189,8 +201,8 @@ v1.0 需求设计阶段，架构从"单Agent+多工具"演进为"弱中心化多
 
 | 需求ID | 需求名称 | 来源章节 |
 | ---- | ---- | ---- |
-| REQ-CJ-055 | 压测要求（4场景：持续高并发/峰值涌入/MCP超时降级/LLM熔断降级+准入条件） | 二十.5 |
-| REQ-CJ-056 | 定期备份策略+恢复演练（PG全量增量/Redis RDB/季度恢复演练RTO≤30min） | 二十一.4 |
+| REQ-CJ-055 | 压测要求（4场景：持续高并发/峰值涌入/MCP超时降级/LLM熔断降级+准入条件）。**P3 / 里程碑 M5 仅规划，M3/M3.5 不验收** | 二十.5 |
+| REQ-CJ-056 | 定期备份策略+恢复演练（PG全量增量/Redis RDB/季度恢复演练RTO≤30min）。**P3 / 里程碑 M5 仅规划，M3/M3.5 不验收** | 二十一.4 |
 
 > **优先级统计**：P0共33项（59%）、P1共16项（29%）、P2共5项（9%）、P3共2项（3%），合计56项需求。P0占比控制在60%以内，符合"P0项不超过总量20%"的放宽标准（本系统为金融强监管场景，安全/合规/审计类需求须全部P0）。
 
@@ -216,7 +228,7 @@ v1.0 需求设计阶段，架构从"单Agent+多工具"演进为"弱中心化多
 | 14 | 冒烟脚本 | REQ-CJ-028, REQ-CJ-030 |
 | 15 | 敏感数据脱敏 | REQ-CJ-005, REQ-CJ-027 |
 | 16 | 性能基线 | REQ-CJ-031, REQ-CJ-053 |
-| 17 | AI-人工一致率 | REQ-CJ-043, REQ-CJ-052 |
+| 17 | AI-人工判责一致率（灰度全量准入）+ 单/多 Agent 互一致率 | REQ-CJ-043, REQ-CJ-052 |
 | 18 | 任务零丢失 | REQ-CJ-014, REQ-CJ-037, REQ-CJ-048, REQ-CJ-054 |
 
 > **覆盖检查**：P0需求33项中，REQ-CJ-002（不修改原有系统）和REQ-CJ-029（禁止项清单）属于全局约束，通过代码走查和架构评审验收，不单独映射验收项。其余31项P0需求均有对应验收标准覆盖。验收盲区：无。
@@ -226,7 +238,7 @@ v1.0 需求设计阶段，架构从"单Agent+多工具"演进为"弱中心化多
 | 角色 | 使用场景 | 关注点 | 核心诉求 |
 | ---- | ---- | ---- | ---- |
 | 复核操作员（一线） | 日均处理10-30件投诉研判复核 | 判责结论准确性、证据链完整性、界面操作效率 | 快速理解AI草稿、高效确认/修改/驳回 |
-| 复核主管（二线） | 处理驳回重判、上级复核、SLA超时升级 | 处理时效、驳回率、AI-人工一致率 | 级别管辖清晰、批量审核、异常监控 |
+| 复核主管（二线） | 处理驳回重判、上级复核、SLA超时升级 | 处理时效、驳回率、AI-人工判责一致率（告警线） | 级别管辖清晰、批量审核、异常监控 |
 | 合规审计人员 | 定期审计研判结果、合规红线执行情况 | 审计日志完整性、法规引用准确性、脱敏合规 | 全链路可追溯、审计日志不可篡改 |
 | 技术运维 | 日常监控、故障处置、灰度切换 | MCP故障率、LLM降级率、处理时延、并发承载 | 可观测指标完备、降级自动、回滚快速 |
 | 业务管理层 | 周/月报表、趋势分析、资源决策 | 月度处理量、二次投诉率、人力成本节约 | 量化ROI、趋势可视化 |
@@ -244,6 +256,7 @@ v1.0 需求设计阶段，架构从"单Agent+多工具"演进为"弱中心化多
 | 催收策略调优 | 由数据中台+传统业务系统处理，本系统仅输出整改建议供参考 |
 | 通话录音存储管理 | 由呼叫中心+数据中台管理，本系统仅通过MCP获取ASR文本和片段引用 |
 | 操作员绩效考评 | 由传统业务系统HR模块处理，本系统仅提供AI-人工一致性统计数据 |
+| 真 call-service 数据面（M3） | ASR/会话主数据归属 **call-service**（无独立 DD、M2）。**M3 验收：MCP Mock 可过**，不把真 call-service 列为 M3 上线阻塞项。Mock 退出：call-service 有 DD 且覆盖矩阵允许 M2 开工后，用真数据面替换 Mock；此前 Mock 为正式验收路径（与 DD-05-V2「继续 Mock MCP」同构） |
 
 ### 1.7 核心用户故事
 
@@ -254,7 +267,7 @@ v1.0 需求设计阶段，架构从"单Agent+多工具"演进为"弱中心化多
 | US-03 | 复核主管 | 操作员驳回后，接收重判任务，查看原判与新判对比 | 驳回原因结构化展示；新旧判责diff对比 |
 | US-04 | 复核操作员 | MCP故障导致部分证据缺失时，界面清晰提示哪些证据获取失败 | 缺失证据项灰色标记+失败原因+"重试"按钮 |
 | US-05 | 合规审计 | 按时间段检索研判记录，导出审计日志 | 支持时间/操作员/工单号检索；导出含完整Agent推理链 |
-| US-06 | 技术运维 | 灰度切换时，实时查看新模式vs旧模式一致性指标 | 灰度面板显示一致率/偏差率/处理量对比 |
+| US-06 | 技术运维 | 灰度切换时，实时查看新模式vs旧模式一致性指标 | 灰度面板显示 **AI-人工判责一致率（灰度全量准入）** / **单/多 Agent 互一致率** / 偏差率 / 处理量对比 |
 | US-07 | 复核操作员 | 批量处理10件同类型投诉，快速确认 | 批量选择→列表对比→一键确认/逐件确认 |
 
 ### 1.8 ROI量化与业务指标基线
@@ -265,7 +278,7 @@ v1.0 需求设计阶段，架构从"单Agent+多工具"演进为"弱中心化多
 | 月均处理量 | ~200件/5人团队 | ~600件/3人团队 | 系统统计月度完成session数 |
 | 二次投诉率 | ~12% | ≤5% | 统计3个月内同user_id重复投诉占比 |
 | 单件人力成本 | ~150元/件（含工时） | ~40元/件（AI算力+人工复核） | 人力成本÷处理量 |
-| 判责一致率 | 无标准基准（主观判断） | ≥85% | AI判责与人工终审判责一致占比 |
+| AI-人工判责一致率（灰度全量准入） | 无标准基准（主观判断） | ≥85% | 多 Agent 模式 vs 人工终审一致占比（**不是**告警线 80%，也**不是**互一致） |
 | 月度LLM算力成本 | 0 | 预估≤3,000元/月（详见8.6节） | LLM调用次数×单价 |
 
 ***
@@ -285,7 +298,7 @@ v1.0 需求设计阶段，架构从"单Agent+多工具"演进为"弱中心化多
 ### 3.1 核心原则
 
 1. 采用**弱中心化调度Agent作为流程协调中心**，不使用强Supervisor，不使用完全去中心化Agent。
-2. 调度Agent只负责：任务接收、状态管理、子任务分发、循环次数控制、流程分支路由、异常降级流转；**调度Agent尽量使用代码if-else条件判断，尽可能减少LLM业务推理；不做事实还原、不做合规判责、不修改子Agent业务输出结论**。
+2. 调度Agent只负责：任务接收、状态管理、子任务分发、循环次数控制、流程分支路由、异常降级流转；**调度Agent只用代码 if-else/路由，不做判责**；超 `total_tokens` 阈值转人工（§8.3）。验收不测「尽可能减少 LLM」。
 3. 全部业务推理能力下沉到各个专项Agent。
 4. 所有Agent之间不直接点对点消息通信；所有输入输出读写LangGraph全局State会话上下文；由Graph条件边+调度Agent驱动整体流转。
 5. 所有Agent不直接调用底层业务接口；每个Agent内置MCP Client，统一通过MCP Client调用各个MCP Server获取外部能力。
@@ -346,14 +359,14 @@ graph TB
 
 | Agent角色          | 核心职责                                                                                                                                                                               | 是否调用MCP                         | 禁止行为                                               | 输出产物                                             |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- | -------------------------------------------------- | ------------------------------------------------ |
-| 调度Agent（总协调，弱中心） | 1.接收外部投诉工单，初始化全局Session State；2.拆解子任务，驱动专项Agent执行；3.维护取证循环计数器，控制反思循环最大次数（默认上限3次，可配置）；4.根据反思报告做流程分支：重新取证 / 进入研判 / 证据不足转人工；5.捕获子Agent、MCP调用异常，执行降级；6.研判完成后触发样本回流；7.全程优先代码条件分支，少LLM推理 | 是（仅读取工单基础信息）                    | 做事实还原、合规判责；修改子Agent业务输出结论；充当Supervisor评价改写子Agent结果 | 全局session上下文、流程状态标记、流转指令、异常标记                    |
+| 调度Agent（总协调，弱中心） | 1.接收外部投诉工单，初始化全局Session State；2.拆解子任务，驱动专项Agent执行；3.维护取证循环计数器，控制反思循环最大次数（默认上限3次，可配置）；4.根据反思报告做流程分支：重新取证 / 进入研判 / 证据不足转人工；5.捕获子Agent、MCP调用异常，执行降级；6.研判完成后触发样本回流；7.全程代码 if-else/路由，不做判责 | 是（仅读取工单基础信息）                    | 做事实还原、合规判责；修改子Agent业务输出结论；充当Supervisor评价改写子Agent结果 | 全局session上下文、流程状态标记、流转指令、异常标记                    |
 | 证据采集-案件Agent     | 拉取案件侧结构化数据：逾期信息、还款记录、历史工单、历史投诉记录；清洗过滤无效脏数据                                                                                                                                         | 是 MCP业务工单Server                 | 做任何业务判责                                            | 案件结构化事实材料                                        |
 | 证据采集-通话质检Agent   | 获取对应案件全部通话ASR文本、AI质检违规片段、风险告警记录；标记ASR乱码、录音残缺等证据置信度                                                                                                                                 | 是 MCP通话&质检Server                | 做合规定性（仅做证据采集预处理）                                   | 通话证据集合，附带每条证据置信度标记                               |
 | 反思校验Agent（循环核心）  | 对采集全部证据做完整性、一致性校验：1.检查关键通话是否缺失；2.检测证据互相矛盾；3.校验证据是否能够支撑投诉用户描述；输出反思报告，明确需要补充哪些证据；不直接发起工具调用，输出报告交给调度Agent决策                                                                           | 否 不直接调用MCP                      | 自行发起取证循环（仅输出校验报告，把流转权交还调度Agent）                    | 证据校验反思报告：evidence\_sufficient(bool)、缺失证据清单、矛盾点描述 |
 | 事实还原Agent        | 纯客观还原事件完整时序线，不带主观定性，只陈列客观事实                                                                                                                                                        | 是 读取state内证据，不直接调用MCP           | 做违规判定、输出责任结论                                       | 客观事件时序还原文本                                       |
-| 合规判定Agent        | 调用RAG法规，对照催收监管规则，逐条核对行为是否合规                                                                                                                                                        | 是 MCP RAG知识库Server              | 输出最终定责（仅输出合规分析意见）                                  | 合规分析意见、引用法规来源ID                                  |
+| 合规判定Agent        | 对照催收监管规则，逐条核对行为是否合规                                                                                                                                                        | 是 MCP RAG知识库Server；**必须**调用 `search_regulations`（红线 5，不是可选）              | 输出最终定责（仅输出合规分析意见）                                  | 合规分析意见、引用法规来源ID                                  |
 | 用户诉求Agent        | 解析用户真实诉求、情绪等级、评估二次投诉风险                                                                                                                                                             | 否 读取state内证据                    | 做责任判定                                              | 用户诉求分析、二次投诉风险等级                                  |
-| 综合判责Agent        | 融合事实还原、合规判定、用户诉求三份独立输出；识别多Agent意见冲突点并标记冲突（提示人工重点复核）；输出初步判责草稿：坐席违规 / 用户误解 / 合规但体验差                                                                                                  | 否 读取state多份研判结果，必要时可调用MCP复核法规片段 | 拥有最终定责权限（仅输出草稿）                                    | 初步判责结论、冲突标记说明                                    |
+| 综合判责Agent        | 融合事实还原、合规判定、用户诉求三份独立输出；识别多Agent意见冲突点并标记冲突（提示人工重点复核）；输出初步判责草稿：坐席违规 / 用户误解 / 合规但体验差                                                                                                  | 否 读取state多份研判结果；法规检索由合规判定 Agent **必须** `search_regulations`，本 Agent 不把 MCP 法规复核写成可选 | 拥有最终定责权限（仅输出草稿）                                    | 初步判责结论、冲突标记说明                                    |
 | 产出物生成Agent       | 根据判责草稿生成全套输出物：结构化证据链、判责报告、对外答辩初稿、内部整改建议；全部引用带上知识库来源ID                                                                                                                              | 是 MCP RAG知识库Server              | 编造事实、编造法规条款                                        | 完整投诉研判数据包（证据链、报告、答辩、整改建议）                        |
 
 ***
@@ -395,31 +408,33 @@ graph TB
 
 | Tool名称 | 入参 | 出参 | 异常场景 |
 | ------- | ---- | ---- | ------- |
-| `query_case_info` | `case_id: str, session_id: str` | `{case_id, overdue_amount, overdue_days, repayment_records, customer_name, product_type, create_time}` | 案件不存在 → 业务类错误 |
-| `query_history_tickets` | `case_id: str, session_id: str, limit: int = 20` | `list[{ticket_id, type, content, create_time, status}]` | 无历史工单 → 返回空数组 |
-| `query_history_complaints` | `case_id: str, session_id: str, limit: int = 10` | `list[{complaint_id, content, verdict, create_time}]` | 无历史投诉 → 返回空数组 |
-| `query_user_history_complaints` | `user_id: str, days: int = 90, session_id: str` | `list[{complaint_id, case_id, content, verdict, create_time}]` | 无历史投诉 → 返回空数组 |
-| `get_complaint_ticket` | `complaint_id: str, session_id: str` | `{complaint_id, user_id, case_ids, complaint_text, submit_time, source_channel}` | 工单不存在 → 业务类错误 |
+| `query_case_info` | `case_id: str, judgment_session_id: str` | `{case_id, overdue_amount, overdue_days, repayment_records, customer_name, product_type, create_time}` | 案件不存在 → 业务类错误 |
+| `query_history_tickets` | `case_id: str, judgment_session_id: str, limit: int = 20` | `list[{history_ticket_id, type, content, create_time, status}]` | 无历史业务工单 → 返回空数组。`history_ticket_id` 是 CRM 历史工单号，**不是** `complaint_id` |
+| `query_history_complaints` | `case_id: str, judgment_session_id: str, limit: int = 10` | `list[{complaint_id, content, verdict, create_time}]` | 无历史投诉 → 返回空数组 |
+| `query_user_history_complaints` | `user_id: str, days: int = 90, judgment_session_id: str` | `list[{complaint_id, case_id, content, verdict, create_time}]` | 无历史投诉 → 返回空数组 |
+| `get_complaint_ticket` | `complaint_id: str, judgment_session_id: str` | `{complaint_id, user_id, case_ids, complaint_text, submit_time, source_channel}` | 工单不存在 → 业务类错误。`case_ids[0]`=主案件=`complaints.case_id` |
 
 **2. 通话&质检MCP Server（call-qc）**
 
 | Tool名称 | 入参 | 出参 | 异常场景 |
 | ------- | ---- | ---- | ------- |
-| `query_call_asr` | `case_id: str, session_id: str` | `list[{call_session_id, call_start_time, call_duration, asr_text_with_timestamp, agent_role}]` | 无通话记录 → 返回空数组 |
-| `query_qc_violations` | `case_id: str, session_id: str` | `list[{qc_id, violation_type, violation_rule_id, call_session_id, start_ts, end_ts, snippet_text, score}]` | 无违规 → 返回空数组 |
-| `query_call_sessions` | `case_id: str, session_id: str` | `list[{call_session_id, call_time, agent_id, call_duration, call_result}]` | 无通话 → 返回空数组 |
+| `query_call_asr` | `case_id: str, session_id: str, judgment_session_id: str` | `list[{call_session_id, call_start_time, call_duration, asr_text_with_timestamp, agent_role}]` | 无通话记录 → 返回空数组。入参 `session_id`=通话 `call_records.session_id`（来自 State.session_ids） |
+| `query_qc_violations` | `case_id: str, session_id: str, judgment_session_id: str` | `list[{qc_id, violation_type, violation_rule_id, call_session_id, start_ts, end_ts, snippet_text, score}]` | 无违规 → 返回空数组。`session_id`=通话业务键（对齐 DD-02） |
+| `query_call_sessions` | `case_id: str, session_id: str, judgment_session_id: str` | `list[{call_session_id, call_time, agent_id, call_duration, call_result}]` | 无通话 → 返回空数组 |
 
-> **数据面归属说明**：`query_call_asr` / `query_call_sessions` 的 ASR 与通话/会话数据面由 **call-service** 提供（call-qc MCP Server 内部转调），qc-service 仅提供 `query_qc_violations`（及可选 `query_qc_alerts`）的违规查询数据面，勿将 qc-service 视为 ASR/会话主数据源（对齐 DD-02 §9.2）。
+> **数据面归属说明**：`query_call_asr` / `query_call_sessions` 的 ASR 与通话/会话数据面由 **call-service** 提供（call-qc MCP Server 内部转调），qc-service 仅提供 `query_qc_violations`（及可选 `query_qc_alerts`）的违规查询数据面，勿将 qc-service 视为 ASR/会话主数据源（对齐 DD-02 §9.2）。通话类 tool 的 `session_id` 是通话业务键，追踪键另传 `judgment_session_id`。
+>
+> **M3 实现与验收**：complaint → call-qc MCP → **Mock 可过**（与 DD-05-V2「继续 Mock MCP」对齐）。不把真 call-service 列为 M3 上线阻塞项。Mock 退出标准：call-service 有独立 DD 且覆盖矩阵允许 M2 开工后，用真数据面替换 Mock；在此之前 Mock 为正式验收路径，不是「临时、不算验收」。
 
 **3. RAG知识库MCP Server（rag-kb）**
 
 | Tool名称 | 入参 | 出参 | 异常场景 |
 | ------- | ---- | ---- | ------- |
-| `search_regulations` | `query: str, top_k: int = 5, session_id: str` | `list[{doc_id, title, content_snippet, source_type, score, source_url}]` | 无匹配 → 返回空数组 |
-| `search_response_templates` | `verdict: str, complaint_type: str = "general", session_id: str` | `list[{template_id, title, template_text, doc_id, applicable_scenarios}]` | 无匹配 → 返回通用模板 |
-| `search_complaint_handling_guidelines` | `query: str, top_k: int = 3, session_id: str` | `list[{guideline_id, title, content, doc_id, score}]` | 无匹配 → 返回空数组 |
+| `search_regulations` | `query: str, top_k: int = 5, judgment_session_id: str` | `list[{doc_id, title, content_snippet, source_type, score, source_url}]` | 无匹配 → 返回空数组 |
+| `search_response_templates` | `verdict: str, complaint_type: str = "general", judgment_session_id: str` | `list[{template_id, title, template_text, doc_id, applicable_scenarios}]` | 无匹配 → 返回通用模板 |
+| `search_complaint_handling_guidelines` | `query: str, top_k: int = 3, judgment_session_id: str` | `list[{guideline_id, title, content, doc_id, score}]` | 无匹配 → 返回空数组 |
 
-> **RAG质量要求**：top-3准确率≥85%，召回率≥90%，投诉相关法规覆盖率≥95%；检索空结果时降级为规则兜底判责。
+> **RAG质量要求**：top-3准确率≥85%（**不是** AI-人工判责一致率），召回率≥90%，投诉相关法规覆盖率≥95%；检索空结果时降级为规则兜底判责。
 
 **4. 数据中台回写MCP Server（data-platform-writeback）**
 
@@ -429,7 +444,7 @@ graph TB
 | `write_human_review_truth` | `complaint_id: str, human_review: dict` | `{success: bool}` | 写入失败 → 自动重试3次 |
 | `push_rag_candidate` | `case_data: dict, quality_score: float` | `{success: bool, submitted: bool}` | 推送失败 → 告警，不阻塞主流程 |
 
-> **统一约定**：所有MCP tool的`session_id`为必传参数，用于全链路追踪；MCP返回统一格式`{code, message, data}`；错误码由各MCP Server自行维护，complaint-service按错误分级（4.3节）做统一处置。
+> **统一约定**：追踪键一律 `judgment_session_id`（研判会话）。通话/质检查询 tool 另传通话 `session_id`（`call_records.session_id`）。禁止用研判会话键冒充通话 session_id。MCP 返回统一格式 `{code, message, data}`；错误码由各 MCP Server 自行维护，complaint-service 按错误分级（4.3节）做统一处置。
 
 ***
 
@@ -631,7 +646,7 @@ class ComplianceOpinion(BaseModel):
     """合规判定输出"""
     opinions: list[dict] = Field(..., description="合规分析意见列表")
     regulation_refs: list[str] = Field(default_factory=list, description="法规来源ID列表")
-    overall_compliance: str = Field(..., description="overall: compliant / partial_violation / violation")
+    overall_compliance: str = Field(..., description="投诉合规意见专用：compliant / partial_violation / violation。partial_violation 仅本字段；禁止写入质检 qc_result")
 
 
 class UserDemandAnalysis(BaseModel):
@@ -647,7 +662,7 @@ class VerdictDraft(BaseModel):
     confidence: float = Field(..., ge=0.0, le=1.0, description="整体置信度")
     reasoning: str = Field(..., description="判责理由")
     conflicts: list[str] = Field(default_factory=list, description="多Agent意见冲突点标记")
-    conflict_highlight: bool = Field(False, description="是否需人工重点复核")
+    conflict_highlight: str = Field("0", description="CHAR(1) 落库 0/1；禁止 BOOLEAN。应用层 true→'1'")
     per_case_verdicts: dict[str, dict] = Field(default_factory=dict, description="逐案判责，key=case_id，value={verdict, confidence, reasoning}；多案件场景下每案独立判责")
 
 
@@ -711,7 +726,7 @@ def merge_case_evidence(
 class ComplaintSessionState(BaseModel):
     """LangGraph 全局State——投诉研判会话上下文"""
     # 基础标识
-    session_id: str = Field(..., description="投诉研判唯一session ID")
+    judgment_session_id: str = Field(..., description="投诉研判会话键（≠ 通话 call_records.session_id）")
     trace_id: str = Field(..., description="全链路追踪ID")
     complaint_id: str = Field(..., description="投诉工单ID")
     case_ids: list[str] = Field(default_factory=list, description="关联案件ID列表（支持一对多）")
@@ -785,17 +800,17 @@ async def evidence_case_agent_node(state: ComplaintSessionState) -> ComplaintSes
             case_data = await mcp_client.call(
                 server="business-ticket",
                 tool="query_case_info",
-                params={"case_id": case_id, "session_id": state.session_id}
+                params={"case_id": case_id, "judgment_session_id": state.judgment_session_id}
             )
             history_tickets = await mcp_client.call(
                 server="business-ticket",
                 tool="query_history_tickets",
-                params={"case_id": case_id, "session_id": state.session_id}
+                params={"case_id": case_id, "judgment_session_id": state.judgment_session_id}
             )
             history_complaints = await mcp_client.call(
                 server="business-ticket",
                 tool="query_history_complaints",
-                params={"case_id": case_id, "session_id": state.session_id}
+                params={"case_id": case_id, "judgment_session_id": state.judgment_session_id}
             )
             state.case_evidence[case_id] = CaseEvidenceBundle(
                 case_id=case_id,
@@ -808,7 +823,7 @@ async def evidence_case_agent_node(state: ComplaintSessionState) -> ComplaintSes
             hist_complaints = await mcp_client.call(
                 server="business-ticket",
                 tool="query_user_history_complaints",
-                params={"user_id": state.user_id, "days": 90, "session_id": state.session_id}
+                params={"user_id": state.user_id, "days": 90, "judgment_session_id": state.judgment_session_id}
             )
             state.historical_complaint_evidence = hist_complaints
     except MCPTimeoutError:
@@ -831,7 +846,7 @@ async def evidence_call_qc_agent_node(state: ComplaintSessionState) -> Complaint
             call_evidence = await mcp_client.call(
                 server="call-qc",
                 tool="query_call_asr",
-                params={"case_id": case_id, "session_id": state.session_id}
+                params={"case_id": case_id, "session_id": (state.session_ids[0] if state.session_ids else ""), "judgment_session_id": state.judgment_session_id}
             )
             # 质检结果时序空窗约束（DD-05 v1.9 §7.2 / §16.1）：QC 已离线全量，投诉研判可能先于质检跑完。
             # 调用 query_qc_violations 前，须经 MCP Server 内部确认该 session 的质检记录状态
@@ -841,7 +856,7 @@ async def evidence_call_qc_agent_node(state: ComplaintSessionState) -> Complaint
             qc_alerts = await mcp_client.call(
                 server="call-qc",
                 tool="query_qc_violations",
-                params={"case_id": case_id, "session_id": state.session_id}
+                params={"case_id": case_id, "session_id": (state.session_ids[0] if state.session_ids else ""), "judgment_session_id": state.judgment_session_id}
             )
             state.case_evidence[case_id] = CaseEvidenceBundle(
                 case_id=case_id,
@@ -874,7 +889,7 @@ async def reflection_agent_node(state: ComplaintSessionState) -> ComplaintSessio
         prompt=load_prompt("complaint_reflection", evidence=all_evidence, case_ids=state.case_ids),
         schema=ReflectionReport,
         trace_id=state.trace_id,
-        session_id=state.session_id,
+        judgment_session_id=state.judgment_session_id,
     )
     state.reflection_report = report
     state.loop_count += 1
@@ -888,7 +903,7 @@ async def fact_agent_node(state: ComplaintSessionState) -> ComplaintSessionState
         prompt=load_prompt("complaint_fact_timeline", evidence=all_evidence, case_evidence=state.case_evidence),
         schema=FactTimeline,
         trace_id=state.trace_id,
-        session_id=state.session_id,
+        judgment_session_id=state.judgment_session_id,
     )
     state.fact_timeline = result
     return state
@@ -900,7 +915,7 @@ async def compliance_agent_node(state: ComplaintSessionState) -> ComplaintSessio
         rag_result = await mcp_client.call(
             server="rag-kb",
             tool="search_regulations",
-            params={"query": state.complaint_text, "session_id": state.session_id}
+            params={"query": state.complaint_text, "judgment_session_id": state.judgment_session_id}
         )
     except (MCPTimeoutError, MCPError):
         rag_result = []
@@ -914,7 +929,7 @@ async def compliance_agent_node(state: ComplaintSessionState) -> ComplaintSessio
         prompt=load_prompt("complaint_compliance", evidence=all_evidence, rag_results=rag_result),
         schema=ComplianceOpinion,
         trace_id=state.trace_id,
-        session_id=state.session_id,
+        judgment_session_id=state.judgment_session_id,
     )
     state.compliance_opinion = result
     return state
@@ -927,7 +942,7 @@ async def user_demand_agent_node(state: ComplaintSessionState) -> ComplaintSessi
         prompt=load_prompt("complaint_user_demand", complaint_text=state.complaint_text, evidence=all_evidence),
         schema=UserDemandAnalysis,
         trace_id=state.trace_id,
-        session_id=state.session_id,
+        judgment_session_id=state.judgment_session_id,
     )
     state.user_demand = result
     return state
@@ -954,11 +969,11 @@ async def verdict_agent_node(state: ComplaintSessionState) -> ComplaintSessionSt
         ),
         schema=VerdictDraft,
         trace_id=state.trace_id,
-        session_id=state.session_id,
+        judgment_session_id=state.judgment_session_id,
     )
     # confidence < 0.7 标记需人工重点复核
     if result.confidence < 0.7:
-        result.conflict_highlight = True
+        result.conflict_highlight = "1"
     state.verdict_draft = result
     state.task_status = TaskStatus.draft_generated
     return state
@@ -970,7 +985,7 @@ async def generate_package_agent_node(state: ComplaintSessionState) -> Complaint
         rag_result = await mcp_client.call(
             server="rag-kb",
             tool="search_response_templates",
-            params={"verdict": state.verdict_draft.verdict, "session_id": state.session_id}
+            params={"verdict": state.verdict_draft.verdict, "judgment_session_id": state.judgment_session_id}
         )
     except (MCPTimeoutError, MCPError):
         rag_result = []
@@ -991,7 +1006,7 @@ async def generate_package_agent_node(state: ComplaintSessionState) -> Complaint
         ),
         schema=JudgmentPackage,
         trace_id=state.trace_id,
-        session_id=state.session_id,
+        judgment_session_id=state.judgment_session_id,
     )
     state.judgment_package = result
     return state
@@ -1144,7 +1159,7 @@ def build_complaint_graph():
 async def human_review_node(state: ComplaintSessionState) -> ComplaintSessionState:
     """人工终审断点：LangGraph interrupt，等待人工提交复核结果"""
     from langgraph.types import interrupt
-    review_result = interrupt({"session_id": state.session_id, "judgment_package": state.judgment_package})
+    review_result = interrupt({"judgment_session_id": state.judgment_session_id, "judgment_package": state.judgment_package})
     # 人工提交后恢复
     state.human_review = HumanReviewResult(**review_result)
     if state.human_review.review_action == "approve":
@@ -1163,11 +1178,11 @@ async def human_review_node(state: ComplaintSessionState) -> ComplaintSessionSta
 > 生产环境LangGraph checkpointer必须满足以下约束，禁止裸连接、禁止无清理策略。
 
 1. **生产环境必须使用`AsyncPostgresSaver`** **+ 数据库连接池**（如`asyncpg.ConnectionPool`，最小连接数5，最大连接数20），禁止使用裸`psycopg2`直连；checkpointer实例在服务启动时初始化，生命周期由应用容器管理；
-2. **会话数据过期清理策略**：`complaint_sessions`表中`task_status IN ('archived','closed') AND update_time < NOW() - INTERVAL '90 days'`的记录，由定时任务每日凌晨清理至冷备归档表`complaint_sessions_archive`，防止`complaint_sessions`表持续膨胀影响checkpoint读写性能；
+2. **会话数据过期清理策略**：`complaint_sessions`表中`task_status IN ('archived','closed') AND update_time < NOW() - INTERVAL '90 days'`的记录，由定时任务每日凌晨将符合条件的行 `task_status` 置为 `archived` 并备份至对象存储（**不建** `complaint_sessions_archive` 表，见 step4/01 §2.1.1）；
 3. **会话挂起积压任务清理规则**：`task_status NOT IN ('archived','closed') AND update_time < NOW() - INTERVAL '24 hours'`的挂起会话，由巡检任务标记为`pending_review`（转人工），防止异常中断的会话无限占用state资源；
 4. **PG数据库故障降级策略**：
 
-   - checkpointer写入失败 → 捕获异常，将当前state快照序列化写入Redis（`csmp:session:{session_id}:fallback`，TTL=72h）作为降级checkpoint；
+   - checkpointer写入失败 → 捕获异常，将当前state快照序列化写入Redis（`csmp:session:{judgment_session_id}:fallback`，TTL=72h）作为降级checkpoint；
 
    - checkpoint恢复失败 → 记录异常日志，任务状态直接置为`pending_review`（流转人工），禁止无限重试恢复导致卡死；
 
@@ -1196,7 +1211,7 @@ async def init_production_checkpointer():
 
 ### 7.1 工单与会话管理
 
-- 支持HTTP回调/轮询接收投诉工单；每个工单独立session；
+- 支持HTTP回调/轮询接收投诉工单；每个工单独立 `judgment_session`（研判会话键 `judgment_session_id`，≠ 通话 `session_id`）；
 - 任务状态：`pending` → `evidence_gathering` → `reflection_retry` → `judging` → `draft_generated` → `pending_review` → `resolved` → `closed` → `archived`；
 - 会话持久化（PostgreSQL `complaint_sessions` 表），支持任务中断恢复；
 - 全局任务超时管控：默认30分钟，超时自动流转人工。
@@ -1208,7 +1223,7 @@ async def init_production_checkpointer():
 | 回调重试 | 投诉研判完成后回调传统业务系统，失败自动重试3次（指数退避：10s/30s/60s）；3次仍失败写入死信队列 |
 | 死信队列 | `csmp:callback:dlq`（Redis List），存储回调失败的工单ID，运维可手动重推 |
 | 状态对账 | 每日凌晨定时任务：扫描`draft_generated`超过1小时且未收到业务系统确认的工单，主动推送状态对账请求 |
-| 幂等保证 | 回调携带`session_id + version`，业务系统基于session_id做幂等判断，重复回调不重复处理 |
+| 幂等保证 | 回调携带`complaint_id + judgment_session_id + version`，业务系统基于 `complaint_id` 做幂等判断，重复回调不重复处理 |
 | 工单接入幂等 | 同一complaint_id重复推送，基于Redis SETNX锁防重复创建session；已存在的session返回当前状态 |
 
 ### 7.2 多Agent+MCP证据采集
@@ -1322,9 +1337,19 @@ async def init_production_checkpointer():
 
 **6. AI-人工一致性统计**
 
+> **禁止单独写「一致率」。** 必须带限定词：告警线 / 准入线 / 互一致。三套门槛数字冻结，禁止合并成一个数。
+
+| 名称（必须带限定词） | 阈值 | 用途 | 挂载 |
+|---|---|---|---|
+| **AI-人工判责一致率（告警线）** | 连续两周 **<80%** | 运营告警、发 **A5012** | 本节；step6/01 A5012；§7.8 |
+| **AI-人工判责一致率（灰度全量准入）** | 多 Agent 模式 vs 人工终审 **≥85%** | 灰度切全量的准入 | §13.2 灰度；E2E-05；验收第 17 项 |
+| **单/多 Agent 互一致率** | **≥80%** | 两模式互相比，**不是**对人 | §13.2「两模式互一致率」 |
+
+同一证据 10 次 verdict 枚举一致率 ≥90%、RAG top-3 准确率 ≥85%、单测覆盖率 ≥85% **不是** AI-人工判责一致率，不得与上表混称。
+
 - 实时统计AI输出与人工结果一致性指标，按周/月生成报表；
 - 不一致案例自动标记为高价值样本，优先推送样本回流；
-- 一致率连续两周低于80%触发告警，需启动Prompt优化或模型调优。
+- **AI-人工判责一致率（告警线）**连续两周低于80%触发告警（A5012），需启动Prompt优化或模型调优。
 
 ### 7.7 样本闭环回流
 
@@ -1345,9 +1370,9 @@ async def init_production_checkpointer():
 | 巕单处理时长P95  | >24h | step6/02 |
 | 循环重试次数均值   | >2次  | 设计约束     |
 | 证据不足转人工占比  | >30% | 设计约束     |
-| AI-人工判责一致率 | <80% | step7/01 |
+| AI-人工判责一致率（告警线） | 连续两周 <80% | step6/01 A5012 |
 | MCP调用失败率   | >5%  | step6/02 |
-| 投诉判责LLM降级率 | >15% | step6/02 |
+| 投诉判责LLM降级率 | >15%（**与 step6/02 同一告警线**） | step6/02 |
 
 ***
 
@@ -1379,14 +1404,14 @@ async def init_production_checkpointer():
 | 输出格式  | response\_format=json\_object（强制JSON）                |
 | 超时    | 10s + 3次指数退避(1s/2s/4s)                               |
 | 置信度门控 | confidence < 0.7 标记需人工重点复核                           |
-| 熔断    | pybreaker 连续3次失败或P95>800ms → RuleBasedScriptEngine兜底 |
+| 熔断    | 连续 3 次失败；P95 见 **§8.5 分模型**（deepseek-r1：P95>15s；qwen-plus / qwen-turbo：P95>800ms）。禁止一刀切 P95>800ms |
 | 调用审计  | llm\_call\_logs 全量记录                                 |
 | CoT加密 | reasoning字段 AES-256-GCM 加密，仅admin可解密                 |
 | 脱敏    | prompt/response落库前经mask.py脱敏                         |
 
 ### 8.3 模型与Token成本约束
 
-1. 调度Agent优先使用代码条件分支，尽可能减少LLM大模型调用；
+1. 调度Agent只用代码 if-else/路由、**不做判责**；超 `total_tokens` 阈值（默认50000）转人工。验收不测「尽可能减少 LLM」；
 2. Agent区分模型选型：简单结构化处理（如反思校验、用户诉求分析）使用轻量模型；合规研判、答辩生成复杂推理使用高阶大模型；
 3. 每个Agent做上下文裁剪，防止State上下文无限膨胀；
 4. 设置单工单总token消耗阈值（默认50000），超过阈值直接终止自动流程，转交人工处理。
@@ -1447,6 +1472,8 @@ guardrails:
 
 **模型熔断降级规则：**
 
+> **所有模型：** 连续 3 次失败 → 熔断（进入下一级）。**deepseek-r1**（合规判定/综合判责）：另加 P95 **>15s** → 熔断，降级到 qwen-plus。**qwen-plus / qwen-turbo：** P95 **>800ms** → 进入下一级降级。禁止对判责 LLM 一刀切 P95>800ms。
+
 ```
 推理模型（deepseek-r1）— 合规判定/综合判责主力
   ├─ 正常调用
@@ -1455,11 +1482,11 @@ guardrails:
   │    → 降级期间在state.exception_info标记 model_degraded
   │    → 降级期间合规判定Agent输出降级标记，产出物质量降低，人工复核权重提高
   │
-  └─ qwen-plus也连续3次失败
+  └─ qwen-plus连续3次失败 或 P95 > 800ms
        → 二级降级：切换 qwen-turbo（轻量模型，基础推理可用）
        → 降级期间强制 requires_human_review=true
        │
-       └─ qwen-turbo也连续3次失败
+       └─ qwen-turbo连续3次失败 或 P95 > 800ms
             → 三级降级：全量熔断 → RuleBasedScriptEngine规则兜底
             → A5011 投诉研判熔断
             → 全部工单流转人工，禁止AI继续输出草稿
@@ -1522,119 +1549,42 @@ guardrails:
 
 ## 九、数据模型扩展
 
-### 9.1 新增表DDL
+> **DDL 单一事实源：`step4_数据与库表设计/01_数据模型与关系库表设计.md`。** 本文件不再私藏 CREATE/ALTER。投诉相关表：`complaints`、`complaint_sessions`、`complaint_agent_logs`。不建 `complaint_sessions_archive` / `complaint_review_actions` / `mcp_call_logs`（见 step4/01 §2.1.1）。
 
-> 遵循 step4/01 公共字段规范（id/create\_time/update\_time/is\_delete）；UUID主键；TIMESTAMP WITH TIME ZONE；is\_delete CHAR(1)。
+### 9.1 表与字段口径（对照 step4/01）
 
-```sql
--- ============================================================
--- 投诉研判会话表（扩展complaints表，存Agent编排全量数据）
--- ============================================================
-CREATE TABLE complaint_sessions (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    session_id VARCHAR(100) UNIQUE NOT NULL,
-    trace_id VARCHAR(100) NOT NULL,
-    complaint_id UUID NOT NULL REFERENCES complaints(id) ON DELETE CASCADE,
-    case_ids JSONB NOT NULL DEFAULT '[]'::jsonb,          -- 关联案件ID列表（支持一对多）
-    session_ids JSONB NOT NULL DEFAULT '[]'::jsonb,       -- 关联通话session_id列表
-    user_id VARCHAR(100),                                  -- 用户ID，用于重复投诉关联
-    complaint_text TEXT NOT NULL,
-    loop_count INT NOT NULL DEFAULT 0 CHECK (loop_count BETWEEN 0 AND 3),
-    max_loops INT NOT NULL DEFAULT 3,
-    case_evidence JSONB DEFAULT '{}'::jsonb,               -- 按案件分组的证据包（key=case_id, value=CaseEvidenceBundle）
-    cross_case_evidence JSONB DEFAULT '[]'::jsonb,        -- 跨案件公共证据
-    historical_complaint_evidence JSONB DEFAULT '[]'::jsonb,  -- 重复投诉历史证据（近90天）
-    reflection_report JSONB,                               -- 反思校验报告
-    fact_timeline JSONB,                                   -- 事实还原
-    compliance_opinion JSONB,                             -- 合规判定
-    user_demand JSONB,                                    -- 用户诉求分析
-    verdict_draft JSONB,                                  -- 综合判责草稿
-    judgment_package JSONB,                                -- 完整研判数据包
-    exception_info JSONB DEFAULT '{}'::jsonb,             -- 异常信息
-    human_review JSONB,                                   -- 人工终审结果
-    task_status VARCHAR(30) NOT NULL DEFAULT 'pending' CHECK (
-        task_status IN ('pending','evidence_gathering','reflection_retry','judging',
-                        'draft_generated','pending_review','pending_senior_review',
-                        'resolved','closed','archived')
-    ),
-    total_tokens_consumed INT DEFAULT 0,
-    max_token_threshold INT DEFAULT 50000,
-    mode VARCHAR(20) NOT NULL DEFAULT 'multi_agent' CHECK (mode IN ('single_agent','multi_agent')),
-    create_time TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    update_time TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    is_delete CHAR(1) NOT NULL DEFAULT '0' CHECK (is_delete IN ('0','1'))
-);
-CREATE INDEX idx_complaint_sessions_session_id ON complaint_sessions(session_id);
-CREATE INDEX idx_complaint_sessions_complaint_id ON complaint_sessions(complaint_id);
-CREATE INDEX idx_complaint_sessions_task_status ON complaint_sessions(task_status);
-CREATE INDEX idx_complaint_sessions_trace_id ON complaint_sessions(trace_id);
-CREATE INDEX idx_complaint_sessions_active ON complaint_sessions(task_status) 
-    WHERE task_status NOT IN ('archived','closed') AND is_delete = '0';
-COMMENT ON TABLE complaint_sessions IS '投诉研判LangGraph会话表，存储完整Agent编排全量数据';
-COMMENT ON COLUMN complaint_sessions.case_ids IS '关联案件ID数组，支持一个投诉关联多个案件';
-COMMENT ON COLUMN complaint_sessions.mode IS '研判模式：single_agent(原有单Agent) / multi_agent(新多Agent+MCP)';
+| 表 | 业务键 | 要点 |
+| --- | ------ | ---- |
+| complaints | `id`=`complaint_id` | 壳表。`case_id`=主案件=`case_ids[0]`；`case_ids` JSONB 一对多；`session_id` 可空通话快捷外键 ≠ `judgment_session_id`；`status` 四值；`conflict_highlight` CHAR(1) `'0'|'1'` |
+| complaint_sessions | `judgment_session_id` | 研判会话 10 值 `task_status`；`session_ids` 为通话 session_id 列表 |
+| complaint_agent_logs | `judgment_session_id` FK | append-only；MCP 记 `mcp_calls` JSONB |
 
--- ============================================================
--- Agent执行日志表（append-only，每步Agent中间输出）
--- ============================================================
-CREATE TABLE complaint_agent_logs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    session_id VARCHAR(100) NOT NULL REFERENCES complaint_sessions(session_id) ON DELETE CASCADE,
-    trace_id VARCHAR(100) NOT NULL,
-    agent_role VARCHAR(50) NOT NULL CHECK (agent_role IN (
-        'orchestrator','evidence_case','evidence_call_qc','reflection',
-        'fact','compliance','user_demand','verdict','generate_package','sample_backflow'
-    )),
-    step_name VARCHAR(100) NOT NULL,
-    input_summary TEXT,
-    output_json JSONB,
-    mcp_calls JSONB DEFAULT '[]'::jsonb,                   -- 本次Agent的MCP调用记录
-    llm_call_log_ids JSONB DEFAULT '[]'::jsonb,           -- 关联llm_call_logs记录ID
-    tokens_consumed INT DEFAULT 0,
-    latency_ms INT,
-    status VARCHAR(20) NOT NULL CHECK (status IN ('success','failed','degraded','skipped')),
-    error_msg TEXT,
-    create_time TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-CREATE INDEX idx_complaint_agent_logs_session_id ON complaint_agent_logs(session_id);
-CREATE INDEX idx_complaint_agent_logs_agent_role ON complaint_agent_logs(agent_role);
-CREATE INDEX idx_complaint_agent_logs_create_time ON complaint_agent_logs(create_time DESC);
-CREATE INDEX idx_complaint_agent_logs_trace_id ON complaint_agent_logs(trace_id);
-COMMENT ON TABLE complaint_agent_logs IS 'Agent执行逐步日志，append-only，全链路可审计可回溯';
-```
+**壳表 `complaints.status` ← `complaint_sessions.task_status` 回写（禁止发明新枚举）：**
 
-### 9.2 complaints表扩展字段（ALTER）
+| complaints.status | 覆盖的 task_status |
+| ------------------ | ----------------- |
+| pending | pending |
+| investigating | evidence_gathering, reflection_retry, judging, draft_generated, pending_review, pending_senior_review |
+| resolved | resolved（人工确认后回写壳表） |
+| closed | closed, archived（归档后壳表保持 closed） |
 
-```sql
--- complaints表新增字段（不破坏已有结构）
-ALTER TABLE complaints ADD COLUMN IF NOT EXISTS verdict_reasoning TEXT;
-ALTER TABLE complaints ADD COLUMN IF NOT EXISTS response_draft TEXT;
-ALTER TABLE complaints ADD COLUMN IF NOT EXISTS regulation_refs JSONB DEFAULT '[]'::jsonb;
-ALTER TABLE complaints ADD COLUMN IF NOT EXISTS confidence FLOAT CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1));
-ALTER TABLE complaints ADD COLUMN IF NOT EXISTS internal_improvement TEXT;
-ALTER TABLE complaints ADD COLUMN IF NOT EXISTS conflict_highlight BOOLEAN DEFAULT FALSE;
+### 9.2 complaints 扩展列
 
-COMMENT ON COLUMN complaints.verdict_reasoning IS '判责理由（Agent草稿）';
-COMMENT ON COLUMN complaints.response_draft IS '对外答辩初稿（Agent生成，人工可修改）';
-COMMENT ON COLUMN complaints.regulation_refs IS '引用法规来源ID列表';
-COMMENT ON COLUMN complaints.confidence IS '判责置信度，<0.7需人工重点复核';
-COMMENT ON COLUMN complaints.internal_improvement IS '内部整改建议';
-COMMENT ON COLUMN complaints.conflict_highlight IS '多Agent意见冲突标记，提示人工重点复核';
-```
+已并入 step4/01 `complaints` 表：`verdict_reasoning`、`response_draft`、`regulation_refs`、`confidence`、`internal_improvement`、`conflict_highlight`、`case_ids`。禁止 BOOLEAN。
 
 ### 9.3 Redis缓存设计（DB6，对齐 step4/03）
 
-| Key                              | 结构                | TTL   | 用途                                  |
-| -------------------------------- | ----------------- | ----- | ----------------------------------- |
-| `csmp:session:{session_id}`      | STRING(JSON)      | 24h   | LangGraph State持久化缓存                |
-| `csmp:ticket:{id}:pkg`           | STRING(JSON)      | 24h   | 取证包缓存                               |
-| `csmp:verdict:{id}:latest`       | STRING(JSON)      | 24h   | 最新判责缓存                              |
-| `csmp:rslv:{id}:latest`          | STRING(JSON)      | 24h   | 处置方案缓存                              |
-| `csmp:hotspots:{start}:{end}`    | STRING(JSON)      | 6h    | 统计热点缓存                              |
-| `csmp:gather:lock:{id}`          | STRING(SET NX EX) | 120s  | 取证幂等锁（支持4工具调用耗时）                    |
-| `csmp:llm_degraded`              | STRING("1")       | 永不过期  | LLM熔断标识                             |
-| `csmp:task:timeout:{session_id}` | STRING            | 30min | 全局任务超时标记                            |
-| `csmp:mode:active`               | STRING            | 永不过期  | 当前生效模式：single\_agent / multi\_agent |
+| Key | 结构 | TTL | 用途 |
+| --- | --- | --- | --- |
+| `csmp:session:{judgment_session_id}` | STRING(JSON) | 24h | LangGraph State 持久化缓存 |
+| `csmp:complaint:{id}:pkg` | STRING(JSON) | 24h | 取证包缓存。`{id}`=`complaint_id` |
+| `csmp:verdict:{id}:latest` | STRING(JSON) | 24h | 最新判责缓存。`{id}`=`complaint_id` |
+| `csmp:rslv:{id}:latest` | STRING(JSON) | 24h | 处置方案缓存。`{id}`=`complaint_id` |
+| `csmp:hotspots:{start}:{end}` | STRING(JSON) | 6h | 统计热点缓存 |
+| `csmp:gather:lock:{id}` | STRING(SET NX EX) | 120s | 取证幂等锁。`{id}`=`complaint_id` |
+| `csmp:llm_degraded` | STRING("1") | 永不过期 | LLM熔断标识 |
+| `csmp:task:timeout:{judgment_session_id}` | STRING | 30min | 全局任务超时标记 |
+| `csmp:mode:active` | STRING | 永不过期 | 当前生效模式：single_agent / multi_agent |
 
 ***
 
@@ -1642,31 +1592,21 @@ COMMENT ON COLUMN complaints.conflict_highlight IS '多Agent意见冲突标记�
 
 | 数据类型 | 存储位置 | 保留周期 | 归档/清理策略 |
 | ---- | ---- | ---- | ---- |
-| complaint_sessions | PG | 90天在线→1年归档 | 90天后迁移至归档表；1年后备份至冷存储 |
-| complaint_agent_logs | PG（按月分区） | 90天在线→1年归档 | 按月分区，3个月前分区迁移至归档库；cron job每日检查 |
-| complaint_review_actions | PG | 与session同周期 | 随session归档同步 |
-| CoT加密推理数据 | PG（ciphertext字段） | 90天在线→1年归档 | 随agent_logs归档；归档后密钥仍需维护 |
+| complaint_sessions | PG | 90天在线 | `task_status IN ('archived','closed') AND update_time < NOW()-90天` 置 archived 并备份对象存储（不建归档表） |
+| complaint_agent_logs | PG（按月分区） | 90天在线 | 随会话备份；MCP 调用在本表 `mcp_calls`，不另建 mcp_call_logs |
+| 人工复核 | `human_review` JSONB + agent_logs + audit_logs | 与 session 同周期 | 不建 complaint_review_actions |
+| CoT加密推理数据 | PG（ciphertext字段） | 90天在线 | 随 agent_logs 备份 |
 | Redis缓存 | Redis DB6 | TTL 24h | 自动过期；会话完成后立即清理 |
-| MCP调用审计日志 | PG（mcp_call_logs表） | 1年在线 | 按月分区；1年后冷存储备份 |
 | 样本回流数据 | 推送至数据中台 | 由数据中台管理 | 本系统不保留，推送后即删 |
 
 **清理cron job定义：**
-- 每日凌晨02:00执行归档脚本：扫描`complaint_sessions`中`status='closed' AND update_time < NOW()-90天`的记录，迁移至归档表
-- 每周日凌晨03:00执行冷存储备份：将归档表中超过1年的数据打包至对象存储
+- 每日凌晨02:00：扫描 `complaint_sessions` 中 `task_status IN ('closed','archived') AND update_time < NOW()-90天` 的记录，备份后保持 `task_status='archived'`
+- 每周日凌晨03:00：将超1年备份打包至对象存储
 - 清理脚本必须记录执行日志，失败时告警运维
 
 ### 9.5 索引策略
 
-| 表 | 索引名 | 字段 | 查询场景 |
-| ---- | ---- | ---- | ---- |
-| complaint_sessions | idx_session_status | (status) | 按状态查待处理工单 |
-| complaint_sessions | idx_session_user | (user_id, create_time DESC) | 按用户查历史投诉（重复投诉关联） |
-| complaint_sessions | idx_session_create | (create_time) | 按时间范围检索 |
-| complaint_sessions | idx_session_complaint | (complaint_id) | 按工单号精确查询 |
-| complaint_agent_logs | idx_log_session | (session_id, agent_name) | 按session查Agent推理链 |
-| complaint_agent_logs | idx_log_time | (create_time) | 按时间范围审计 |
-| complaint_review_actions | idx_review_session | (session_id) | 按session查复核历史 |
-| complaint_review_actions | idx_review_reviewer | (reviewer_id, create_time DESC) | 按操作员查处理记录 |
+以 step4/01 已建索引为准（`idx_complaint_sessions_task_status`、`idx_complaint_sessions_user_id`、`idx_complaint_sessions_create_time`、`idx_complaint_sessions_complaint_id`、`idx_complaint_agent_logs_judgment_session_id` 等）。**禁止**再建名为 `(status)` 的 complaint_sessions 索引（列名是 `task_status`）。
 
 ### 9.6 数据迁移方案
 
@@ -1690,7 +1630,7 @@ COMMENT ON COLUMN complaints.conflict_highlight IS '多Agent意见冲突标记�
 
 | 依赖         | 熔断/失败阈值               | 降级方案                                      | 错误码   |
 | ---------- | --------------------- | ----------------------------------------- | ----- |
-| LLM（判责）    | 连续3次失败或P95>800ms      | pybreaker熔断 → RuleBasedScriptEngine规则兜底判责 | A5003 |
+| LLM（判责）    | 连续 3 次失败；P95 见 **§8.5 分模型**（deepseek-r1 >15s；qwen-plus/turbo >800ms） | pybreaker熔断 → 按 §8.5 链路降级（deepseek-r1→qwen-plus→qwen-turbo→RuleBasedScriptEngine） | A5003 |
 | LLM（产出物生成） | 连续3次失败                | 降级为模板填充（不含LLM生成文本）                        | A5003 |
 | RAG检索（MCP） | 连续3次超时                | 降级为规则兜底判责，不引用法规                           | A5002 |
 | 业务工单MCP    | 超时/报错                 | 标记证据缺失，进入反思校验循环                           | A5004 |
@@ -1771,7 +1711,7 @@ MCP调用
 | 关闭投诉      | PUT  | /api/v1/complaints/{id}/close      | 工单闭环                     |
 | 投诉统计      | GET  | /api/v1/complaints/stats           | 高频投诉原因+指标                |
 | 切换模式      | PUT  | /api/v1/complaints/mode            | 灰度切换 single/multi\_agent |
-| 一致性对比     | GET  | /api/v1/complaints/consistency     | AI-人工一致率指标               |
+| 一致性对比     | GET  | /api/v1/complaints/consistency     | 返回 **AI-人工判责一致率（告警线）** 与 **单/多 Agent 互一致率**（禁止只标「一致率」） |
 
 ### 11.2 接口请求/响应Schema
 
@@ -1782,16 +1722,17 @@ MCP调用
 ```json
 // Request Body
 {
-  "complaint_id": "UUID（传统业务系统工单ID）",
+  "complaint_id": "UUID（传统业务系统工单ID；落库 complaints.id）",
   "user_id": "用户ID",
   "case_ids": ["case_uuid_1", "case_uuid_2"],
   "complaint_text": "投诉文本内容",
   "submit_time": "2026-09-01T10:00:00Z",
   "source_channel": "phone|app|official_complaint|supervisory"
 }
+// 落库：complaints.case_id = case_ids[0]（主案件，NOT NULL）；complaints.case_ids 存全量数组
 // Response data
 {
-  "session_id": "complaint_session_uuid",
+  "judgment_session_id": "complaint_session_uuid",
   "task_status": "pending",
   "mode": "multi_agent"
 }
@@ -1800,14 +1741,14 @@ MCP调用
 **2. GET /api/v1/complaints — 投诉列表**
 
 ```json
-// Query Params: page=1, page_size=20, status=pending_review, user_id=xxx, start_date=2026-09-01, end_date=2026-09-30
+// Query Params: page=1, page_size=20, status=investigating（壳表四值）, task_status=pending_review（研判 10 值）, user_id=xxx, start_date=2026-09-01, end_date=2026-09-30
 // Response data
 {
   "total": 150,
   "page": 1,
   "page_size": 20,
   "items": [
-    {"complaint_id": "UUID", "session_id": "UUID", "user_id": "xxx", "case_ids": ["UUID"],
+    {"complaint_id": "UUID", "judgment_session_id": "UUID", "user_id": "xxx", "case_ids": ["UUID"],
      "task_status": "pending_review", "complaint_text": "前50字...", "create_time": "2026-09-01T10:00:00Z"}
   ]
 }
@@ -1819,7 +1760,7 @@ MCP调用
 // Path Param: id = complaint_id
 // Response data
 {
-  "complaint_id": "UUID", "session_id": "UUID", "user_id": "xxx",
+  "complaint_id": "UUID", "judgment_session_id": "UUID", "user_id": "xxx",
   "case_ids": ["UUID"], "complaint_text": "完整投诉文本",
   "task_status": "draft_generated", "mode": "multi_agent",
   "loop_count": 1, "create_time": "2026-09-01T10:00:00Z", "update_time": "2026-09-01T10:15:00Z",
@@ -1840,7 +1781,7 @@ MCP调用
 }
 // Response data
 {
-  "session_id": "UUID",
+  "judgment_session_id": "UUID",
   "task_status": "evidence_gathering",
   "trace_id": "全链路追踪ID"
 }
@@ -1851,7 +1792,7 @@ MCP调用
 ```json
 // Response data
 {
-  "session_id": "UUID",
+  "judgment_session_id": "UUID",
   "task_status": "judging",
   "loop_count": 1,
   "current_node": "compliance",  // 当前LangGraph节点
@@ -1866,7 +1807,7 @@ MCP调用
 ```json
 // Response data
 {
-  "session_id": "UUID",
+  "judgment_session_id": "UUID",
   "verdict_draft": {
     "verdict": "agent_violation|user_misunderstanding|compliant_but_poor_experience",
     "confidence": 0.85,
@@ -1893,7 +1834,7 @@ MCP调用
 {
   "total": 15,
   "items": [
-    {"log_id": "UUID", "session_id": "UUID", "agent_name": "evidence_case",
+    {"log_id": "UUID", "judgment_session_id": "UUID", "agent_name": "evidence_case",
      "node_name": "evidence_case", "input_summary": "入参摘要（脱敏）",
      "output_summary": "出参摘要", "token_used": 1500,
      "duration_ms": 3200, "status": "success", "mcp_calls": 2,
@@ -1918,7 +1859,7 @@ MCP调用
 }
 // Response data
 {
-  "session_id": "UUID",
+  "judgment_session_id": "UUID",
   "task_status": "resolved|evidence_gathering|pending_senior_review",
   "reject_count": 1
 }
@@ -1933,7 +1874,7 @@ MCP调用
   "operator_id": "操作人ID"
 }
 // Response data
-{"session_id": "UUID", "task_status": "closed"}
+{"judgment_session_id": "UUID", "task_status": "closed"}
 ```
 
 **10. GET /api/v1/complaints/stats — 投诉统计**
@@ -1980,9 +1921,9 @@ MCP调用
 }
 ```
 
-### 11.3 错误码段（A5001~A5013，对齐 step6/01 六类异常分类）
+### 11.3 错误码段（A5001～A5014，对齐 step6/01 六类异常分类）
 
-> 异常分类：参数校验类(P) / 业务规则类(B) / 依赖服务类(D) / 安全合规类(S) / 限流熔断类(R) / 系统内部类(E)
+> 异常分类：参数校验类(P) / 业务规则类(B) / 依赖服务类(D) / 安全合规类(S) / 限流熔断类(R) / 系统内部类(E)。**A5013 废弃，勿用**（不以回写或模式切换占用）。数据中台回写失败 **仅 A5005**；模式切换失败 **仅 A5014**。
 
 | 错误码 | 异常分类 | HTTP码 | 告警级别 | 异常场景 | 处置 |
 | ----- | ------- | ----- | ------- | ------- | ---- |
@@ -1997,8 +1938,8 @@ MCP调用
 | A5009 | 限流熔断类(R) | 429 | P3 | Token超限 | 终止自动流程，转人工 |
 | A5010 | 限流熔断类(R) | 429 | P2 | 全局任务超时 | 超时自动流转人工 |
 | A5011 | 限流熔断类(R) | 503 | P1 | 投诉研判熔断 | LLM熔断期间走规则兜底 |
-| A5012 | 业务规则类(B) | 200 | P2 | 一致性告警 | AI-人工一致率<80% |
-| A5013 | 系统内部类(E) | 500 | P2 | 模式切换失败 | 回滚到上一模式 |
+| A5012 | 业务规则类(B) | 200 | P2 | 一致性告警 | **AI-人工判责一致率（告警线）**连续两周<80%（**不是**灰度准入 85%） |
+| A5014 | 系统内部类(E) | 500 | P2 | 模式切换失败/回滚到上一模式 | 回滚到上一模式 |
 
 ***
 
@@ -2150,9 +2091,9 @@ MCP调用
 
 - 灰度期间两个session独立执行，结果分别落库；
 
-- 一致性指标达标（AI-人工一致率≥85%，两模式互一致率≥80%）后再全量切换；
+- 一致性指标达标（**AI-人工判责一致率（灰度全量准入）≥85%**，**单/多 Agent 互一致率 ≥80%**）后再全量切换；
 
-- 模式切换失败自动回滚到上一active模式（A5013）。
+- 模式切换失败自动回滚到上一active模式（A5014）。
 
 ### 13.3 Redis灰度标识
 
@@ -2173,7 +2114,7 @@ MCP调用
 | 合规红线    | 答辩初稿含暴力/威胁/伪造身份          | 拦截率100%         | openspec/07 强制2 |
 | 投诉定性幻觉  | Agent自由定性投诉是否违规          | 不自由定性，引用标准流程    | openspec/07 强制4 |
 | 降级熔断    | LLM超时/MCP故障/Token超限/循环超限 | 正确降级兜底          | openspec/07 强制5 |
-| 一致性测试   | 同一投诉证据提交10次判责            | verdict 枚举一致率 ≥90%（≥9/10 一致），不一致项人工复核 | openspec/07 强制7 |
+| 一致性测试   | 同一投诉证据提交10次判责            | verdict 枚举一致率 ≥90%（≥9/10 一致），不一致项人工复核（**不是** AI-人工判责一致率） | openspec/07 强制7 |
 | 证据不足转人工 | 反思循环超限                   | 必须流转人工，禁止强行判责   | 设计约束            |
 
 ### 14.2 CI门禁规则
@@ -2183,9 +2124,9 @@ MCP调用
 | 红线拦截率   | 100%                      | 阻断   |
 | 幻觉测试    | 0编造法规/事实                  | 阻断   |
 | 降级测试    | 全部正确降级                    | 阻断   |
-| 一致性测试   | verdict 枚举一致率 ≥90%（≥9/10），不一致项人工复核 | 阻断   |
+| 一致性测试   | verdict 枚举一致率 ≥90%（≥9/10），不一致项人工复核（**不是** AI-人工判责一致率） | 阻断   |
 | 证据不足转人工 | 循环超限必须转人工                 | 阻断   |
-| 覆盖率     | complaint-service核心模块≥85% | 阻断   |
+| 覆盖率     | complaint-service核心模块≥85%（**不是** AI-人工判责一致率） | 阻断   |
 
 ### 14.3 冒烟脚本
 
@@ -2209,14 +2150,14 @@ MCP调用
 | -------- | -------------------------------- | ---------- |
 | 1. 变更登记  | 在PromptOps平台登记变更内容、目标版本号、变更原因    | 登记完成       |
 | 2. 全量回归  | 使用新版本Prompt执行全量回归测试集（第14.1节6类用例） | 全部PASS，0失败 |
-| 3. 一致性回归 | 同一投诉证据提交10次，验证 verdict 枚举一致率 ≥90%（≥9/10）    | 一致率≥90%，不一致项人工复核留痕 |
+| 3. 一致性回归 | 同一投诉证据提交10次，验证 verdict 枚举一致率 ≥90%（≥9/10）    | 枚举一致率≥90%（**不是** AI-人工判责一致率），不一致项人工复核留痕 |
 | 4. 幻觉检测  | 执行幻觉高危场景测试矩阵（step7/02 第三节6类场景）   | 0编造法规/事实   |
 | 5. 降级测试  | 验证Prompt变更后熔断/降级逻辑仍生效            | 全部正确降级     |
-| 6. 灰度验证  | 10%流量灰度A/B测试，对比AI-人工一致率          | 一致率不下降     |
+| 6. 灰度验证  | 10%流量灰度A/B测试，对比 **AI-人工判责一致率（灰度全量准入）**          | 准入线不下降     |
 | 7. 评审确认  | 技术评审+合规评审双签确认                    | 双签通过       |
 | 8. 全量发布  | 灰度验证通过后全量发布新版本Prompt             | 发布完成       |
 
-> **强制规则**：步骤2-5任一未通过，禁止进入灰度阶段；步骤6灰度期间一致率下降超过5个百分点，自动触发一键回滚至上一稳定版本。
+> **强制规则**：步骤2-5任一未通过，禁止进入灰度阶段；步骤6灰度期间 **AI-人工判责一致率（灰度全量准入）** 下降超过5个百分点，自动触发一键回滚至上一稳定版本。
 
 ***
 
@@ -2238,7 +2179,7 @@ MCP调用
 | 参与人 | 3名复核操作员（一线）+ 1名复核主管 + 1名合规审计 |
 | 场景设计 | 覆盖US-01~US-07全部7个用户故事 + 5个边界场景（MCP全故障/LLM全降级/3轮反思/驳回重判/批量处理30件） |
 | 通过标准 | ①操作员完成率100%（允许修改但无卡死流程）②单件平均操作时间≤10分钟③操作员满意度≥4/5分④无数据丢失/不一致 |
-| 时间节点 | M3.5阶段灰度期间执行，持续5个工作日 |
+| 时间节点 | M3（P1）灰度期间执行，持续5个工作日 |
 | 缺陷处理 | P0缺陷阻断UAT、24小时内修复；P1缺陷修复后继续；P2缺陷记录后续迭代 |
 
 ### 14.7 覆盖率定义
@@ -2246,7 +2187,7 @@ MCP调用
 | 项目 | 定义 |
 | ---- | ---- |
 | 覆盖率类型 | 分支覆盖率（Branch Coverage），非行覆盖率 |
-| 准入阈值 | 整体≥85%；核心模块（Agent逻辑/MCP调用/State流转）≥95% |
+| 准入阈值 | 整体≥85%；核心模块（Agent逻辑/MCP调用/State流转）≥95%（**不是** AI-人工判责一致率） |
 | 排除项 | `__init__.py`、migration脚本、测试文件、dev-only工具脚本 |
 | 工具 | pytest-cov + coverage.py |
 | 报告 | CI每次构建生成覆盖率报告，趋势对比展示 |
@@ -2259,7 +2200,7 @@ MCP调用
 | E2E-02 驳回重判 | 标准研判→操作员驳回→主管重判→2轮反思→新判责→确认→闭环 | 驳回原因结构化；重判独立计数；新旧diff可查 |
 | E2E-03 MCP降级 | 工单创建→通话质检MCP故障→降级取证（跳过通话质检）→标记缺失→研判→人工复核 | 缺失证据灰色标记；研判草稿标注"证据不完整" |
 | E2E-04 全链路降级 | 工单创建→所有LLM降级至RuleBasedEngine→基础规则研判→人工终审 | RuleBasedEngine输出基础判责；界面黄色横幅提示降级模式 |
-| E2E-05 灰度切换 | 旧模式处理10件→灰度切换→新模式处理10件→一致性对比→指标达标→全量 | 一致率≥85%；切换无停机；回滚≤60秒 |
+| E2E-05 灰度切换 | 旧模式处理10件→灰度切换→新模式处理10件→一致性对比→指标达标→全量 | **AI-人工判责一致率（灰度全量准入）≥85%**；切换无停机；回滚≤60秒 |
 
 ***
 
@@ -2297,8 +2238,8 @@ stateDiagram-v2
 
 | 频道                         | 发布者               | Payload                                                   | 订阅者                                           | 目的           |
 | -------------------------- | ----------------- | --------------------------------------------------------- | --------------------------------------------- | ------------ |
-| `complaint.judged`         | complaint-service | `{ticket_id, verdict, confidence, case_id, trace_id, ts}` | review-service / case-service / data-platform | 复盘投诉/案件升级/宽表 |
-| `complaint.closed`         | complaint-service | `{ticket_id, resolution_version, trace_id, ts}`           | data-platform / review-service                | 宽表/报告合并      |
+| `complaint.judged`         | complaint-service | `{complaint_id, verdict, confidence, case_id, trace_id, ts}` | review-service / case-service / data-platform | 复盘投诉/案件升级/宽表 |
+| `complaint.closed`         | complaint-service | `{complaint_id, resolution_version, trace_id, ts}`           | data-platform / review-service                | 宽表/报告合并      |
 | `complaint.insight.weekly` | complaint-service | `{week_start, summary, trace_id, ts}`                     | review-service / rag-service                  | 周报合并/整改文档归档  |
 | `complaint.mode.switched`  | complaint-service | `{old_mode, new_mode, gray_percent, trace_id, ts}`        | data-platform / 告警系统                          | 灰度模式切换通知     |
 
@@ -2314,7 +2255,21 @@ stateDiagram-v2
 
 - **`qc.check.completed` 处理**：对关联 case，若此前同步取证时 QC 未完成（质检证据项已被标记「质检待补」，见 §7.2 / §6.2），触发补证重取证并复判，消除"空列表=无违规"误判；该事件同样不用于自动新建工单或自动发起新的研判任务。
 
-- 事件消费幂等（Redis SETNX 按 session_id + qc_record_id 去重），消费失败入重试队列，避免重复触发补证。
+- 事件消费幂等（Redis SETNX 按 session_id + qc_record_id 去重），消费失败入重试队列，避免重复触发补证。工单 `closed` 后迟到的 `qc.complaint.suspected`：沿用已有接入幂等，**不新建研判会话、不自动重开已关闭单**（可记审计）。不新状态机。
+
+### 16.2 本基线不单独验收的边界
+
+> 不补新行为；用已有约束点名。禁止展开成新功能节。
+
+| 边界 | 写法 |
+| :--- | :--- |
+| 同一 `session_id` 并发 replay | 质检以 `qc_records.session_id UNIQUE` 为准（DD-02）；投诉侧不另定义新 API；并发冲突不单独立项验收 |
+| REVIEWED 后 force 重跑 / 告警去重 | 质检复核见 DD-02 `X-QC-Force-Rerun`；投诉侧告警去重 **不单独验收** |
+| 多通关联同一案件 | 质检仍一通一检；投诉多通话用已有 `session_ids[]` |
+| 工单 `closed` 后迟到的 `qc.complaint.suspected` | 沿用已有接入幂等：不新建研判会话、不自动重开已关闭单（可记审计） |
+| `per_case_verdicts` 冲突 | 已有 `conflict_highlight` + 转人工，不新写字段级仲裁 |
+| 客户说「已投诉」 | 红线 3 **停呼优先**（step1/03 已有）；不是 `reduced_intensity` |
+| 录音 URL 失效 / ASR 空 / 部分 turns | 质检不碰文件流；turns 空/未齐 → WAIT_TEXT / A2003 / PARTIAL（DD-02）。不新错误码 |
 
 ***
 
@@ -2349,7 +2304,7 @@ stateDiagram-v2
 | # | 验收项 | 验收方法 | 通过阈值 | 责任方 |
 | - | ----- | ------- | ------- | ------ |
 | 1 | 弱中心化架构 | 代码走查+集成测试：验证调度Agent节点无LLM业务推理调用、无修改子Agent输出的逻辑 | 调度Agent节点LLM调用次数=0；子Agent输出修改=0处 | 研发+架构评审 |
-| 2 | MCP工具层 | 集成测试：4个MCP Server各调用3次，验证返回格式/脱敏/鉴权 | 调用成功率100%；PII脱敏率100%；鉴权失败拦截率100% | 测试团队 |
+| 2 | MCP工具层 | 集成测试：4个MCP Server各调用3次，验证返回格式/脱敏/鉴权。**M3 允许 Mock MCP 通过验收**（不要求真 call-service 数据面） | 调用成功率100%；PII脱敏率100%；鉴权失败拦截率100%。Mock 为正式验收路径 | 测试团队 |
 | 3 | 反思循环 | 1）代码验证：构造证据不足场景，循环4次验证第4次必转人工；2）回归测试：反思准确率与人工标注对比 | 循环超限必转人工（100%）；反思准确率≥90%（误报率≤10%，漏报率≤5%） | 测试团队 |
 | 4 | 多Agent并行 | 集成测试：验证证据采集双Agent并行、研判三Agent并行，执行日志确认并行执行 | 证据采集总耗时 = max(案件Agent耗时, 通话质检Agent耗时)；研判三Agent并行执行确认 | 测试团队 |
 | 5 | 结构化输出 | 全量回归测试集验证所有Agent输出Pydantic Schema校验通过率 | Schema校验通过率≥99%；非法JSON自动重试成功率≥95% | 测试团队 |
@@ -2360,11 +2315,11 @@ stateDiagram-v2
 | 10 | 降级兜底 | 故障注入测试：分别模拟LLM超时/MCP故障/PG宕机，验证降级逻辑 | 全部降级路径正确；无卡死无报错外抛；降级后任务零丢失 | 测试+运维团队 |
 | 11 | 灰度双模 | 集成测试：验证模式切换、灰度百分比路由、并行session一致性对比 | 切换成功率100%；灰度路由准确率≥99%；切换失败自动回滚 | 测试团队 |
 | 12 | 样本回流 | 集成测试：验证工单闭环后是否触发回写MCP，回写失败重试机制 | 回写触发率100%；重试3次后仍失败告警；数据零丢失 | 测试团队 |
-| 13 | 单元测试覆盖率 | pytest --cov 统计核心模块覆盖率 | complaint-service核心模块≥85%；API层≥80% | 研发团队 |
+| 13 | 单元测试覆盖率 | pytest --cov 统计核心模块覆盖率 | complaint-service核心模块≥85%；API层≥80%（**不是** AI-人工判责一致率） | 研发团队 |
 | 14 | 冒烟脚本 | 执行 smoke_complaint_service.sh | 全部断言PASS，0失败 | 测试团队 |
 | 15 | 敏感数据脱敏 | 安全测试：抓取MCP返回数据和Agent日志，检测明文PII | MCP返回0条明文PII；Agent日志0条明文PII | 安全团队 |
 | 16 | 性能基线 | 压测：20并发持续30分钟，验证P95/P99时延 | 端到端P95≤15分钟；P99≤30分钟；无OOM；无死锁 | 测试+运维团队 |
-| 17 | AI-人工一致率 | 灰度期对比：双模式并行输出与人工终审结果比对 | 多Agent模式与人工一致率≥85%；单/多Agent互一致率≥80% | 运营+测试团队 |
+| 17 | AI-人工判责一致率（灰度全量准入）+ 互一致 | 灰度期对比：双模式并行输出与人工终审结果比对 | **AI-人工判责一致率（灰度全量准入）**：多Agent模式与人工终审 **≥85%**；**单/多 Agent 互一致率 ≥80%**（不是对人）。告警线见 §7.6，**不**用 A5012 做准入 | 运营+测试团队 |
 | 18 | 任务零丢失 | 故障注入：服务重启/PG宕机/Redis宕机场景下验证任务恢复 | 所有场景任务零丢失；恢复失败必转人工 | 测试团队 |
 
 ***
@@ -2436,11 +2391,13 @@ stateDiagram-v2
 
 ### 20.5 压测要求
 
+> **范围**：REQ-CJ-055 = **P3 / 里程碑 M5 仅规划，M3/M3.5 不验收**。条文保留，不得当里程碑 M3 必过。
+
 | 维度   | 要求                                                                        |
 | ---- | ------------------------------------------------------------------------- |
 | 压测场景 | 1）持续高并发工单接入（20并发持续30分钟）；2）投诉峰值涌入（100工单/小时持续1小时）；3）MCP调用超时降级压测；4）LLM熔断降级压测 |
 | 压测工具 | Locust（HTTP压测）+ 自研脚本（模拟MCP/LLM调用）                                         |
-| 准入条件 | P95时延达标、无OOM、无死锁、MCP失败率<5%、LLM降级率<15%、任务零丢失                               |
+| 准入条件 | P95时延达标、无OOM、无死锁、MCP失败率<5%、投诉判责 LLM降级率<15%（与 step6/02 告警线同一阈值、方向相反）、任务零丢失                               |
 | 压测频率 | 每次大版本发布前执行；灰度切换前执行                                                        |
 
 ***
@@ -2461,7 +2418,7 @@ stateDiagram-v2
 | ------------------- | ---------------------------------------------------------------- |
 | checkpointer恢复成功    | 从最近checkpoint恢复state，继续执行未完成的Agent节点                             |
 | checkpointer恢复失败    | 记录异常日志，任务状态置为`pending_review`流转人工，禁止无限重试恢复导致卡死                   |
-| Redis降级checkpoint恢复 | 读取`csmp:session:{session_id}:fallback`恢复state，标记`model_degraded` |
+| Redis降级checkpoint恢复 | 读取`csmp:session:{judgment_session_id}:fallback`恢复state，标记`model_degraded` |
 
 ### 21.3 依赖组件故障的业务影响与处置
 
@@ -2475,6 +2432,8 @@ stateDiagram-v2
 | RAG服务      | 不可用       | 合规判定Agent无法引用法规          | 降级为规则兜底判责，不引用法规；产出物生成降级为模板填充                        |
 
 ### 21.4 定期备份策略
+
+> **范围**：REQ-CJ-056 = **P3 / 里程碑 M5 仅规划，M3/M3.5 不验收**。条文保留，不得当里程碑 M3 必过。
 
 | 备份对象                                | 备份频率         | 保留周期 | 备份方式                           |
 | ----------------------------------- | ------------ | ---- | ------------------------------ |
@@ -2709,7 +2668,7 @@ class RuleBasedScriptEngine:
 | ------ | ---- | ------- | ------- |
 | P0 | 多案件证据组织逻辑空白 | 6.1 State Schema / 6.2 伪代码 / 9.1 DDL | 新增`CaseEvidenceBundle`按案件分组；新增`case_evidence` dict + `cross_case_evidence` + `historical_complaint_evidence`；证据采集Agent按案件维度写入；VerdictDraft新增`per_case_verdicts`逐案判责 |
 | P0 | 人工复核操作流程缺失 | 7.6 Human-in-loop人工交互 | 扩充为6小节：复核动作枚举（6种）、复核SLA（3级）、复核权限分级（4角色）、复核界面必显字段（10项）、驳回重判规则（硬上限2次）、AI-人工一致性统计 |
-| P0 | 验收标准不可量化 | 第十八章 验收标准 | 从15项定性描述 → 18项量化标准，每项含：验收方法 + 通过阈值 + 责任方，三要素齐全；新增反思准确率、性能基线、一致率、任务零丢失4项核心指标 |
+| P0 | 验收标准不可量化 | 第十八章 验收标准 | 从15项定性描述 → 18项量化标准，每项含：验收方法 + 通过阈值 + 责任方，三要素齐全；新增反思准确率、性能基线、AI-人工判责一致率（灰度全量准入/互一致）、任务零丢失4项核心指标 |
 | P1 | MCP接口契约缺失 | 4.4 MCP接口契约清单（新增） | 4个MCP Server共14个tool的入参/出参/异常场景全定义；统一MCP返回格式约定 |
 | P1 | 证据置信度标准模糊 | 6.1 State Schema / 7.3 反思循环 | 新增`ConfidenceLevel`枚举（high/medium/low三级）；新增`confidence_level`和`confidence_reason`字段；补充6条证据冲突解决规则（优先级排序、低置信度丢弃、核心事实冲突标人工等） |
 | P1 | 错误码未对齐全局分类 | 11.2 错误码段 | 新增异常分类列（P/B/D/S/R/E六类）、HTTP状态码列、告警级别列（P1/P2/P3）；与step6/01六类异常分类体系对齐 |
@@ -2767,7 +2726,7 @@ class RuleBasedScriptEngine:
   "timestamp": "2026-09-05T10:30:00.123Z",
   "level": "INFO",
   "trace_id": "trace-xxx",
-  "session_id": "uuid-xxx",
+  "judgment_session_id": "uuid-xxx",
   "agent_name": "compliance_agent",
   "action": "llm_call",
   "duration_ms": 8500,
@@ -2783,7 +2742,7 @@ class RuleBasedScriptEngine:
 | timestamp | 是 | ISO8601带毫秒+时区 |
 | level | 是 | DEBUG/INFO/WARN/ERROR/CRITICAL |
 | trace_id | 是 | 全链路追踪ID |
-| session_id | 条件必填 | Agent调用时必填 |
+| judgment_session_id | 条件必填 | Agent 调用时必填（研判会话键；JSON 示例字段同名） |
 | agent_name | 条件必填 | Agent调用时必填 |
 | action | 是 | 具体动作（llm_call/mcp_call/state_write/review_action等） |
 | duration_ms | 条件必填 | 耗时类操作必填 |
@@ -2849,7 +2808,7 @@ class RuleBasedScriptEngine:
 | 报表 | 频率 | 内容 | 面向角色 |
 | ---- | ---- | ---- | ---- |
 | 日度处理报表 | 每日 | 处理量/平均时长/驳回率/SLA达标率 | 主管 |
-| 周度趋势报表 | 每周 | 处理趋势/AI-人工一致率/降级次数/高频投诉原因Top5 | 主管+管理层 |
+| 周度趋势报表 | 每周 | 处理趋势/**AI-人工判责一致率（告警线）**/降级次数/高频投诉原因Top5 | 主管+管理层 |
 | 月度综合报表 | 每月 | 处理量月环比/二次投诉率/人力成本节约/LLM成本/ROI | 管理层 |
 | 合规审计报表 | 每月 | 红线拦截次数/法规引用准确率/脱敏合规率/审计日志完整性 | 合规审计 |
 | 季度质量报表 | 每季 | 样本回流统计/Prompt迭代效果/Agent准确率趋势 | 技术运维+管理层 |

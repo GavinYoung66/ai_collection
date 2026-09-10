@@ -11,9 +11,9 @@ from common.trace.middleware import TraceMiddleware
 
 class TestErrorCodes:
     def test_error_code_count(self):
-        """错误码总数应为 84 条。"""
+        """错误码总数：A1(13)+A2(11)+A3(6)+A4(15)+A5(14)+A6(15)+A7(6)+B(10)=90。"""
         codes = [c for c in ErrorCode]
-        assert len(codes) == 84
+        assert len(codes) == 90
 
     def test_all_codes_have_messages(self):
         """每个错误码都有对应的消息。"""
@@ -28,7 +28,7 @@ class TestErrorCodes:
         a4_codes = [c for c in ErrorCode if c.value.startswith("A4")]
         b_codes = [c for c in ErrorCode if c.value.startswith("B")]
         assert len(a1_codes) == 13
-        assert len(a2_codes) == 6
+        assert len(a2_codes) == 11
         assert len(a4_codes) == 15
         assert len(b_codes) == 10
 
@@ -98,7 +98,7 @@ class TestExceptionHandlers:
         assert body["data"] is None
 
     def test_unexpected_exception_response(self, app):
-        client = TestClient(app)
+        client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/unexpected")
         assert resp.status_code == 500
         body = resp.json()

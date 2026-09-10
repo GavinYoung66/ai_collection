@@ -1,10 +1,10 @@
 # 向量数据库与知识库 Schema 设计
 
 > 文档类型：数据设计（规范层）
-> 版本：v2.4
+> 版本：v2.5
 > 状态：定稿
-> 更新日期：2026-09-09
-> 约束声明：本文件为向量库 Schema 单一事实源；遵循 step1/01 全局口径与 openspec/specs/03；向量库与关系库通过 kb_chunks.vector_id 1:1 关联。
+> 更新日期：2026-09-10
+> 约束声明：本文件为向量库 Schema 单一事实源；遵循 step1/01 全局口径与 openspec/specs/03；向量库与关系库通过 kb_chunks.vector_id 1:1 关联。**一期检索边界**与 step1/04、DD-03 §1.2 同构：M1 仅 Milvus 稠密检索；ES/rerank 为二期预案。
 
 ## 修订记录
 
@@ -17,6 +17,7 @@
 | v2.2 | 2026-09-09 | P1-21 §7.2 ES mapping 移除无 PG 来源的通话/案件维度字段 customer_id/agent_id/risk_tag/expired（决策：移除，非预留）；§7.4 生命周期"新通话/新文档"→"新文档"、expired=true → is_delete='1' 逻辑删除，对齐 kb_chunks | Ellis Guo |
 | v2.3 | 2026-09-09 | 批次3（D2-3）：§三 检索流程/§四.3/§四.4/§七.3 KBResult 与喂给 LLM 的清洗后上下文强制携带 source_id（= kb_chunks.doc_id / kb_documents.id）+ 原文片段引用，无 source_id 条目视为"无来源幻觉上下文"禁止拼装；检索日志补 source_id（对齐 step3/03 v1.2 §一.6、step5/04 §3.2 L4 法规来源校验） | Ellis Guo |
 | v2.4 | 2026-09-09 | 批次5（O3/D4-2）：§七/§八 开头标注边界——ES BM25 与 bge-reranker 为二期能力（MVP 仅启用 Milvus 稠密检索；启用触发条件：知识库规模 > 5 万篇 或 稠密检索命中率 < 60% 时评估启用）；§7.3 补一期简化版链路（query → Milvus → score<0.6 兜底）；ES/rerank 结构保留为二期预案，不删除一期必需组件 | Ellis Guo |
+| v2.5 | 2026-09-10 | 审阅 17：与 DD-03 互相指向——M1 验收只要求 Milvus；DD-03 混合检索设计为非一期强制，不得当 M1 部署条件 | Ellis Guo |
 
 ## 一、Collection 定义
 
@@ -99,7 +100,7 @@ rag-service 启动时确保 collection 与索引存在；检索参数 nprobe=16 
 
 ## 七、Elasticsearch 8 BM25 稀疏检索 Schema
 
-> **[一期边界标注（批次5 O3/D4-2）]**：一期（MVP）仅启用 **Milvus 稠密检索**；ES BM25 稀疏检索为**二期能力**。启用触发条件：知识库规模 > 5 万篇 或 稠密检索命中率 < 60% 时评估启用。MVP 阶段可不部署 ES、不下发 `kb_chunks_bm25` 索引（本 schema 结构保留为二期预案）。
+> **[一期边界标注（批次5 O3/D4-2；审阅 17）]**：一期（MVP / **M1 验收**）仅启用 **Milvus 稠密检索**；ES BM25 稀疏检索为**二期能力**（开关默认关）。DD-03 保留混合检索设计段落，但标「非一期强制」，**不得当作 M1 必部署 ES**。启用触发条件：知识库规模 > 5 万篇 或 稠密检索命中率 < 60% 时评估启用。MVP 阶段可不部署 ES、不下发 `kb_chunks_bm25` 索引（本 schema 结构保留为二期预案）。权威边界亦见 step1/04「检索边界」。
 
 ### 7.1 索引定义
 

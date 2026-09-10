@@ -1,10 +1,10 @@
 # API 接口与 Streaming 流式协议规范
 
 > 文档类型：技术规范（规范层）
-> 版本：v1.7
+> 版本：v1.9
 > 状态：定稿
-> 更新日期：2026-09-09
-> 约束声明：本文件为 API 接口与流式协议单一事实源；遵循 step1/01 全局统一口径与 openspec/specs/02；统一响应包 {"code":"0","message","data","trace_id"}，code 为字符串、"0" 表示成功；错误码引用 step6/01 §3.1+§3.2 已定义基线（A 48 + B 10 = 58 条可用；预留码段 A4001~A4004/A6001/A6002/A6004/A7002~A7004 禁止使用，待 DD 回灌），禁止私自编号；demand/step3/API_CONTRACT_EXPANSION.md 仅作参考。
+> 更新日期：2026-09-10
+> 约束声明：本文件为 API 接口与流式协议单一事实源；遵循 step1/01 全局统一口径与 openspec/specs/02；统一响应包 {"code":"0","message","data","trace_id"}，**仅 `code==="0"` 为业务成功**，`code!=="0"` 一律业务失败（即使 HTTP 200）。错误码引用 step6/01 §3.1+§3.2（A5013 废弃勿用）；demand/step3/API_CONTRACT_EXPANSION.md 仅作参考。探活唯一 `GET /health`（无前缀）。SSE content 分片字段仅 `text`。WS 路径 `/api/v1/call/{session_id}/stream|captions`。分页仅 `page`+`page_size`，禁止 `size` 别名。M1 离线质检只读拉数路径以本节 §3.4 为准，字段业务规则仍以 DD-02 为准；库列↔HTTP/事件映射见 §3.5。
 
 ## 修订记录
 
@@ -18,6 +18,8 @@
 | v1.4 | 2026-09-09 | 批次4（D1-4）§4 新增流式中断补偿语义（已下发 content 不重发不回滚、客户端 session_id+分片序号幂等去重；LLM 中途断流计一次失败走 3 次重试且整段重生成不续传；重试耗尽发 error 帧后关闭连接）；§5.2 断线重连补"不续传历史分片、从当前轮次恢复上下文、3 次重连失败走降级" | Ellis Guo |
 | v1.6 | 2026-09-09 | 对齐 DD-02 V1.5：删除 POST /qc/check 与 WS /qc/check/stream；质检告警不走通话页 WS | Ellis Guo |
 | v1.7 | 2026-09-09 | §2.2 加一行例外：qc-service A2 段（A2001–A2011）HTTP 以 step6/01 为准，不把整份文档业务错误改成 4xx | Ellis Guo |
+| v1.8 | 2026-09-10 | 审阅 20：上收 DD-02 已有 qc-source / pending-qc 只读拉数契约（路径/方法/关键字段）；调用方 qc-service，提供方 data-platform | Ellis Guo |
+| v1.9 | 2026-09-10 | 审阅 26/30～36：A5013 废弃；SSE content 仅 text；WS 对齐 `/api/v1/call/{session_id}`；探活仅 `/health`；抄入质检库列映射；`code==="0"` 才成功；分页禁止 size | Ellis Guo |
 
 ## 一、统一响应包
 
@@ -36,11 +38,16 @@
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| code | String | "0" 表示成功；非 "0" 为错误码（见第二节） |
+| code | String | **"0" 表示业务成功；非 "0" 一律业务失败**（见下强制句） |
 | message | String | 面向调用方的简短描述；成功为 `success`，失败为可读中文原因 |
 | data | Object/Array/null | 业务数据；失败时为 `null` |
 | trace_id | String | 全链路追踪 ID，格式 `trace_<ulid>`，由 gateway 生成并透传 |
 
+> **业务成败判定（强制）**：
+> - **`code === "0"` 才是业务成功**；
+> - **`code !== "0"` 一律业务失败**，即使 HTTP 200（如 A2003 等业务码走 200 封装时仍失败）；
+> - 客户端**禁止**仅用 HTTP 状态判断成功。
+>
 > 禁止自定义返回格式；禁止用 HTTP 状态码区分业务结果（成功与业务错误统一 200，系统异常 5xx，均封装为统一包）；文件下载返回二进制流（Content-Type 正确），WebSocket 遵循第五节。
 
 ### 1.2 成功响应示例
@@ -64,7 +71,7 @@
 ```json
 {
   "code": "A1001",
-  "message": "非工作时间禁止外呼",
+  "message": "当前不在外呼时段内",
   "data": null,
   "trace_id": "trace_01H8XK7P9M2Q3R4S5T6U7V8W9X"
 }
@@ -95,6 +102,7 @@
 ```
 
 - 分页参数：`page`（从 1 开始）、`page_size`（默认 20，最大 100）；
+- **禁止 `size` 别名**（立即废弃，无兼容回退、无日落缓冲）；
 - 禁止无条件全表查询，所有列表接口必须分页/limit。
 
 ## 二、错误码引用
@@ -109,7 +117,7 @@
 | A2 | qc-service（质检） | A2001~A2011 |
 | A3 | rag-service（知识库） | A3001~A3006 |
 | A4 | case-service（分案） | A4001~A4015 |
-| A5 | complaint-service（投诉） | A5001~A5014 |
+| A5 | complaint-service（投诉） | A5001~A5014（**A5013 废弃，勿用**；模式切换用 A5014） |
 | A6 | review-service（复盘） | A6001~A6015 |
 | A7 | data-platform（数据中台） | A7001~A7006 |
 | B | 系统级（通用） | B0001~B0010 |
@@ -134,9 +142,10 @@
 ### 3.1 路径规范
 
 - 复数名词小写，kebab-case：`/qc/records`、`/kb/documents`、`/call/campaigns`；
-- 版本前缀：`/api/v1/`；
+- 版本前缀：`/api/v1/`（业务 API **一律写全路径** `/api/v1/...`）；
 - 服务前缀由 gateway 路由，内部路径不含服务名；
-- 操作动词用 HTTP Method 表达：GET 查询、POST 创建、PUT 更新、DELETE 软删。
+- 操作动词用 HTTP Method 表达：GET 查询、POST 创建、PUT 更新、DELETE 软删；
+- **探活唯一契约：`GET /health`**（无 `/api/v1` 前缀，七服务相同）。禁止把 `/api/v1/health` 写成正式探活契约；实现层若残留该路径，不算接口规范。
 
 ### 3.2 RESTful 资源路径模板
 
@@ -161,6 +170,94 @@
 | complaint-service | 8006 | /api/v1/complaints/* |
 | review-service | 8007 | /api/v1/reviews/*, /api/v1/training/*, /api/v1/reports/* |
 
+### 3.4 M1 离线质检只读拉数（data-platform 提供，qc-service 调用）
+
+> HTTP 路径事实源：本节。业务规则（WAIT_TEXT、skip、字段映射、禁止 DP 回调 qc）仍以 **DD-02 §4.6 / §5.2** 为准。覆盖矩阵 G2 例外：M1 **允许**实现下列只读接口；其余 data-platform 能力仍无独立 DD、禁止越权。不新建 DD-07。
+
+**提供方**：data-platform:8001。**调用方**：qc-service（HTTP Client）。**禁止**：qc 调 call-service；**禁止** data-platform POST / 回调 qc。
+
+#### 3.4.1 GET `/api/v1/data/sessions/{session_id}/qc-source`
+
+`GET http://data-platform:8001/api/v1/data/sessions/{session_id}/qc-source`
+
+路径参数：`session_id` 必填。Header：`X-Trace-Id`。
+
+**turns 来源**：DP **JOIN** `public.call_records` + `public.dialog_turns`（必要时补案件快照、24h 拨打预聚合）。**不是**只读 `dw.ods_call_records`。`dialog_turns.speaker`：`ai`→`agent`；人工坐席话术同样映射为 `agent`；`user` 保持 `user`。
+
+成功 `data` 关键字段（与 DD-02 §4.6.1 同构，不发明新字段）：
+
+```json
+{
+  "text_ready": true,
+  "call_status": "completed",
+  "session_id": "sess_xxx",
+  "case_id": "case_xxx",
+  "call_id": "22222222-3333-4444-5555-666666666666",
+  "call_ended": true,
+  "agent_type": "ai",
+  "started_at": "2026-09-09T10:00:00+08:00",
+  "ended_at": "2026-09-09T10:08:00+08:00",
+  "duration_seconds": 480,
+  "result": "completed",
+  "debtor_name": "张三",
+  "turns": [
+    {"turn_id": "t1", "speaker": "agent", "text": "...", "turn_index": 1, "start_offset_ms": 5000}
+  ],
+  "case_snapshot": {
+    "due_amount": 3800.00,
+    "overdue_days": 32,
+    "ptp_amount": null,
+    "strategy_refs": [],
+    "standard_answer_hit": null
+  },
+  "dial_history_24h": {
+    "phone_masked": "138****0000",
+    "dial_count_24h": 2,
+    "window_start": "2026-09-08T10:00:00+08:00",
+    "window_end": "2026-09-09T10:00:00+08:00"
+  }
+}
+```
+
+`call_status` 必须为 `completed` 才允许开工。`text_ready=false` 或 `turns` 空或 `call_ended≠true` → qc **不跑检测**（A2003，Redis `WAIT_TEXT`，禁止 INSERT `qc_records`）。字段映射细则见 DD-02 §4.6.1。
+
+#### 3.4.2 GET `/api/v1/data/sessions:pending-qc`
+
+`GET http://data-platform:8001/api/v1/data/sessions:pending-qc?etl_date=2026-09-09&limit=100`
+
+供订阅 `etl.task.done` 后拉当日待质检会话。
+
+| Query | 类型 | 必填 | 约束 |
+| :--- | :--- | :--- | :--- |
+| etl_date | date | 否 | 默认当天（Asia/Shanghai） |
+| limit | int | 否 | 默认 100，最大 500 |
+
+成功 `data`：
+
+```json
+{
+  "etl_date": "2026-09-09",
+  "session_ids": ["sess_001", "sess_002"]
+}
+```
+
+qc 对每个 `session_id` 再调 §3.4.1。返回语义：已结束、文本齐、尚未质检（无 `qc_records` 或 `qc_status=PARTIAL` 且未 REVIEWED 可重跑）——细则 DD-02 §4.6.2。
+
+### 3.5 质检 HTTP / 事件字段与库列映射（抄自 DD-02 §4.0.1.1）
+
+> **保留双轨 + 强制映射**。step4/01 DDL 列名 **禁止**改名为 HTTP/事件用词（禁止把库列 `risk_level` 改名为 `risk`，禁止把 `compliance_score` 改名为 `score`）。
+
+| 库列（`qc_records` / 权威） | HTTP JSON / Query | 事件 payload（DD-02 §9.3 / step4/03） |
+| :--- | :--- | :--- |
+| `id` | `qc_record_id` | `qc_record_id` |
+| `compliance_score` | `compliance_score` | `score`（仅 `qc.check.completed`） |
+| `risk_level` | `risk`（含列表 Query `risk`） | `risk` |
+| `qc_result` | `qc_result` | **不**进 completed payload |
+| `qc_status` | `qc_status` | **不**进 completed payload |
+| `grade` | `grade` | `grade` |
+
+禁止事件 `score` 填 `session_id` 或用 `risk_level` 当 JSON 键。`call_id` 为 HTTP/事件字段，对应 `call_records.id`，**不是**库列改名。
+
 ## 四、SSE 流式协议
 
 ### 4.1 适用场景
@@ -176,7 +273,7 @@
 | 标识 | 事件类型 | 说明 | data 示例 |
 |---|---|---|---|
 | start | 分片开始 | 通知客户端流开始 | `{"session_id":"sess_xxx","trace_id":"trace_xxx"}` |
-| content | 内容分片 | 逐片段输出文本/JSON | `{"text":"您好"}` 或 `{"chunk":"..."}` |
+| content | 内容分片 | 逐片段输出文本/JSON | `{"text":"您好"}`（**唯一字段名 `text`**；禁止 `chunk`） |
 | end | 结束 | 通知客户端流结束 | `{"session_id":"sess_xxx","summary":"..."}` |
 | error | 异常终止 | 通知客户端流异常中断 | `{"code":"A1010","message":"置信度不足转人工"}` |
 
@@ -221,9 +318,11 @@ data: {"code":"A1007","message":"对话轮次超限熔断","trace_id":"trace_xxx
 
 | 场景 | 路径 | 说明 |
 |---|---|---|
-| 实时语音流 | /calls/{session_id}/stream | 双向音频流 + ASR/TTS |
-| 实时字幕 | /calls/{session_id}/captions | ASR 转写实时推送 |
-| 培训反馈 | /training/{session_id}/feedback | 培训代理 WS 队列 |
+| 实时语音流 | `/api/v1/call/{session_id}/stream` | 双向音频流 + ASR/TTS |
+| 实时字幕 | `/api/v1/call/{session_id}/captions` | ASR 转写实时推送 |
+| 培训反馈 | `/api/v1/training/{session_id}/feedback` | 培训代理 WS 队列 |
+
+> REST 外呼资源保持单数 `/api/v1/call/*`。WS 与 REST 资源名对齐，路径参数**只用 `session_id`**。禁止 `/calls/`，禁止 `{id}`。质检 **不**走 WS。`tts_chunk` 是 WS 音频分片**事件类型名**，不是 SSE content 字段。
 
 ### 5.2 连接规范
 

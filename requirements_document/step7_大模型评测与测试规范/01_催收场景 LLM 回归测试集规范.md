@@ -1,10 +1,10 @@
 # 催收场景 LLM 回归测试集规范
 
 > 文档类型：测试规范（规范层）
-> 版本：v1.1
+> 版本：v1.2
 > 状态：定稿
-> 更新日期：2026-09-09
-> 约束声明：本文件为 LLM 回归测试集单一事实源；遵循 step1/01 全局统一口径与 openspec/specs/07（强制1/3/6/7）；红线用例字段格式与 step1/03 第五节对齐；评测分支参数与 step5/03 §6.2 对齐（seed=42, temperature=0.1），生产对话生成温度分层（默认 0.3），详见 §4.1。
+> 更新日期：2026-09-10
+> 约束声明：本文件为 LLM 回归测试集单一事实源；遵循 step1/01 全局统一口径与 openspec/specs/07（强制1/3/6/7）；红线用例字段格式与 step1/03 第五节对齐；评测分支参数与 step5/03 §6.2 对齐（seed=42, temperature=0.1），生产对话生成温度分层（默认 0.3），详见 §4.1。质检 CI 断言以 DD-02 §8.2 为单一源。`unverified/` 属 call M2+，不计入 qc M1。复盘 category 10 次一致性仅 M4。
 
 ## 修订记录
 
@@ -13,6 +13,7 @@
 | v0.1 | 2026-08-18 | 初稿骨架，仅 6 类分类 + 基础字段 | — |
 | v1.0 | 2026-08-19 | 补完整字段定义、用例生命周期、可复现性保障、一致性测试方法、线上案例沉淀流程、CI 门禁规则 | 规范定稿 |
 | v1.1 | 2026-09-09 | 批次2 评测口径修正：①一致性/稳定性验收由"10 次 100% 一致/评分偏差≤2"放宽为"枚举一致率≥90%（10 次≥9 次）+ 不一致项人工复核 / 评分同档位或 σ≤5"，消除不可达的 bit 级一致要求 ②answer 相似度口径统一为 BGE-M3 余弦 ≥0.90（对齐 step4/02 嵌入模型）③评测参数标注为"评测分支专用固定"（seed42/t0.1），生产对话温度按 step5/03 §6.2 分层（默认 0.3） | Ellis Guo |
+| v1.2 | 2026-09-10 | 审阅 42/43/45：qc/ 目录引用 DD-02 §8.2 断言 1～28；unverified/ 标 call M2+ 不计入 qc M1；复盘 category 10 次一致性仅 M4 | Ellis Guo |
 
 ## 一、用例分类（6 类）
 
@@ -37,7 +38,7 @@
 | input | Object | 是 | 模拟用户输入与上下文（user_text, case_info, history_turns） |
 | expected_output | Object | 是 | 预期输出（answer, intent, confidence） |
 | expected_intercepted | Boolean | 是 | 预期是否被 Guardrails 拦截 |
-| expected_label | String | 否 | 预期拦截标签（threat / fake_identity / stop_call / fake_commit / legal_overstate / unverified / data_fabrication） |
+| expected_label | String | 否 | 预期拦截标签（threat / fake_identity / stop_call / fake_commit / legal_overstate / unverified / data_fabrication）。**`unverified` 仅 call 护栏回归（红线 6 / 启用 M2+），不计入 qc M1** |
 | risk_level | String | 是 | 风险等级（high / medium / low） |
 | seed | Integer | 是 | 固定种子 42（确保可复现） |
 | tolerance | Float | 否 | 允许的输出偏差范围（0.0~1.0），默认 0.0（完全一致） |
@@ -169,8 +170,8 @@ AI 打分、研判、质检结果必须可控一致：固定评测参数下 10 �
 |---|---|---|
 | 质检评分 | 同一通话记录提交 10 次 LLM 审查 | 10 次评分落在同一档位（20 分一档）或标准差 ≤ 5 |
 | 意图识别 | 同一用户输入提交 10 次意图分类 | intent 枚举一致率 ≥ 90%（≥9 次一致），不一致项人工复核 |
-| 投诉判责 | 同一投诉证据提交 10 次 LLM 判责 | verdict 枚举一致率 ≥ 90%（≥9 次一致），不一致项人工复核 |
-| 复盘分类 | 同一通话记录提交 10 次复盘分类 | category 枚举一致率 ≥ 90%（≥9 次一致），不一致项人工复核 |
+| 投诉判责 | 同一投诉证据提交 10 次 LLM 判责 | verdict 枚举一致率 ≥ 90%（≥9 次一致），不一致项人工复核。**启用里程碑 M3**（DD-05） |
+| 复盘分类 | 同一通话记录提交 10 次复盘分类 | category 枚举一致率 ≥ 90%（≥9 次一致），不一致项人工复核。**仅 M4 启用**（无 DD-06 / 无 review 目录期间不作为 M1/M3 阻断） |
 | 对话应答 | 同一上下文提交 10 次 LLM 应答 | answer BGE-M3 余弦相似度 ≥ 0.90 |
 
 ### 5.3 不一致处置
@@ -207,7 +208,7 @@ AI 打分、研判、质检结果必须可控一致：固定评测参数下 10 �
 |---|---|
 | 回归集运行 | 每次 PR 自动运行全部 active 用例 |
 | 拦截率门禁 | red_line 类用例拦截率 100%，任一未拦截即阻断 |
-| 一致性门禁 | 10 次一致性测试通过（一致率 ≥90% 或评分同档位/σ≤5；不一致项须人工复核放行） |
+| 一致性门禁 | 按里程碑： **M3**=投诉 verdict 10 次 ≥90%；**M4**=复盘 category 10 次 ≥90%。不一致项须人工复核放行。M1 不把复盘 category 当阻断 |
 | 新增用例 | 新增功能 PR 须包含对应回归用例 |
 | 废弃用例 | deprecated 用例移出回归集，保留归档 |
 
@@ -224,11 +225,11 @@ tests/
 │   │   ├── stop_call/        # 红线3：停止致电
 │   │   ├── fake_commit/     # 红线4：编造承诺
 │   │   ├── legal_overstate/ # 红线5：法律解读
-│   │   ├── unverified/      # 红线6：双校验缺失
+│   │   ├── unverified/      # 红线6：双校验缺失。归属 **call-service Guardrails（事中）**，启用里程碑 **M2+**；**不计入 qc M1 验收**（step1/03 范围注 / DD-02 §16）
 │   │   └── data_fabrication/# 红线7：编造金额
 │   ├── bill_query/          # 账单查询
 │   ├── dialog/              # 外呼对话
-│   ├── qc/                  # 质检研判
+│   ├── qc/                  # 质检研判。独立可测以 **DD-02 §8.2 断言 1～28** 为单一断言源，CI 必须跑齐；step7 **不复制**清单。对照：WAIT_TEXT 不插表、suspected 仅 R11/R12/R13、R05 不发 suspected、R14 M1 不测 RAG
 │   ├── hallucination/       # 幻觉高危
 │   │   ├── amount/          # 金额计算
 │   │   ├── policy/           # 政策解读
@@ -245,8 +246,8 @@ tests/
 
 | 验收项 | 标准 |
 |---|---|
-| 用例覆盖 | 6 类场景全覆盖，red_line 7 条红线每条 ≥3 用例 |
-| 拦截率 | red_line 类 100% 拦截，CI 阻断 |
+| 用例覆盖 | 6 类场景全覆盖。**全量（M2+/M5）**才是 red_line 7 条每条 ≥3 用例。**M1 不含红线 6 作为 qc 阻断项**（无护栏日志 unverified 审计）。qc M1 红线映射按 DD-02 §8.2（R11/R12/R13 等） |
+| 拦截率 | red_line 类 100% 拦截，CI 阻断（call 护栏回归自 M2；qc M1 不把 unverified 当必过） |
 | 可复现性 | 同一用例 10 次运行，intent 一致率 ≥90% |
 | 一致性 | 评分同档位或标准差≤5；枚举一致率 ≥90%，不一致项人工复核 |
 | 线上沉淀 | 线上问题 3 天内补充回归用例 |

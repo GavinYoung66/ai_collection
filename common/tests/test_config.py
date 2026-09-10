@@ -37,6 +37,7 @@ class TestSettings:
         assert s.MAX_DIALOG_TURNS == 15
         assert s.LLM_CONFIDENCE_THRESHOLD == 0.7
         # RAG_SCORE_THRESHOLD 已迁至 rag-service RagSettings
+        assert "QC_RESPONSE_TIMEOUT" not in Settings.model_fields
 
 
 class TestLogging:

@@ -1,10 +1,10 @@
 # 模块调用关系与流式 RTC 管道设计
 
 > 文档类型：架构设计（规范层）
-> 版本：v1.10
+> 版本：v1.12
 > 状态：定稿
-> 更新日期：2026-09-09
-> 约束声明：遵循 step1/01 全局统一口径与 openspec/specs/01、02；服务名/端口/响应包/trace_id 以 step1/01 为准。
+> 更新日期：2026-09-10
+> 约束声明：遵循 step1/01 全局统一口径与 openspec/specs/01、02；服务名/端口/响应包/trace_id 以 step1/01 为准。离线拉数路径与 step5/02 §3.4 / DD-02 同构；`qc.complaint.suspected` 条件与第 16 条 / DD-02 同构。业务 HTTP **一律** `/api/v1/...`；探活仅 `GET /health`。WS：`/api/v1/call/{session_id}/stream|captions`。
 
 ## 修订记录
 
@@ -20,28 +20,33 @@
 | v1.6 | 2026-09-09 | 续批次（批次2 残留收口）：§二跨模块调用矩阵 RAG score<0.6 补精排后最终融合分数口径回链（对齐 step4/02 §四.1）；§4.1 时序图“生成应答(temperature=0.1)”改为温度分层口径（生产默认 0.3/0.1~0.5，评测 0.1 仅离线，对齐 step5/03 §6.2） | Ellis Guo |
 | v1.9 | 2026-09-09 | 对齐 DD-02 V1.5：删除 call→qc 实时 ingest/WS；质检仅 ended 后离线 | Ellis Guo |
 | v1.10 | 2026-09-09 | §六 trace 贯穿链去实时质检（改 ASR→意图→LLM→Guardrails→TTS，质检为通话结束离线环节，以同 session_id/trace_id 串 qc_records）；§二 MCP call_qc 补 query_qc_alerts 调 qc-service 并澄清 query_call_asr/query_call_sessions 数据面属 call-service；§三 异步通知 channel 例 qc.alert.{agent_id} 改广播 qc.alert.raised（仅事后下发主管） | 规范复审 |
+| v1.11 | 2026-09-10 | 审阅 24：调用矩阵补 qc→DP qc-source/pending-qc；qc 发布 suspected/completed/alert；complaint 订阅 suspected/completed；禁止 qc 调 call、禁止 DP POST qc | Ellis Guo |
+| v1.12 | 2026-09-10 | 审阅 31/32：WS 改为 `/api/v1/call/{session_id}`；调用矩阵 `/kb/search`、`/data/features` 补 `/api/v1` 前缀 | Ellis Guo |
 
 ## 一、模块调用关系
 
 1. case-service 输出策略配置 → call-service；
-2. call-service 经 **HTTP** 调 **rag-service** `/kb/search` 检索话术（非 `common` 内嵌 RAG 库）；
+2. call-service 经 **HTTP** 调 **rag-service** `/api/v1/kb/search` 检索话术（非 `common` 内嵌 RAG 库）；
 3. call-service 会话结束发布 `call.session.ended`；qc-service **订阅后**拉取全文做离线质检（文本未齐则等待 `etl.task.done`）；同时事件喂入 review-service、data-platform；
 4. review-service 输出画像更新 → data-platform，反向供给 case-service；
-5. complaint-service 接收投诉/通话文本，输出研判结果落库 + 推送 data-platform。
+5. complaint-service 接收投诉/通话文本，输出研判结果落库 + 推送 data-platform；**订阅** `qc.complaint.suspected` / `qc.check.completed` 做异步补证，不反向 HTTP 调 qc。
 
-> 禁止反向强依赖：qc-service 不得直接调用 call-service；review-service 不得直接修改案件状态；跨模块通信走事件/中台接口。
+> 禁止反向强依赖：qc-service 不得直接调用 call-service；review-service 不得直接修改案件状态；跨模块通信走事件/中台接口。**禁止** data-platform POST qc。
 
 ## 二、跨模块调用矩阵
 
 | 调用方 | 被调方 | 方式 | 接口 | 说明 |
 |---|---|---|---|---|
-| call-service | rag-service | HTTP | /kb/search | 话术检索，score<0.6 走兜底（score 口径 = 混合检索经 bge-reranker 精排后的最终融合分数，见 step4/02 §四.1） |
-| call-service | qc-service | 事件（qc 订阅） | `call.session.ended`；qc 再 HTTP 拉 DP ODS | **无**通话中 HTTP/WS。全文齐后离线质检 |
+| call-service | rag-service | HTTP | /api/v1/kb/search | 话术检索，score<0.6 走兜底（score 口径 = 混合检索经 bge-reranker 精排后的最终融合分数，见 step4/02 §四.1；一期仅 Milvus 时取稠密召回归一化分） |
+| call-service | qc-service | 事件（qc 订阅） | `call.session.ended` | **无**通话中 HTTP/WS。qc 订阅后按 step5/02 §3.4 HTTP 拉 DP `qc-source`；全文齐后离线质检。**禁止 qc 调 call-service** |
 | call-service | data-platform | 事件 | 通话结束事件 | 喂入通话数据 |
+| qc-service | data-platform | HTTP | `GET /api/v1/data/sessions/{session_id}/qc-source`；`GET /api/v1/data/sessions:pending-qc` | 离线质检只读拉数（路径事实源 step5/02 §3.4；字段 DD-02）。**禁止** DP POST qc |
+| qc-service | Redis Pub/Sub | 事件（发布） | `qc.complaint.suspected`；`qc.check.completed`；`qc.alert.raised` | payload 与 step4/03 / DD-02 §9.3 同构。suspected **仅当** agent+high+`rule_id∈{R11,R12,R13}`（第 16 条） |
 | qc-service | rag-service | HTTP | /api/v1/sensitive-words/current.dict | 加载敏感词库（AC 自动机字典下载） |
-| case-service | data-platform | HTTP | /data/features/{case_id} | 取用户特征 |
-| complaint-service | rag_kb（MCP）→ rag-service | MCP（内部可 HTTP） | rag_kb.search_regulations 等 | Agent 取证/合规知识；节点不直连 rag HTTP；MCP Server 可再调 /kb/* |
-| complaint-service | call_qc（MCP）→ qc-service / call-service | MCP（内部可 HTTP） | `query_qc_violations`、`query_qc_alerts(case_id, session_id)`（可选）调 qc-service；`query_call_asr` / `query_call_sessions` 数据面由 **call-service** 提供（qc 不落 ASR、不实现这两个 tool 的数据面，避免归属歧义） | Agent 取证；节点不直连下游 HTTP |
+| case-service | data-platform | HTTP | /api/v1/data/features/{case_id} | 取用户特征 |
+| complaint-service | rag_kb（MCP）→ rag-service | MCP（内部可 HTTP） | rag_kb.search_regulations 等 | Agent 取证/合规知识；节点不直连 rag HTTP；MCP Server 可再调 /api/v1/kb/* |
+| complaint-service | call_qc（MCP）→ qc-service / call-service | MCP（内部可 HTTP） | `query_qc_violations`、`query_qc_alerts(case_id, session_id)`（可选）调 qc-service；`query_call_asr` / `query_call_sessions` 数据面由 **call-service** 提供（qc 不落 ASR、不实现这两个 tool 的数据面，避免归属歧义）。M3 允许 Mock | Agent 取证；节点不直连下游 HTTP |
+| complaint-service | Redis Pub/Sub | 事件（订阅） | `qc.complaint.suspected`；`qc.check.completed` | 异步补证，**不**反向 HTTP 调 qc。payload 抄 step4/03 / DD-02：suspected `{qc_record_id, session_id, case_id, redline_tags[], trace_id, ts}`；completed `{qc_record_id, session_id, call_id, case_id, score, risk, grade, trace_id, ts}`（`call_id` 可 JSON null） |
 | review-service | data-platform | HTTP | /reports/*、宽表 | 复盘与画像 |
 | data-platform | 业务库 | LISTEN-NOTIFY | — | 消费业务库变更 |
 
@@ -54,7 +59,7 @@
 | 前端 ↔ 网关 ↔ 服务 | HTTP/JSON | 统一响应包 `{"code":"0","message","data","trace_id"}`，详见 step5/02 |
 | 服务间同步调用（管理面/CRUD） | HTTP/JSON（内部网络） | 5s 超时 + 3 次指数退避（1s/2s/4s） |
 | Agent / 工作流工具取证 | MCP | LangGraph 等节点经 MCP Client 调 tool；Server 可内部再 HTTP 调下游服务 |
-| 实时语音流 / 实时字幕 | WebSocket | /calls/{id}/stream、/calls/{id}/captions（**不含**质检） |
+| 实时语音流 / 实时字幕 | WebSocket | `/api/v1/call/{session_id}/stream`、`/api/v1/call/{session_id}/captions`（**不含**质检；禁止 `/calls/`、禁止 `{id}`） |
 | 异步跨服务通知 | 事件（Redis Pub-Sub / 等价） | 如通话结束、质检完成；channel 例 `qc.alert.raised`（广播订阅，告警仅事后下发主管，非通话页/按 agent 定向推送） |
 | 数据同步触发 | PostgreSQL LISTEN-NOTIFY | 监听 call_records/dialog_turns 变更 |
 | 离线任务调度 | APScheduler（进程内） | 定时 + 事件驱动 |

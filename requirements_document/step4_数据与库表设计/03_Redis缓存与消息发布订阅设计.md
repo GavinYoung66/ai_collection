@@ -1,10 +1,10 @@
 # Redis 缓存与消息发布订阅设计
 
 > 文档类型：数据设计（规范层）
-> 版本：v1.10
+> 版本：v1.12
 > 状态：定稿
-> 更新日期：2026-09-09
-> 约束声明：本文件为 Redis 缓存与 Pub-Sub 单一事实源；遵循 step1/01 全局口径与 openspec/specs/03、06；Redis 7（redis:7-alpine，端口 6379）；7 服务按 DB 0-7 隔离；demand/ 旧文档仅作参考。
+> 更新日期：2026-09-10
+> 约束声明：本文件为 Redis 缓存与 Pub-Sub 单一事实源；遵循 step1/01 全局口径与 openspec/specs/03、06；Redis 7（redis:7-alpine，端口 6379）；7 服务按 DB 0-7 隔离；demand/ 旧文档仅作参考。词库热刷新 60s；`rag.words.stale` 时钟见 step6/02。
 
 ## 修订记录
 
@@ -20,6 +20,8 @@
 | v1.8 | 2026-09-09 | §3.3 qc:llm_degraded TTL 注释「永不过期」改 SET/DEL 自管理（熔断 OPEN 时 SET，60s 后半开探测成功 DEL，无固定 EXPIRE，对齐 DD-02 §6.2 熔断状态机）；§9.2 频道归属补 system.* 全局告警频道豁免（允许各服务异常处理器含 qc 发布） | 规范复审 |
 | v1.9 | 2026-09-09 | 对齐 DD-02 V1.9：`qc.complaint.suspected` 追加 `qc_record_id`（投诉 SETNX 幂等）；发布条件改为 rule_id∈{R11,R12,R13}（agent+high），`redline_tags[]` 仅审计；`qc.review.done.sample_type`∈{positive,negative,corrected}；`call_id` 无则 JSON null | Ellis Guo |
 | v1.10 | 2026-09-09 | `qc:job:{session_id}` JSON 增订 `skipped_rules[]` + `qc_record_id`（对齐 DD-02 V1.11，不加 qc_records 列） | Ellis Guo |
+| v1.11 | 2026-09-10 | 投诉事件 `ticket_id`→`complaint_id`；Redis 键 `csmp:complaint:{id}:*`（id=complaint_id）；补 `csmp:session:{judgment_session_id}` | Ellis Guo |
+| v1.12 | 2026-09-10 | 审阅 40：词库热刷新 60s 句加「stale 时钟见 step6/02」（不改 key、不改 60s/2h） | Ellis Guo |
 
 ## 一、Redis 实例与 DB 分配
 
@@ -146,11 +148,12 @@
 
 | Key | 结构 | TTL | 用途 |
 |---|---|---|---|
-| `csmp:ticket:{id}:pkg` | STRING（JSON） | 24h | 取证包缓存 |
-| `csmp:verdict:{id}:latest` | STRING（JSON） | 24h | 最新判责缓存 |
-| `csmp:rslv:{id}:latest` | STRING（JSON） | 24h | 处置方案缓存 |
+| `csmp:session:{judgment_session_id}` | STRING（JSON） | 24h | LangGraph State 缓存。键为研判会话，≠ 通话 session_id |
+| `csmp:complaint:{id}:pkg` | STRING（JSON） | 24h | 取证包缓存。`{id}`=`complaint_id` |
+| `csmp:verdict:{id}:latest` | STRING（JSON） | 24h | 最新判责缓存。`{id}`=`complaint_id` |
+| `csmp:rslv:{id}:latest` | STRING（JSON） | 24h | 处置方案缓存。`{id}`=`complaint_id` |
 | `csmp:hotspots:{start}:{end}` | STRING（JSON） | 6h | 统计热点缓存 |
-| `csmp:gather:lock:{id}` | STRING | 60s | 取证幂等锁（SET NX EX） |
+| `csmp:gather:lock:{id}` | STRING | 60s | 取证幂等锁（SET NX EX）。`{id}`=`complaint_id` |
 | `csmp:llm_degraded` | STRING（"1"） | 永不过期 | LLM 熔断标识，1=熔断中 |
 
 ### 3.7 review-service（DB 7）
@@ -180,7 +183,7 @@
 
 | 频道 | 发布者 | Payload | 订阅者 | 目的 |
 |---|---|---|---|---|
-| `kb.sensitive_updated` | rag-service | `{version, trace_id, ts}` | qc-service / complaint-service / review-service | 词库热刷新，60s 内生效 |
+| `kb.sensitive_updated` | rag-service | `{version, trace_id, ts}` | qc-service / complaint-service / review-service | 词库热刷新，60s 内生效（stale 时钟见 step6/02） |
 | `kb.version.switched` | rag-service | `{doc_id, old_version, new_version, trace_id, ts}` | rag-service 内部 | 检索版本切换 |
 | `etl.task.done` | data-platform | `{run_id, stage, backfill_date?, trace_id, ts}` | qc-service / case-service / review-service | 触发补检/重打分/批量复盘 |
 | `strategy.updated` | data-platform | `{version, strategy_type, trace_id, ts}` | call-service / case-service / qc-service | 策略版本热更新 |
@@ -196,8 +199,8 @@
 | `case.reassigned` | case-service | `{assignment_id, case_id, action, needs_review, trace_id, ts}` | 前端 / data-platform | 运营通知 / 宽表 |
 | `case.risk.upgraded` | case-service | `{case_id, from_level, to_level, trace_id, ts}` | call-service / review-service | 转人工/安抚 / 风险复盘 |
 | `case.service.degraded` | case-service | `{reason, trace_id, ts}` | 告警系统 | DP 熔断后降级通知 |
-| `complaint.judged` | complaint-service | `{ticket_id, verdict, confidence, case_id, trace_id, ts}` | review-service / case-service / data-platform | 复盘投诉 / 升级 / 宽表 |
-| `complaint.closed` | complaint-service | `{ticket_id, resolution_version, trace_id, ts}` | data-platform / review-service | 宽表 / 报告合并 |
+| `complaint.judged` | complaint-service | `{complaint_id, verdict, confidence, case_id, trace_id, ts}` | review-service / case-service / data-platform | 复盘投诉 / 升级 / 宽表。禁止 ticket_id |
+| `complaint.closed` | complaint-service | `{complaint_id, resolution_version, trace_id, ts}` | data-platform / review-service | 宽表 / 报告合并 |
 | `complaint.insight.weekly` | complaint-service | `{week_start, summary, trace_id, ts}` | review-service / rag-service | 周报合并 / 整改文档归档 |
 | `review.scored` | review-service | `{review_id, call_id, category, score, trace_id, ts}` | complaint-service / case-service / rag-service / data-platform | 证据更新 / 二次分案 / 话术关联 / 宽表 |
 | `review.scored.batch` | review-service | `{run_id, total, counts[], trace_id, ts}` | data-platform | DWS 构建 |
@@ -259,7 +262,7 @@
 
 1. **DB 为权威源**：所有缓存数据以 PostgreSQL 为准，Redis 仅作加速层；缓存未命中时回源 DB 查询并回填；
 2. **先写 DB 后 DEL 缓存**：更新操作先落 PostgreSQL，成功后 DEL Redis key（Cache-Aside 模式），禁止先 DEL 后写 DB（防并发回填脏数据）；
-3. **词库热刷新**：rag-service 更新 sensitive_words 后，DEL `rag:sensitive_words:version` → INCR 版本号 → PUBLISH `kb.sensitive_updated`；qc-service 订阅后 60s 内拉取 `/api/v1/sensitive-words/current.dict` 重建 AC 自动机；
+3. **词库热刷新**：rag-service 更新 sensitive_words 后，DEL `rag:sensitive_words:version` → INCR 版本号 → PUBLISH `kb.sensitive_updated`；qc-service 订阅后 60s 内拉取 `/api/v1/sensitive-words/current.dict` 重建 AC 自动机；stale 时钟见 step6/02；
 4. **规则热切换**：qc-service 更新 qc_rules 后，DEL `qc:rules:active` → 下次读取时从 DB 回填新版本；
 5. **策略版本变更**：data-platform 更新 strategy_versions 后，PUBLISH `strategy.updated` → 各服务订阅后刷新本地策略缓存。
 
@@ -369,7 +372,7 @@ REDIS_SOCKET_CONNECT_TIMEOUT=2
 |---|---|
 | 禁止明文缓存 PII | 手机号、身份证号、姓名禁止直接写入 Redis key 或 value；须先经 mask.py 脱敏（打码/哈希） |
 | 禁止缓存加密密钥 | AES-256-GCM 密钥经 docker secrets 注入，禁止入 Redis |
-| 取证包缓存脱敏 | `csmp:ticket:{id}:pkg` 中的证据片段须脱敏后缓存，原始内容仅在 PostgreSQL |
+| 取证包缓存脱敏 | `csmp:complaint:{id}:pkg` 中的证据片段须脱敏后缓存，原始内容仅在 PostgreSQL |
 
 ### 9.2 访问控制
 

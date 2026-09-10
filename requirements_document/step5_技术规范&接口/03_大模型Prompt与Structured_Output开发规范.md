@@ -1,10 +1,10 @@
 # 大模型 Prompt 与 Structured Output 开发规范
 
 > 文档类型：技术规范（规范层）
-> 版本：v1.5
+> 版本：v1.7
 > 状态：定稿
-> 更新日期：2026-09-09
-> 约束声明：本文件为 LLM Prompt 编写与结构化输出单一事实源；遵循 step1/01 全局统一口径与 openspec/specs/05、04；LLM 调用统一经 common/llm/provider.py，业务层不得绕过；推理参数按场景分层（评测分支 temperature=0.1/top_p=0.9/seed=42 固定；生产对话生成 temperature 默认 0.3、范围 0.1~0.5 可配置），禁止业务层硬编码覆盖（见 §6.2）。
+> 更新日期：2026-09-10
+> 约束声明：本文件为 LLM Prompt 编写与结构化输出单一事实源；遵循 step1/01 全局统一口径与 openspec/specs/05、04；LLM 调用统一经 common/llm/provider.py，业务层不得绕过；推理参数按场景分层（评测分支 temperature=0.1/top_p=0.9/seed=42 固定；生产对话生成 temperature 默认 0.3、范围 0.1~0.5 可配置），禁止业务层硬编码覆盖（见 §6.2）。全局 LLM 默认超时 5s；投诉/复盘例外见 step6/01 §4.2。投诉判责 P95 见 DD-05 §8.5。
 
 ## 修订记录
 
@@ -16,6 +16,8 @@
 | v1.2 | 2026-09-09 | P1-16 §8.2 敏感词端点统一 /sensitive-words/current.dict → /api/v1/sensitive-words/current.dict（决策A执行） | Ellis Guo |
 | v1.3 | 2026-09-09 | P1-18 §7.3 兜底话术来源改为双层：rag-service 标准答案库为热更新主源 + common/llm/prompts/fallback_scripts.yml 为只读灾难快照（随版本发布、禁止日常编辑）；§7.2 代码注释同步修正（决策A执行） | Ellis Guo |
 | v1.5 | 2026-09-09 | 对齐 DD-02 V1.4：§3.4 增 grade / qc_status / redline_tag；§3.3 登记 qc-service LLMReviewer 置信度门控豁免 | Ellis Guo |
+| v1.6 | 2026-09-10 | 审阅 28/29：超时 5s 旁注投诉/复盘例外（step6/01 §4.2）；熔断 P95 投诉判责指向 DD-05 §8.5 | Ellis Guo |
+| v1.7 | 2026-09-10 | 审阅 53/54：`redline_tag` 区分七条红线 tag 与 qc 附加 `privacy_leak`；`overall_compliance` 与 `qc_result` 禁止混用 | Ellis Guo |
 
 ## 一、Prompt 配置化管理
 
@@ -145,15 +147,24 @@ Pydantic Schema 校验（必填字段 + 类型 + 枚举 + 长度）
 | 场景 | 枚举字段 | 枚举值 |
 |---|---|---|
 | 对话意图 | intent | willing_to_pay / extension_request / financial_difficulty / stalling / rejection / anger / complaint / uncertain |
-| 质检结果 | qc_result | compliant / violation / pending_review |
+| 质检结果 | qc_result | compliant / violation / pending_review（**禁止** `partial_violation`） |
 | 合规档位 | grade | EXCELLENT / PASS / WARNING / SERIOUS |
 | 质检状态 | qc_status | DONE / PENDING_REVIEW / REVIEWED / PARTIAL |
-| 红线标签 | redline_tag | threat / fake_identity / stop_call / fake_commit / legal_overstate / unverified / data_fabrication / privacy_leak |
+| 七条红线 tag | redline_tag | threat / fake_identity / stop_call / fake_commit / legal_overstate / unverified / data_fabrication |
+| qc 附加 tag | redline_tag | **privacy_leak**（仅质检 R01/R04；**不是**总览红线 8，禁止升格） |
 | 风险等级 | risk_level | low / medium / high |
 | 案件账龄 | account_stage | M0 / M1 / M2 / M3 |
 | 案件状态 | case_status | pending / processing / paid / bad_debt / lost |
 | 投诉判责 | verdict | agent_violation / user_misunderstanding / compliant_but_poor_experience / pending |
+| 投诉合规意见 | overall_compliance | compliant / **partial_violation** / violation（**仅**投诉 `ComplianceOpinion`；禁止写入质检 `qc_result`） |
 | 复盘分类 | category | good / bad / violation / ineffective |
+
+> **`overall_compliance` vs `qc_result`（禁止混用）**
+
+| 字段 | 所属 | 枚举 | 禁止 |
+|---|---|---|---|
+| `qc_result` | 质检 `qc_records` | `compliant` \| `violation` \| `pending_review` | **不要**写入 `partial_violation` |
+| `overall_compliance` | 投诉 `ComplianceOpinion` | `compliant` \| `partial_violation` \| `violation` | **不要**当作质检 `qc_result` |
 
 ## 四、CoT 剥离与加密
 
@@ -204,7 +215,7 @@ class LLMProvider:
         统一 LLM 调用入口：
         1. 组装推理参数（按场景分层：评测分支 temperature=0.1/top_p=0.9/seed=42；生产对话 temperature=0.3 默认可配置，见 §6.2）
         2. 强制 response_format=json_object
-        3. 5s 超时 + 3 次指数退避
+        3. 5s 超时 + 3 次指数退避（全局默认；投诉/复盘例外见 step6/01 §4.2）
         4. JSON 解析 + Pydantic 校验
         5. 置信度门控
         6. 敏感词后置校验
@@ -228,7 +239,7 @@ class LLMProvider:
 
 | 参数 | 值 |
 |---|---|
-| 超时 | 5s |
+| 超时 | 5s（全局默认；投诉/复盘例外见 step6/01 §4.2） |
 | 重试次数 | 3 次 |
 | 退避策略 | 指数退避 1s / 2s / 4s |
 | 重试条件 | 超时、网络异常、JSON 解析失败、Pydantic 校验失败 |
@@ -238,7 +249,7 @@ class LLMProvider:
 
 | 参数 | 值 | 说明 |
 |---|---|---|
-| 熔断器 | pybreaker | 连续 3 次失败或 P95 > 800ms 触发 |
+| 熔断器 | pybreaker | 连续 3 次失败触发；P95 按模型分层（外呼/质检/复盘及 qwen-plus/turbo：P95>800ms）。投诉 deepseek-r1 见 DD-05 §8.5（P95>15s），禁止一刀切 800ms |
 | 熔断窗口 | 窗口期内停止 LLM 调用 | 走 RuleBasedScriptEngine 固定兜底 |
 | 恢复 | 60s 后半开探测 | 恢复后重试 LLM 调用 |
 | 标识 | `{service}:llm_degraded` = "1" | Redis 标识，见 step4/03 |

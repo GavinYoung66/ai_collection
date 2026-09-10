@@ -1,9 +1,9 @@
 # 整体技术架构（含大模型 Guardrails 防护栏）
 
 > 文档类型：架构设计（规范层）
-> 版本：v1.8
+> 版本：v1.9
 > 状态：定稿
-> 更新日期：2026-09-09
+> 更新日期：2026-09-10
 > 约束声明：遵循 step1/01 全局统一口径与 openspec/specs/01 架构强制规范；服务名/端口/里程碑以 step1/01 为准；demand/ 仅作历史参考。
 
 ## 修订记录
@@ -19,6 +19,7 @@
 | v1.5 | 2026-09-09 | 批次4（D3-1/D3-2/D3-5 架构级一致性）：§3.2 qc-service 告警通道标注含 audit_logs + Redis Stream 持久化队列（对齐 step6/02 §3.1/§3.2）；§五 公共能力层补 reliability 多副本熔断共享 Redis `{service}:llm_degraded` 源（对齐 step6/01 §5.1）；§5.1 容量口径表注明确 MVP/Demo 口径、非生产容量 | Ellis Guo |
 | v1.7 | 2026-09-09 | 对齐 DD-02 V1.5：删质检告警 ≤3s；call→qc 改为通话结束后离线；核心模块 qc-realtime→qc-offline | Ellis Guo |
 | v1.8 | 2026-09-09 | §七容器依赖表 qc-service 依赖补 data-platform(8001)（qc 订阅 call.session.ended 后需主动 HTTP 拉 DP ODS 全文，对齐 DD-02 §8.1 依赖表） | 规范复审 |
+| v1.9 | 2026-09-10 | 审阅 50：目录树规范层路径 `标准工程目录结构/` → `requirements_document/` | Ellis Guo |
 
 ## 一、设计原则
 
@@ -219,7 +220,7 @@ ai_collection/
 ├── migrations/              # Alembic 迁移脚本
 ├── scripts/                # smoke 脚本、seed 数据、敏感词初始化
 ├── docs/                   # 设计文档归档
-├── 标准工程目录结构/        # 规范层（step1~step8）
+├── requirements_document/   # 规范层（step1~step7）
 ├── openspec/                # 宪法层（specs）
 └── demand/                  # 历史参考（只读，不参与运行）
 ```

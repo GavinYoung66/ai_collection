@@ -1,12 +1,13 @@
 # DD-05 V2：投诉异议智能研判系统（第二版增量需求）
 
 > 文档类型：需求 PRD（增量 / 薄规格）  
-> 版本：v1.0  
+> 版本：v1.2  
 > 状态：定稿（个人本地项目）  
-> 日期：2026-09-07  
+> 日期：2026-09-10  
 > 负责人：Ellis Guo  
 > 基线：对齐 `DD-05-COMPLAINT-JUDGMENT.md`（V1 已落地）+ 本地已验证闭环（create → `run_graph=true` → review → close）  
-> 约束：本文件只描述 **V2 增量**；不重复 V1 全量架构。V1 仍是运行时骨架（LangGraph + MCP Client + API）。
+> 约束：本文件只描述 **V2 增量**；不重复 V1 全量架构。V1 仍是运行时骨架（LangGraph + MCP Client + API）。  
+> **覆盖矩阵 M3.5 = 本文**（假数据增强 + 真 LLM + 人审前端；继续 Mock MCP）。**M3.5 ≠ DD-05 灰度双模 / PromptOps**（灰度属 M3 P1）。V2 不改 V1 表结构，不把 V2 写成 M3 全量。
 
 ---
 
@@ -28,11 +29,12 @@ V1（M3）已完成服务骨架、多 Agent 图编排、Mock MCP/LLM、API、部
 
 ### 1.3 非目标（本版明确不做）
 
-- 不接真实业务工单 / 通话质检 / 数据中台 MCP Server（继续 Mock）。  
+- 不接真实业务工单 / 通话质检 / 数据中台 MCP Server（**继续 Mock MCP**）。与 DD-05 V1 同构：**M3 验收 MCP Mock 可过**；不把真 call-service 列为 M3/M3.5 上线阻塞项。ASR/会话主数据仍归属 call-service，qc 只提供违规查询；实现路径可以是 complaint → call-qc MCP → **Mock**。Mock 退出标准：call-service 有 DD 且覆盖矩阵允许 M2 开工后，用真数据面替换 Mock；此前 Mock 为正式验收路径。  
 - 不接真实 RAG 生产知识库（可用 Mock 法规/模板 fixture 增强）。  
 - 不做复杂运营后台、权限体系、批量复核工作台。  
 - 不重做 V1 LangGraph 拓扑（除非接真 LLM 后发现阻塞性 bug）。  
-- 不要求图内 `interrupt` 与前端完全打通 resume（V2 允许继续走 API `PUT /review` 状态机；若顺手可增强，但不阻塞验收）。
+- 不要求图内 `interrupt` 与前端完全打通 resume（V2 允许继续走 API `PUT /review` 状态机）。形态/增减/`interrupt` 增强均为 **非验收项**；验收 **仅** REQ-CJ-V2-001～004。  
+- **不是** DD-05 的灰度双模 / PromptOps（那是 M3 P1）。
 
 ---
 
@@ -65,7 +67,7 @@ V1（M3）已完成服务骨架、多 Agent 图编排、Mock MCP/LLM、API、部
   - 业务工单：`query_case_info` 等关键 tool；
   - 通话质检：ASR / 违规片段（至少 1 条「疑似违规」场景）；
   - RAG：法规与答辩模板非空结果。  
-- 场景建议（可增减，但不少于 3 类）：
+- 场景建议（可增减，**增减非验收项**；验收不少于 3 类即可）：
   1. 坐席话术/态度恶劣（偏 `agent_violation`）；
   2. 用户误解计息/规则（偏 `user_misunderstanding`）；
   3. 流程合规但体验差（偏 `compliant_but_poor_experience`）。  
@@ -101,7 +103,7 @@ V1（M3）已完成服务骨架、多 Agent 图编排、Mock MCP/LLM、API、部
   3. **复核**：至少支持 `approve`；建议支持 `reject_rejudge` / `escalate`（六动作可分阶段，P0 至少 approve + 一种驳回或升级）；  
   4. **关单**：`resolved` 后可 close。  
 - 调用现有后端：`/api/v1/complaints*`（8006）。  
-- 实现形态不限：独立静态页 / 轻量 React/Vue / Gradio 均可，优先**改动小、本地好启动**。  
+- 实现形态不限（独立静态页 / 轻量 React/Vue / Gradio 均可）：**形态非验收项**；验收只测列表→详情→approve→close 主路径。优先改动小、本地好启动。  
 - 仅本地使用即可，不做复杂登录（可后续加）。
 
 **验收**
@@ -132,6 +134,8 @@ V1（M3）已完成服务骨架、多 Agent 图编排、Mock MCP/LLM、API、部
 
 ## 5. 验收总标准（V2 Done）
 
+验收 **仅** REQ-CJ-V2-001～004。场景增减、实现形态、`interrupt` 打通均为 **非验收项**。
+
 同时满足：
 
 1. 至少 3 条种子场景可一键或文档步骤创建；  
@@ -158,3 +162,5 @@ V1（M3）已完成服务骨架、多 Agent 图编排、Mock MCP/LLM、API、部
 | 版本 | 日期 | 说明 | 作者 |
 |------|------|------|------|
 | v1.0 | 2026-09-07 | 新建 V2 增量需求：假数据 + 真 LLM + 人审前端 | Ellis Guo |
+| v1.1 | 2026-09-10 | 审阅 19/21：文首写明覆盖矩阵 M3.5=本文，≠ DD-05 灰度；非目标与 V1 同构（M3/M3.5 Mock MCP 可过验） | Ellis Guo |
+| v1.2 | 2026-09-10 | 审阅 51：验收仅 REQ-CJ-V2-001～004；形态/增减/`interrupt` 增强标非验收项 | Ellis Guo |

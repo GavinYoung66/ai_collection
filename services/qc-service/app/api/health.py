@@ -1,4 +1,4 @@
-"""健康检查路由。"""
+"""健康检查：仅服务根 GET /health（不在 /api/v1 下）。"""
 from fastapi import APIRouter
 
 router = APIRouter(tags=["health"])

@@ -1,10 +1,10 @@
 # 催收合规拦截与安全护栏 Guardrails 规范
 
 > 文档类型：技术规范（规范层）
-> 版本：v1.4
+> 版本：v1.8
 > 状态：定稿
-> 更新日期：2026-09-09
-> 约束声明：本文件为 Guardrails 合规拦截单一事实源；遵循 step1/01 全局统一口径与 openspec/specs/00（红线）、04（护栏）；红线本体以 openspec/specs/00_biz_redline.md（S0·全局最高）为唯一源；兜底话术统一在 rag-service 知识库维护，禁止硬编码。
+> 更新日期：2026-09-10
+> 约束声明：本文件为 Guardrails 合规拦截单一事实源；遵循 step1/01 全局统一口径与 openspec/specs/00（红线）、04（护栏）；红线本体以 openspec/specs/00_biz_redline.md（S0·全局最高）为唯一源；兜底话术统一在 rag-service 知识库维护，禁止硬编码。事中双校验归 call-service；qc M1 不跑 L4/L5（step1/03 红线 6 范围注）。`stop_call_status` 仅 5 值。错误码：时段=A1001；停呼=B0010；日限=A1009；重试超限失联=A1004（对齐 step6/01）。词库热刷新 60s；stale 时钟见 step6/02。
 
 ## 修订记录
 
@@ -15,6 +15,10 @@
 | v1.1 | 2026-09-09 | P1-15 §七停止致电标记落库改为引用 cases.stop_call_status 字段（含 5 值枚举 + audit_logs 留痕），消除"case_status 或专用标记"歧义（决策A执行） | Ellis Guo |
 | v1.2 | 2026-09-09 | P1-16 §4.3 敏感词端点统一 /sensitive-words/current.dict → /api/v1/sensitive-words/current.dict（决策A执行） | Ellis Guo |
 | v1.4 | 2026-09-09 | 对齐 DD-02 V1.5：L5 事中告警改 system.alert.raised；禁止 qc.alert.raised；追溯链去掉「LLM→质检→TTS」 | Ellis Guo |
+| v1.5 | 2026-09-10 | dialog_turns.speaker 指向 step4/01 映射（ai→agent） | Ellis Guo |
+| v1.6 | 2026-09-10 | 审阅 22/23：红线 6 / 双校验覆盖注明属 call-service 事中，qc M1 不强制双护栏；停止致电中文「外呼拦截/人工复核」不是 `stop_call_status` 枚举（对照 step1/03） | Ellis Guo |
+| v1.7 | 2026-09-10 | 审阅 27：停止致电改挂 B0010；L1 日限改 A1009；A1001 仅非工作时段 | Ellis Guo |
+| v1.8 | 2026-09-10 | 审阅 40：词库热刷新 60s 句加「stale 时钟见 step6/02」 | Ellis Guo |
 
 ## 一、合规红线（与 openspec/specs/00 逐条对齐，S0）
 
@@ -28,6 +32,8 @@
 | 4 | 减免、延期、免息、分期政策只允许读取后台配置，AI 禁止编造/承诺 | fake_commit |
 | 5 | 逾期规则、征信影响、法律后果只允许调取标准答案库，禁止自由解读 | legal_overstate |
 | 6 | 所有对话输出必须经前置 + 后置双合规校验，拦截不通过直接返回兜底 | unverified |
+
+> **红线 6 范围（对齐 step1/03）**：事中前置+后置双校验归 **call-service**（本文 L2/L4/L5）。**不**要求 qc-service M1 跑 L4/L5，**不**做 R14 RAG / 护栏放行日志审计。
 | 7 | 欠款金额、逾期天数、账单记录只允许来源于数据库，禁止 AI 编造/篡改 | data_fabrication |
 
 ## 二、五层护栏架构
@@ -42,7 +48,7 @@
 │ · 停止致电标记校验                                 │
 │ · 同用户每日上限校验（≤3次）                       │
 │ · 并发上限校验（≤50路）                            │
-│ 不通过 → A1001/A1004/A1012 拦截                   │
+│ 不通过 → A1001（时段）/ B0010（停呼）/ A1009（日限）/ A1012（并发） │
 └─────────────────────────────────────────────────┘
   │ 通过
   ▼
@@ -93,7 +99,7 @@
 | 校验项 | 实现方式 | 命中处理 | 错误码 |
 |---|---|---|---|
 | 客户输入敏感词 | AC 自动机扫描 | 返回合规话术引导 | — |
-| 停止致电意图 | 意图识别 + 关键词匹配 | 终止通话 + 写停止标记 | A1001 |
+| 停止致电意图 | 意图识别 + 关键词匹配 | 终止通话 + 写停止标记 | B0010 |
 | 投诉意图 | 意图识别 | 降强度 + 转人工 | — |
 | Prompt 数据脱敏 | mask.py 过滤手机号/身份证/金额 | 脱敏后送入 LLM | — |
 
@@ -141,7 +147,7 @@
 
 - 词库由 rag-service 维护（`sensitive_words` 表），三分类 + severity 等级；
 - qc-service 启动时拉取 + 每小时增量拉取；
-- 词库变更通过 Redis Pub-Sub `kb.sensitive_updated` 通知，60s 内热刷新；
+- 词库变更通过 Redis Pub-Sub `kb.sensitive_updated` 通知，60s 内热刷新（stale 时钟见 step6/02）；
 - 命中即返回 B0010 拦截，违规内容不向下游传递。
 
 ### 4.3 调用方式
@@ -172,7 +178,7 @@ class SensitiveWordFilter:
 |---|---|---|---|---|---|
 | 暴力/威胁/骚扰 | 红线1 | 立即转人工 + 结束通话 | "为了更好地为您服务，正在为您转接专属顾问" | B0010 | 高危告警 `system.alert.raised`（call 事中；`qc.alert.raised` 仅事后质检） |
 | 伪造身份 | 红线2 | 替换为标准答案库内容 | "我是XX平台的智能助手" | B0010 | 中危告警 |
-| 停止致电 | 红线3 | 终止外呼 + 写停止标记 | "好的，您的要求我们已记录" | A1001 | 记录 |
+| 停止致电 | 红线3 | 终止外呼 + 写停止标记 | "好的，您的要求我们已记录" | B0010 | 记录 |
 | 自定义减免承诺 | 红线4 | 提示以坐席核实为准 | "具体优惠政策请与专属顾问核实" | B0010 | 中危告警 |
 | 法律后果自由解读 | 红线5 | 替换为标准答案库内容 | 标准答案库对应内容 | B0010 | 中危告警 |
 | 双校验未通过 | 红线6 | 返回兜底话术 | 场景对应兜底话术 | B0010 | 记录 |
@@ -226,7 +232,7 @@ Guardrails 校验
 （已投诉客户）降强度 → 投诉工单闭环后 → 恢复可外呼
 ```
 
-- 停止致电标记写入客户档案 `cases.stop_call_status`（VARCHAR(20) CHECK IN ('callable','stop_requested','stopped','permanent_stop','reduced_intensity')，默认 'callable'，见 step4/01 cases DDL；状态流转经 audit_logs 留痕 who/when/why/action）；
+- 停止致电标记写入客户档案 `cases.stop_call_status`（VARCHAR(20) CHECK IN ('callable','stop_requested','stopped','permanent_stop','reduced_intensity')，默认 'callable'，见 step4/01 cases DDL；中文对照表见 step1/03。「外呼拦截」「人工复核」是动作/人工流程，**不是**本列枚举值）；状态流转经 audit_logs 留痕 who/when/why/action；
 - call-service 外呼调度与 case-service 分案分流在发呼前强制校验该标记，命中即拦截；
 - 已投诉客户降低催收强度、禁止继续施压，强度恢复须等投诉工单闭环。
 
@@ -258,7 +264,7 @@ Guardrails 校验
 |---|---|---|
 | llm_call_logs | LLM 调用全量审计 | trace_id, prompt, response, confidence, status |
 | audit_logs | 操作审计 | user_id, action, resource_type, detail |
-| dialog_turns | 逐轮对话 | session_id, speaker, text, reasoning_encrypted, intent_label |
+| dialog_turns | 逐轮对话 | session_id, speaker（ai\|user；质检入站 ai→agent，见 step4/01）, text, reasoning_encrypted, intent_label |
 | qc_records | 质检结果 | session_id, compliance_score, violations, qc_result |
 | etl_task_logs | ETL 任务日志 | task_name, status, records_processed |
 
@@ -289,7 +295,7 @@ Guardrails 校验
 
 | 验收项 | 标准 |
 |---|---|
-| 双校验覆盖 | 所有 AI 输出经前置 + 后置双校验，缺一不可 |
+| 双校验覆盖 | 所有 **call-service 事中** AI 输出经前置 + 后置双校验，缺一不可。qc M1 不做 L4/L5 双护栏（step1/03 红线 6 范围注） |
 | 敏感词拦截 | AC 自动机命中即 B0010，违规内容不向下游传递 |
 | 兜底话术 | 拦截后返回对应场景合规兜底话术，话术来自知识库非硬编码 |
 | 降级链路 | LLM 失败 → RuleBasedScriptEngine；RAG 空 → FAQ 兜底；校验不通过 → 合规兜底 |

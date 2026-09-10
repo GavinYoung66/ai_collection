@@ -63,7 +63,6 @@ class Settings(BaseSettings):
     CALL_MAX_RETRY: int = 3
     CALL_MAX_CONCURRENCY: int = 50
     MAX_DIALOG_TURNS: int = 15
-    QC_RESPONSE_TIMEOUT: int = 3
     LLM_CIRCUIT_BREAKER_THRESHOLD: int = 3
     LLM_CIRCUIT_BREAKER_RECOVERY: int = 60
 

@@ -1,4 +1,4 @@
-"""健康检查端点测试。"""
+"""健康检查端点测试。权威探活为服务根 GET /health。"""
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -19,8 +19,6 @@ class TestHealth:
         resp = client.get("/health", headers={"X-Trace-Id": "trace_test"})
         assert resp.headers["X-Trace-Id"] == "trace_test"
 
-    def test_api_v1_health(self):
+    def test_health_not_mounted_under_api_v1(self):
         client = TestClient(app)
-        resp = client.get("/api/v1/health")
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "healthy"
+        assert client.get("/api/v1/health").status_code == 404

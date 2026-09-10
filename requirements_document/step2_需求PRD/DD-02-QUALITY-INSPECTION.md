@@ -6,7 +6,7 @@
 > 里程碑归属：**M1（最小闭环，data-platform + rag-service + qc-service 三者即可跑通质检全链路）**
 > 上游约束：step1/01~04 全局口径（含覆盖矩阵）、step3/01~03 架构与降级、step4/01~03 数据设计、step5/01~04 技术规范、step6/01~02 异常容错告警、step7/01~03 测试规范、step8/01 M0 任务清单
 > 宪法约束：openspec/specs/00~07
-> 状态：**V1.11** 离线全量质检；DP qc-source 字段映射已冻结；R14 关键词种子、skipped_rules 落库、R04 话术判定已写死。M2+ RAG/护栏日志为非目标附录。step8 M1 清单仍为覆盖矩阵 G3 缺口。
+> 状态：**V1.17** 离线全量质检；库列/HTTP/事件字段映射已冻结；列表与 stats 空结果不是 A2005；replay 路径参数只认 `session_id`。step8：`02_M1_AI 录音质检系统任务清单.md` **v1.3**（约束声明钉本文 V1.17）。覆盖矩阵 G3 **已关闭**。M2+ RAG/护栏日志为非目标附录。HTTP 路径 `qc-source` / `pending-qc` 事实源为 step5/02 §3.4。业务成败以 step5/02 为准：`code==="0"` 才成功，HTTP 200 + A2003 仍为业务失败。`rag.words.stale` 时钟见 §15.3 / step6/02。
 > 2026-09-09 复审补充（不改变 V1.5 功能口径）：§3.1 状态术语约定、§5.2 规则引擎输入（QCSession）、§5.4 qc_result 映射与 grade/risk 口径澄清，见正文。
 
 ---
@@ -27,6 +27,12 @@
 | V1.9 | 2026-09-09 | Ellis Guo | 事件 payload 与 step4/03 逐字段对齐：`qc.check.completed` 补 `call_id`；`qc.complaint.suspected` 追加 `qc_record_id`（投诉幂等）；`qc.review.done.sample_type`∈{positive,negative,corrected}；`call_id` 无则 JSON null。A2 HTTP 按 step6/01 逐条（删「业务 A 码一律 200」）。**不**改 R10/R14 M1 范围、**不**改 MergeHits |
 | V1.10 | 2026-09-09 | Ellis Guo | R01–R15 增加 M1 范围与 skip 条件。R14 降级为规则包关键词/`standard_answer_hit` 包含比对，**不**调 rag-service 检索。R10 仅「应转证据 + result≠escalated」；无 result 则 skip，**禁止**缺护栏日志标 unverified。详情 GET 增 `skipped_rules[]`。skip ≠ 合规、≠ PARTIAL。**不**改事件/HTTP、**不**改 step4 DDL 枚举 |
 | V1.11 | 2026-09-09 | Ellis Guo | 收口 7 项：① DP qc-source 字段映射（result/dial_history_24h/case_snapshot）；② R14 关键词种子写入 qc_rules.rules；③ skipped_rules=Redis qc:job + audit_logs（不加列）；④ R04 身份未核实话术判定；⑤⑥ M2+ RAG 检索与红线 6 护栏日志写入 §16 非目标；不改事件 payload |
+| V1.12 | 2026-09-10 | Ellis Guo | 全局审阅收口：① 库列↔HTTP↔事件字段映射（compliance_score/score、risk_level/risk）；② 列表/stats 空结果 200 非 A2005；③ 删 replay「路径兼容 call_id」；④ 文首纠正 G3 已关闭并指向 step8 任务清单 |
+| V1.13 | 2026-09-10 | Ellis Guo | 根 PRD 不得用分数切 `risk_level`；`grade` 与 `risk` 两维独立（对齐 §5.4）。录音非独立实体（`record_url`） |
+| V1.14 | 2026-09-10 | Ellis Guo | 审阅 20/22：§4.6 HTTP 路径事实源指向 step5/02 §3.4；§16.2 指向 step1/03 红线 6 范围注 |
+| V1.15 | 2026-09-10 | Ellis Guo | 审阅 34：A2003（HTTP 200 + code=A2003）指向 step5/02：`code!=="0"` 一律业务失败 |
+| V1.16 | 2026-09-10 | Ellis Guo | 审阅 40：§15.3 `rag.words.stale` 补 version / last_success_load_at 时钟公式（60s/2h 不改） |
+| V1.17 | 2026-09-10 | Ellis Guo | 审阅 51/52：`/health` `degraded` 绑定已有字段；增「本基线不单独验收的边界」短清单 |
 
 ---
 
@@ -74,6 +80,18 @@ AI 录音质检系统是整套生态的**事后合规审计与打分守门员**�
 9. **不把客户提及投诉 / 自杀 / 停呼 / 情绪激动记为工作人员违规**：这些与坐席「犯没犯规」无关；唯一质检点是坐席是否停止施压并安抚。
 10. **不替代 Guardrails 双校验（红线 6）**：前置+后置拦截属于 call-service 生成链路。红线 6 的「事后审计护栏双校验」= **M1 非目标**：不在 qc 实现、不读护栏放行日志、**不用缺记录罚分或标 unverified**。qc 复用 `common/guardrails` **仅**作 AC 词分类检测，不拦截 TTS、不返回兜底话术给客户。
 11. **不提供 ASR / 通话会话主数据**：投诉 MCP 的 `query_call_asr` / `query_call_sessions` 由 MCP Server **内部调 call-service**；qc 只实现 `query_qc_violations`（及告警查询）。
+
+### 2.3 本基线不单独验收的边界
+
+> 不补新行为；用已有约束点名。禁止展开成新功能节。
+
+| 边界 | 写法 |
+| :--- | :--- |
+| 同一 `session_id` 并发 replay | 以 `qc_records.session_id UNIQUE` 为准，不另定义新 API；并发冲突不单独立项验收 |
+| REVIEWED 后 force 重跑 / 告警去重 | 复核：已有 `X-QC-Force-Rerun` + A2002（§4 Header）。告警去重：**不单独验收** |
+| 多通关联同一案件 | 质检仍一通一检（`session_id` UNIQUE）；投诉多通话用 DD-05 `session_ids[]` |
+| 客户说「已投诉」 | 红线 3 **停呼优先**（step1/03 已有）；不是 `reduced_intensity` |
+| 录音 URL 失效 / ASR 空 / 部分 turns | 质检不碰文件流；turns 空/未齐 → 已有 WAIT_TEXT / A2003 / PARTIAL。不新错误码 |
 
 ---
 
@@ -154,6 +172,21 @@ Redis qc:job:{session_id}
 - 复核路径：`POST /qc/reviews/{qc_record_id}`。
 - MCP `call_qc.query_qc_violations` / `query_qc_alerts` 入参仍为 `(case_id, session_id)`；出参**每条**带 `qc_record_id`。方法名不变。
 
+#### 4.0.1.1 库列 ↔ HTTP ↔ 事件（写死，禁止改列名）
+
+step4/01 DDL 列名 **不**改成 HTTP/事件用词。读写映射：
+
+| 库列（`qc_records` / 权威） | HTTP JSON / Query | 事件 payload（§9.3 / step4/03） |
+| :--- | :--- | :--- |
+| `id` | `qc_record_id` | `qc_record_id` |
+| `compliance_score` | `compliance_score` | `score`（仅 `qc.check.completed`） |
+| `risk_level` | `risk`（含列表 Query `risk`） | `risk` |
+| `qc_result` | `qc_result` | **不**进 completed payload |
+| `qc_status` | `qc_status` | **不**进 completed payload |
+| `grade` | `grade` | `grade` |
+
+禁止把库列改名为 `risk` / `score`。禁止事件 `score` 填 `session_id` 或用 `risk_level` 当 JSON 键。
+
 #### 4.0.2 公共 Header
 
 | Header | 必填 | 适用 | 说明 |
@@ -228,9 +261,9 @@ LLM 在本任务内跑完再出分（无事中 3s 约束）；超时走 §14 降
 | :--- | :--- | :--- | :--- |
 | A2001 | 200 | A2001 | 任务失败；落 `qc_status=PARTIAL`；未 REVIEWED 可重跑 |
 | A2002 | 422 | A2002 | 入参非法；**不叠** B0001 |
-| A2003 | 200 | A2003 | 对话不可质检（未结束/未齐/`call_records` 不存在）。**不是** 404（404 留给 A2005） |
+| A2003 | 200 | A2003 | 对话不可质检（未结束/未齐/`call_records` 不存在）。未齐且重试未耗尽 → 只 Redis WAIT_TEXT；`QC_TEXT_READY_RETRY_MAX` 耗尽 → INSERT `PARTIAL`。**不是** 404（404 留给 A2005 单通详情）。HTTP 200 封装，但 `code!=="0"` 仍为业务失败（step5/02 强制约定；客户端禁止仅用 HTTP 200 当成功开工） |
 | A2004 | 400 | A2004 | 批量 >100 |
-| A2005 | 404 | A2005 | 质检记录不存在 |
+| A2005 | 404 | A2005 | **仅**单通详情 `GET /qc/records/{session_id}` 无行。列表/stats 无匹配 **不是** A2005 |
 | A2006 | 409 | A2006 | 告警不存在或已 ACK |
 | A2007 | 404 | A2007 | 复核任务不存在 |
 | A2008 | 400 | A2008 | 复核分数越界 |
@@ -248,12 +281,12 @@ LLM 在本任务内跑完再出分（无事中 3s 约束）；超时走 §14 降
 
 | 方法 | 路径 | 职责 | 权限 | 幂等 | 限流 | 错误码 | HTTP | PII 脱敏 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| POST | `/qc/replay/{session_id}` | 从 DP 拉**已结束**对话做离线质检（路径参数名可兼容 call_id） | QC/ADMIN/TRAINER | session_id 去重 | 2/10s | A2001/A2002/A2003/B0003 | 200/422/200/403 | — |
+| POST | `/qc/replay/{session_id}` | 从 DP 拉**已结束**对话做离线质检（路径参数 **只** `session_id`，禁止当 `call_id`） | QC/ADMIN/TRAINER | session_id 去重 | 2/10s | A2001/A2002/A2003/B0003 | 200/422/200/403 | — |
 | POST | `/qc/replay/raw` | 直接传**完整** turns 做离线质检（须为已结束通话） | QC/ADMIN/TRAINER | `X-Idempotency-Key` | 10/s | A2001/A2002/A2003/B0003 | 200/422/200/403 | — |
 | POST | `/qc/check/batch` | 离线批量质检（≤100 通，均须已结束且文本齐） | TRAINER/ADMIN | batch_id | 1/10s | A2002/A2004/B0003 | 422/400/403 | — |
 | GET | `/qc/records/{session_id}` | 单通质检详情 | QC/SUPV/ADMIN | 幂等 | 120/min | A2005/B0003 | 404/403 | evidence_text 脱敏 |
-| GET | `/qc/records` | 质检记录列表（分页） | QC/SUPV/ADMIN | 幂等 | 60/min | A2005/B0003 | 404/403 | phone 脱敏 |
-| GET | `/qc/records/stats` | 违规统计 | SUPV/ADMIN/TRAINER | 幂等 | 30/min | A2002/A2005/B0003 | 422/404/403 | — |
+| GET | `/qc/records` | 质检记录列表（分页） | QC/SUPV/ADMIN | 幂等 | 60/min | B0003 | 403 | phone 脱敏 |
+| GET | `/qc/records/stats` | 违规统计 | SUPV/ADMIN/TRAINER | 幂等 | 30/min | A2002/B0003 | 422/403 | — |
 
 #### 4.1.1 POST `/qc/replay/{session_id}`
 
@@ -270,11 +303,11 @@ LLM 在本任务内跑完再出分（无事中 3s 约束）；超时走 §14 降
 
 | 名 | 类型 | 必填 | 约束 |
 | :--- | :--- | :--- | :--- |
-| session_id | string | 是 | 对应 `call_records.session_id`；该行必须已存在（否则 A2003） |
+| session_id | string | 是 | 对应 `call_records.session_id`；该行必须已存在（否则 A2003）。**不是** `call_records.id`，禁止把路径值写入事件 `call_id` |
 
 Body：无业务字段，或仅 `{"force": false}`（`force=true` 等价 Header `X-QC-Force-Rerun`，仍须 ADMIN）。**禁止**在 Body 里传 turns / case_snapshot（一律走 DP GET）。
 
-开工校验：`qc-source` 必须 `call_ended=true` 且 `text_ready=true` 且 turns 非空；否则 A2003，**只**写 Redis `qc:job={WAIT_TEXT}`，**禁止** INSERT `qc_records`，不跑半通。
+开工校验：`qc-source` 必须 `call_ended=true` 且 `text_ready=true` 且 turns 非空。否则 HTTP **200 + A2003**，不跑半通。分支写死：① 未结束/未齐且重试未耗尽 → **只**写 Redis `qc:job={WAIT_TEXT}`，**禁止** INSERT `qc_records`；② `QC_TEXT_READY_RETRY_MAX`（默认 20）耗尽 → INSERT `qc_status=PARTIAL`；③ `call_records` 不存在 → A2003，**不**插 `qc_records`（无 UNIQUE 可占）。
 
 成功 `data` 示例（QcRunResult，同 §4.0.3）：
 
@@ -523,7 +556,7 @@ Query：
 }
 ```
 
-列表项 phone 脱敏（若返回坐席/客户号码相关展示字段）。失败：`A2005` HTTP 404、`B0003` HTTP 403。
+列表项 phone 脱敏（若返回坐席/客户号码相关展示字段）。无匹配 → HTTP **200** + `items=[]` + `total=0`。**禁止**对空列表返回 A2005。失败仅 `B0003` HTTP 403（未认证走 B0002）。
 
 #### 4.1.6 GET `/qc/records/stats`
 
@@ -556,7 +589,7 @@ Query：
 }
 ```
 
-失败：`A2002` HTTP 422（`group_by` 非法）、`A2005` HTTP 404、`B0003` HTTP 403。
+失败：`A2002` HTTP 422（`group_by` 非法）、`B0003` HTTP 403。窗口内无数据 → HTTP **200** + `items=[]`。**禁止** A2005。
 
 ---
 
@@ -794,11 +827,11 @@ Body：
 }
 ```
 
-依赖全挂时仍返回统一包，`data.status` 可为 `degraded`（由实现定义）；本接口不用 A200x 业务码。失败仅系统级 `B0007` 等（进程不可用则探活失败，无 JSON）。
+依赖全挂时仍返回统一包。`data.status`：**任一带依赖失败**（已有字段：`llm_degraded=true` / `rag_connected=false` / 词库探活失败即无法得到有效 `ac_version`）则 `status=degraded`；全部成功为 `ok`/`healthy`。不新造键。DD-03 `KB_HEALTH_DEGRADED_MODE` 只影响 rag-service 是否把 degraded 升为 unhealthy，不改变本接口字段。本接口不用 A200x 业务码。失败仅系统级 `B0007` 等（进程不可用则探活失败，无 JSON）。
 
 ### 4.6 DP 查询契约（qc 作为 Client，非本服务路由）
 
-data-platform 尚无独立 DD。以下两条由 **qc 消费**，路径落在 `/api/v1/data/*`（step5/02）。qc 是 HTTP Client；**禁止** DP 回调 qc。Schema 与 §5.2 QCSession 同构。超时/重试/熔断见 §9.1。
+data-platform 尚无独立 DD。以下两条由 **qc 消费**。**HTTP 路径事实源**：step5/02 §3.4（与本文同构上收）。业务规则（WAIT_TEXT、skip、字段映射、禁止 DP 回调 qc）仍以 **本文** 为准。覆盖矩阵 G2 例外：M1 允许 data-platform 实现这两条只读拉数；其余中台能力仍无 DD 禁止越权。qc 是 HTTP Client；**禁止** DP 回调 qc。Schema 与 §5.2 QCSession 同构。超时/重试/熔断见 §9.1。
 
 #### 4.6.1 GET `/api/v1/data/sessions/{session_id}/qc-source`
 
@@ -1114,7 +1147,7 @@ class LLMReviewer:
 >
 > 映射（判定优先级从高到低）：① 存在 **agent 侧**违规命中（AC/规则/LLM，user 侧 context 不计）且未复核 → 含高危 `pending_review`，否则 `violation`；② 无 agent 侧违规命中 → `compliant`；③ 复核（CONFIRM/DISMISS/CORRECT）后保持人工结论。score 只决定 `grade` 与 risk 档位参考，不直接改写 `qc_result`。
 >
-> **grade 与 risk 两维独立**：`grade` 由扣分后的 score 决定，`risk` 由合并后是否存在 **agent + severity=high** 决定——单条高危（−20）会出现 score=80 → `risk=high` 且 `grade=PASS` 并存，配合 `qc_result=pending_review` 表示「已触发高危人工复核、尚未形成合格终态」；复核确认后 `qc_status=REVIEWED` 才是终态。若业务要求「高危一律不可判合格」，可在 `qc_rules.grade_thresholds` 增加 high_risk_floor 配置（本文默认不启用）。user 行与 R05(low) 不把 risk 打成 high。
+> **grade 与 risk 两维独立**：`grade` 由扣分后的 score 决定，`risk` 由合并后是否存在 **agent + severity=high** 决定——单条高危（−20）会出现 score=80 → `risk=high` 且 `grade=PASS` 并存，配合 `qc_result=pending_review` 表示「已触发高危人工复核、尚未形成合格终态」；复核确认后 `qc_status=REVIEWED` 才是终态。若业务要求「高危一律不可判合格」，可在 `qc_rules.grade_thresholds` 增加 high_risk_floor 配置（本文默认不启用）。user 行与 R05(low) 不把 risk 打成 high。**根 PRD（需求文档.md）不得用合规分数切 risk_level。**
 
 ```python
 class ScoringService:
@@ -1490,7 +1523,9 @@ sequenceDiagram
 
 Payload **必须**含 `ts`（Unix 秒）与 `trace_id`。字段集以 step4/03 §4.2 为单一事实源；本节与之逐字段同构。
 
-**`call_id` 策略（写死）**：有 `QCSession.call_id`（=`call_records.id`）则填 UUID 字符串；M1 / raw 没有则填 JSON `null`。**禁止**用 `session_id` 冒充 `call_id`。
+**`call_id` 策略（写死）**：有 `QCSession.call_id`（=`call_records.id`）则填 UUID 字符串；M1 / raw 没有则填 JSON `null`。**禁止**用 `session_id` 冒充 `call_id`。**禁止**把 `POST /qc/replay/{session_id}` 路径参数写入 `call_id`。
+
+**库列 ↔ 事件键（与 §4.0.1.1 同一张表）**：`qc.check.completed.score` ← `qc_records.compliance_score`；`risk` ← `risk_level`。JSON 键保持 `score` / `risk`，不把列名 `risk_level` / `compliance_score` 写进事件。
 
 **`qc.review.done.sample_type` 枚举（写死）**：`positive` \| `negative` \| `corrected`。映射：`CONFIRM`→`positive`，`DISMISS`→`negative`，`CORRECT`→`corrected`。禁止空词或其它取值。
 
@@ -1619,7 +1654,7 @@ M1 / raw 无 `call_records.id` 时同一频道：`"call_id": null`。
 | A2002 | 422 | 质检入参不合法 | 缺 session_id/case_id、turns 空、角色错、call_ended≠true、已 REVIEWED 未强制重跑 | HTTP 422 + code=A2002。缺可选元数据 **不是** A2002（规则 skip）。**不叠** B0001 | 已收录 |
 | A2003 | 200 | 对话不可质检 | `call_records` 不存在、通话未结束、turns 未齐、`text_ready=false` | 未结束/全文未齐 → Redis WAIT_TEXT（不插 qc_records）；文本重试耗尽（QC_TEXT_READY_RETRY_MAX=20）→ INSERT qc_status=PARTIAL。HTTP 200 + code=A2003。**不是** 404 | 已同步 step6/01；V1.7 明确不占 UNIQUE |
 | A2004 | 400 | 批量超限 | >100 通 | HTTP 400 + 分批 | 已收录 |
-| A2005 | 404 | 质检记录不存在 | GET 详情/列表无记录 | HTTP 404 | 已收录 |
+| A2005 | 404 | 质检记录不存在 | **仅** `GET /qc/records/{session_id}` 无行 | HTTP 404。列表/stats 无匹配 → 200 空数组，**不是** A2005 | 已收录；V1.12 收窄 |
 | A2006 | 409 | 告警不存在/已确认 | ack 2 次或不存在 | HTTP 409 | 已收录 |
 | A2007 | 404 | 复核任务不存在 | 无待复核 / 已 REVIEWED 再复核 | HTTP 404 | 已收录 |
 | A2008 | 400 | 复核分数越界 | >100 或 <0 | HTTP 400 | 已收录 |
@@ -1839,8 +1874,15 @@ CLOSED（正常调用 LLM）
 | llm.review.completed | LLM 复核完成 | trace_id, latency_ms, token_usage, hit_count, status | latency P95>800ms |
 | llm.review.degraded | LLM 降级 | trace_id, reason | 立即告警 |
 | rag.words.loaded | 词库加载 | trace_id, version, word_count | — |
-| rag.words.stale | 词库过期 | trace_id, stale_hours | >2h→Warning |
+| rag.words.stale | 词库过期 | trace_id, stale_hours, rag_version, qc_version | 见下行公式；Warning |
 | qc.alert.raised | 高危告警（事后） | trace_id, call_id, level, evidence | 立即告警主管 |
+
+> **`rag.words.stale` 时钟（与 step6/02 §1.1.1 同构，数字冻结 60s / 2h）：**
+> - 权威版本 = Redis `rag:sensitive_words:version`（INCR；`kb.sensitive_updated.payload.version` 同值）。
+> - qc 已加载版本 = `qc:words:version`（成功拉取 `GET /api/v1/sensitive-words/current.dict` 并重建 AC 后回写）。
+> - 热加载 SLA：收到 `kb.sensitive_updated` 后 **60s 内** 拉取+重建（失败可重试）。
+> - 发 `rag.words.stale`（Warning）当**任一**成立：① 拉取 current.dict **失败且持续**；② `now - last_success_load_at > 2h`（`last_success_load_at` = qc 最近一次成功重建 AC 的时间；从未成功则从 qc 进程启动起算）；③ `qc:words:version != rag:sensitive_words:version` 且该不一致已持续 **>2h**。
+> - `stale_hours` = `(now - last_success_load_at)` 的小时数。不新造 Redis key。
 
 > V1.5 **删除** `qc.escalate.triggered` 与 `mode=realtime`。
 
@@ -1902,7 +1944,7 @@ CLOSED（正常调用 LLM）
 | 红线 6 | **非 M1 必过**；qc 不读护栏日志、不因缺记录标 unverified |
 | R10 | `result=completed` + 坐席 threat → 命中；无 result → 不命中且 skipped_rules 含 R10（断言 25） |
 | 人工复核 | CORRECT → score 更新 |
-| 词库热更新 | kb.sensitive_updated → GET current.dict → AC 重建 |
+| 词库热更新 | kb.sensitive_updated → GET current.dict → AC 重建（stale 时钟见 step6/02 / §15.3） |
 | AI 边界 | 不修改案件状态，不转人工 |
 | 数据闭环 | qc.check.completed → DP；suspected 仅 R11/R12/R13（agent+high） |
 | PII 脱敏 | evidence_text 脱敏 |
@@ -1926,7 +1968,7 @@ M1 **禁止实现**本节。落地日以 call-service DD、rag 契约评审为�
 
 ### 16.2 call 护栏放行日志（红线 6）
 
-- 红线 6 双校验仍归 **call-service**（step5/04 L4/L5）。call 无 DD 前 qc **不得**假设表结构。
+- 红线 6 双校验仍归 **call-service**（step5/04 L4/L5）。**范围注**见 step1/03 红线 6：事中前置+后置双校验归 call-service Guardrails；qc M1 只做事后文本规则/打分，**不**跑 L4/L5、**不**做 R14 RAG / 护栏放行日志审计。call 无 DD 前 qc **不得**假设表结构。
 - M2+ 候选：call 将每次 precheck/postcheck **放行**写入 `audit_logs`（建议 `action=guardrail.pass`，`resource_id=session_id`，`detail.layer=L4|L5`）。qc 只读、不拦截 TTS。
 - **缺放行记录仍禁止标 `unverified` 充数**（与 V1.10 相同）。可选增强：有放行记录但合并后仍有 agent+high 的 threat/fake_identity → 任务日志记 `guardrail_miss=true`，**不**新增 rule_id、不改红线枚举。
 - M1 验收 **不**把红线 6 当必过项。
