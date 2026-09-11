@@ -28,4 +28,5 @@ class TestDeps:
         snap = deps.get_active_qc_rules()
         assert snap["version"] == "v1.0"
         assert snap["status"] == "active"
-        assert snap["rules"] == []
+        assert isinstance(snap["rules"], list)
+        assert any(r.get("rule_id") == "R14" for r in snap["rules"])

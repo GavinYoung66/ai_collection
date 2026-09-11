@@ -4,8 +4,27 @@
 #   构建+启动全部 7 个服务（+ embedding/rerank mock）：docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build \
 #       embedding rerank-service data-platform rag-service qc-service call-service case-service complaint-service review-service
 #   只起某个服务：docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build <svc>
+#   qc 冒烟栈（不起 call-service、不起 rag 全栈）：docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d \
+#       postgres redis data-platform rag-dict-mock qc-service
+#
+#   【2026-09-11 踩坑，勿再犯】上面这条不是「只拉 5 个镜像」。
+#   rag-service 在本文件 depends_on：milvus + elasticsearch + embedding + rerank-service；
+#   milvus 再 depends_on etcd + minio。因此会去拉 minio/minio:latest，并解析
+#   elasticsearch 的 image: ai_collection/elasticsearch-ik:8.11.3（这是本地 build 名，
+#   不是 Docker Hub 上的仓库；本地没有该镜像时 daemon 会当成 docker.io 去拉）。
+#   若 Docker Desktop Engine 配了已失效的 registry-mirrors
+#   （如 https://docker.mirrors.ustc.edu.cn），会报：
+#     lookup docker.mirrors.ustc.edu.cn: no such host
+#     failed to resolve reference "docker.io/minio/minio:latest"
+#     failed to resolve reference "docker.io/ai_collection/elasticsearch-ik:8.11.3"
+#   处理：Docker Desktop → Settings → Docker Engine → 删掉 ustc 这条 mirror，Apply & restart；
+#   ES 首次用 build 而不是 pull：
+#     docker compose -f docker-compose.yml build elasticsearch
+#   镜像已在本地时加 --pull never，避免再走死镜像源。
+#   qc 冒烟不需要 call-service；也不要 docker compose up（无服务名）把 ocr/gradio 全拉起来。
 #   看日志：       docker compose -f docker-compose.yml -f docker-compose.dev.yml logs -f <svc>
 #   跑冒烟：       bash scripts/smoke/smoke_all.sh
+#   qc 冒烟（不起 call-service）：bash scripts/smoke/smoke_qc.sh
 #   停止：         docker compose -f docker-compose.yml -f docker-compose.dev.yml down
 #
 # 存量缺陷已修（对齐 smoke 版已验证通过的编排）：
@@ -65,6 +84,29 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  # ========== M1 词库同构 mock（不起 rag / ES / milvus）==========
+  # 契约：GET /api/v1/sensitive-words/current.dict ，text/plain，一行一词。
+  # 容器内听 8000；宿主机仍占 rag 的 8002，便于 curl localhost:8002。qc 必须用服务名:8000。
+  rag-dict-mock:
+    image: python:3.11.15-slim
+    ports: ["8002:8000"]
+    volumes:
+      - ./scripts/smoke/mocks/rag_current_dict.py:/app/server.py:ro
+      - ./scripts/smoke/mocks/current.dict:/app/current.dict:ro
+    working_dir: /app
+    command: ["python", "/app/server.py", "8000"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/v1/sensitive-words/current.dict', timeout=2).status==200 else 1)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   # ========== 7 个业务服务（build 均改用根上下文，与 smoke 编排一致） ==========
   data-platform:
@@ -181,6 +223,29 @@ services:
       PG_PORT: "5432"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      # DD-02 §12；host 不含 /api/v1。M1 词库走 rag-dict-mock，不要拉 rag 全栈 / call-service。
+      QC_RAG_SENSITIVE_BASE: http://rag-dict-mock:8000
+      QC_RAG_INITIAL_TIMEOUT: "3"
+      QC_RAG_HOURLY_CRON: "0 * * * *"
+      QC_DP_BASE: http://data-platform:8000
+      QC_DP_SESSION_PATH: /api/v1/data/sessions/{session_id}/qc-source
+      QC_DP_PENDING_QC_PATH: /api/v1/data/sessions:pending-qc
+      QC_DP_TIMEOUT: "5"
+      QC_LLM_MODEL: qwen-plus
+      QC_LLM_TIMEOUT: "5"
+      QC_LLM_RETRY: "3"
+      QC_LLM_DEGRADE_AFTER: "3"
+      QC_DEDUP_WINDOW_MS: "30000"
+      QC_AUTO_START_ON_ENDED: "true"
+      QC_AUTO_COMPLEMENT_AFTER_ETL: "true"
+      QC_TEXT_READY_RETRY_SEC: "30"
+      QC_TEXT_READY_RETRY_MAX: "20"
+      QC_ALERT_LEVEL_MIN: high
+      QC_BATCH_MAX: "100"
+      QC_MOCK_LLM: "true"
+      QC_DEFAULT_ACTIVE_RULES_VERSION: v1.0
+      QC_R14_RAG_ENABLED: "false"
+      QC_REDIS_DB: "3"
     volumes:
       - ./services/qc-service/app:/app/app
       - ./common:/app/common
@@ -197,6 +262,8 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+      data-platform: { condition: service_started }
+      rag-dict-mock: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s

@@ -1,0 +1,37 @@
+{
+  "text_ready": true,
+  "call_status": "completed",
+  "session_id": "sess_fixture_001",
+  "case_id": "case_fixture_001",
+  "call_id": "22222222-3333-4444-5555-666666666666",
+  "call_ended": true,
+  "agent_type": "ai",
+  "started_at": "2026-09-09T10:00:00+08:00",
+  "ended_at": "2026-09-09T10:08:00+08:00",
+  "duration_seconds": 480,
+  "result": null,
+  "debtor_name": "张三",
+  "turns": [
+    {
+      "turn_id": "t1",
+      "speaker": "agent",
+      "text": "您好，请问是张三先生吗？",
+      "turn_index": 1,
+      "start_offset_ms": 5000
+    },
+    {
+      "turn_id": "t2",
+      "speaker": "user",
+      "text": "是我。",
+      "turn_index": 2,
+      "start_offset_ms": 8000
+    }
+  ],
+  "case_snapshot": {
+    "due_amount": 3800.0,
+    "overdue_days": 32,
+    "ptp_amount": null,
+    "strategy_refs": [],
+    "standard_answer_hit": null
+  }
+}

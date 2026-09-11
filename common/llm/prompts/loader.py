@@ -32,3 +32,8 @@ def load_fallback_scripts() -> list[dict]:
     """加载兜底话术库。"""
     data = load_yaml("fallback_scripts.yml")
     return data.get("rules", [])
+
+
+def load_qc_review_prompt() -> dict:
+    """加载质检语义复核 Prompt（qc_review_v1）。"""
+    return load_yaml("qc_review.yml")

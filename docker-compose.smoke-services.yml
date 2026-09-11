@@ -5,7 +5,13 @@
 #   构建+启动：docker compose -f docker-compose.yml -f docker-compose.smoke-services.yml up -d --build \
 #                data-platform qc-service call-service case-service complaint-service review-service
 #   （显式列出服务避免拉起 base 中的 ocr-service，其基础镜像 paddlepaddle 在本机网络拉不动）
-#   跑冒烟：bash scripts/smoke/smoke_data_platform.sh && bash scripts/smoke/smoke_qc_service.sh ...
+#   仅 qc 冒烟栈（不起 call-service、不起 rag 全栈；词库用 rag-dict-mock）：
+#     docker compose -f docker-compose.yml -f docker-compose.smoke-services.yml up -d --build \
+#         data-platform rag-dict-mock qc-service
+#   若走 docker-compose.dev.yml 起 rag：会连带 minio/ES；不要用已失效的 ustc 镜像源
+#   （docker.mirrors.ustc.edu.cn DNS 失败 → minio / elasticsearch-ik pull 挂）。见 docker-compose.dev.yml 文头。
+#   跑冒烟：bash scripts/smoke/smoke_data_platform.sh && bash scripts/smoke/smoke_qc.sh ...
+#   qc 冒烟不起 call-service：bash scripts/smoke/smoke_qc.sh
 #
 # 说明：
 #   - Dockerfile 为项目根视角（COPY common/ requirements.lock 等根路径），context 必须是项目根，
@@ -14,6 +20,27 @@
 #   - healthcheck 用 curl（各服务镜像已 apt 安装 curl）。
 
 services:
+  rag-dict-mock:
+    image: python:3.11.15-slim
+    ports:
+      - "8002:8000"
+    volumes:
+      - ./scripts/smoke/mocks/rag_current_dict.py:/app/server.py:ro
+      - ./scripts/smoke/mocks/current.dict:/app/current.dict:ro
+    working_dir: /app
+    command: ["python", "/app/server.py", "8000"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/v1/sensitive-words/current.dict', timeout=2).status==200 else 1)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   data-platform:
     build:
       context: .
@@ -50,9 +77,34 @@ services:
       PG_PORT: "5432"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      # DD-02 §12；host 不含 /api/v1。M1 词库走 rag-dict-mock，不要拉 rag 全栈。
+      QC_RAG_SENSITIVE_BASE: http://rag-dict-mock:8000
+      QC_RAG_INITIAL_TIMEOUT: "3"
+      QC_RAG_HOURLY_CRON: "0 * * * *"
+      QC_DP_BASE: http://data-platform:8000
+      QC_DP_SESSION_PATH: /api/v1/data/sessions/{session_id}/qc-source
+      QC_DP_PENDING_QC_PATH: /api/v1/data/sessions:pending-qc
+      QC_DP_TIMEOUT: "5"
+      QC_LLM_MODEL: qwen-plus
+      QC_LLM_TIMEOUT: "5"
+      QC_LLM_RETRY: "3"
+      QC_LLM_DEGRADE_AFTER: "3"
+      QC_DEDUP_WINDOW_MS: "30000"
+      QC_AUTO_START_ON_ENDED: "true"
+      QC_AUTO_COMPLEMENT_AFTER_ETL: "true"
+      QC_TEXT_READY_RETRY_SEC: "30"
+      QC_TEXT_READY_RETRY_MAX: "20"
+      QC_ALERT_LEVEL_MIN: high
+      QC_BATCH_MAX: "100"
+      QC_MOCK_LLM: "true"
+      QC_DEFAULT_ACTIVE_RULES_VERSION: v1.0
+      QC_R14_RAG_ENABLED: "false"
+      QC_REDIS_DB: "3"
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
+      data-platform: {condition: service_started}
+      rag-dict-mock: {condition: service_healthy}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s

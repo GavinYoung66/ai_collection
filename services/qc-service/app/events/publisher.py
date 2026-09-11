@@ -1,4 +1,229 @@
-"""质检事件发布。Apply 0.1 stub。
+"""质检事件发布。允许 6 频道；禁止 qc.escalate.human 与 qc.llm.degraded。"""
+from __future__ import annotations
 
-M1 禁止发布 qc.escalate.human；LLM 熔断走 system.alert.raised，禁止 qc.llm.degraded 频道。
-"""
+import json
+import time
+from typing import Any
+from uuid import UUID, uuid4
+
+from common.errors.codes import ErrorCode
+from common.security.mask import mask_text
+from common.trace.middleware import get_trace_id
+
+CHANNEL_SYSTEM_ALERT = "system.alert.raised"
+CHANNEL_ALERT_RAISED = "qc.alert.raised"
+CHANNEL_CHECK_COMPLETED = "qc.check.completed"
+CHANNEL_COMPLAINT_SUSPECTED = "qc.complaint.suspected"
+CHANNEL_STOP_CALL = "qc.stop_call.detected"
+CHANNEL_REVIEW_DONE = "qc.review.done"
+ALERT_STREAM = "alert:stream"
+
+ALLOWED_CHANNELS = frozenset(
+    {
+        CHANNEL_ALERT_RAISED,
+        CHANNEL_CHECK_COMPLETED,
+        CHANNEL_COMPLAINT_SUSPECTED,
+        CHANNEL_STOP_CALL,
+        CHANNEL_REVIEW_DONE,
+        CHANNEL_SYSTEM_ALERT,
+    }
+)
+FORBIDDEN_CHANNELS = frozenset({"qc.llm.degraded", "qc.escalate.human"})
+
+REVIEW_SAMPLE_TYPE = {
+    "CONFIRM": "positive",
+    "DISMISS": "negative",
+    "CORRECT": "corrected",
+}
+
+COMPLETED_KEYS = frozenset(
+    {"qc_record_id", "session_id", "call_id", "case_id", "score", "risk", "grade", "trace_id", "ts"}
+)
+COMPLETED_FORBIDDEN_KEYS = frozenset({"qc_result", "qc_status", "skipped_rules", "compliance_score", "risk_level"})
+
+
+def event_call_id(call_id: str | None, *, session_id: str | None = None) -> str | None:
+    """QCSession.call_id UUID 或 JSON null；禁止用 session_id / replay 路径冒充。"""
+    if call_id is None or str(call_id).strip() == "":
+        return None
+    text = str(call_id)
+    if session_id is not None and text == str(session_id):
+        return None
+    try:
+        return str(UUID(text))
+    except ValueError:
+        return None
+
+
+def sample_type_for(action: str) -> str:
+    mapped = REVIEW_SAMPLE_TYPE.get(action)
+    if mapped is None:
+        raise ValueError(f"qc.review.done sample_type only positive|negative|corrected via CONFIRM/DISMISS/CORRECT, got {action!r}")
+    return mapped
+
+
+class QcEventPublisher:
+    def __init__(self, redis: Any | None = None) -> None:
+        self._redis = redis
+        self.emitted: list[tuple[str, dict[str, Any]]] = []
+        self.streams: list[tuple[str, dict[str, str]]] = []
+
+    def _base(self, *, trace_id: str | None = None, ts: int | None = None) -> dict[str, Any]:
+        return {
+            "trace_id": trace_id if trace_id is not None else (get_trace_id() or ""),
+            "ts": int(ts if ts is not None else time.time()),
+        }
+
+    async def _publish(self, channel: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if channel in FORBIDDEN_CHANNELS:
+            raise ValueError(f"forbidden channel: {channel}")
+        if channel not in ALLOWED_CHANNELS:
+            raise ValueError(f"channel not in M1 allow-list: {channel}")
+        self.emitted.append((channel, payload))
+        if self._redis is not None:
+            await self._redis.publish(channel, json.dumps(payload, ensure_ascii=False))
+        return payload
+
+    async def publish_alert_raised(
+        self,
+        *,
+        alert_id: str,
+        session_id: str,
+        call_id: str | None,
+        level: str,
+        evidence: str | None,
+        trace_id: str | None = None,
+        ts: int | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "alert_id": alert_id,
+            "session_id": session_id,
+            "call_id": event_call_id(call_id, session_id=session_id),
+            "level": level,
+            "evidence": mask_text(evidence or ""),
+            **self._base(trace_id=trace_id, ts=ts),
+        }
+        await self._publish(CHANNEL_ALERT_RAISED, payload)
+        fields = {key: json.dumps(value, ensure_ascii=False) for key, value in payload.items()}
+        self.streams.append((ALERT_STREAM, fields))
+        xadd = getattr(self._redis, "xadd", None) if self._redis is not None else None
+        if xadd is not None:
+            await xadd(ALERT_STREAM, fields)
+        return payload
+
+    async def publish_check_completed(
+        self,
+        *,
+        qc_record_id: str,
+        session_id: str,
+        call_id: str | None,
+        case_id: str | None,
+        score: int | None,
+        risk: str | None,
+        grade: str | None,
+        trace_id: str | None = None,
+        ts: int | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "qc_record_id": qc_record_id,
+            "session_id": session_id,
+            "call_id": event_call_id(call_id, session_id=session_id),
+            "case_id": case_id,
+            "score": score,
+            "risk": risk,
+            "grade": grade,
+            **self._base(trace_id=trace_id, ts=ts),
+        }
+        extra = set(payload) - COMPLETED_KEYS
+        if extra:
+            raise ValueError(f"unexpected completed keys: {extra}")
+        if COMPLETED_FORBIDDEN_KEYS & set(payload):
+            raise ValueError("completed payload must not include qc_result/qc_status/skipped_rules")
+        return await self._publish(CHANNEL_CHECK_COMPLETED, payload)
+
+    async def publish_complaint_suspected(
+        self,
+        *,
+        qc_record_id: str,
+        session_id: str,
+        case_id: str | None,
+        redline_tags: list[str] | None = None,
+        trace_id: str | None = None,
+        ts: int | None = None,
+    ) -> dict[str, Any]:
+        if not qc_record_id:
+            raise ValueError("qc.complaint.suspected requires qc_record_id")
+        payload = {
+            "qc_record_id": qc_record_id,
+            "session_id": session_id,
+            "case_id": case_id,
+            "redline_tags": list(redline_tags or []),
+            **self._base(trace_id=trace_id, ts=ts),
+        }
+        return await self._publish(CHANNEL_COMPLAINT_SUSPECTED, payload)
+
+    async def publish_stop_call_detected(
+        self,
+        *,
+        session_id: str,
+        case_id: str | None,
+        evidence: str | None,
+        trace_id: str | None = None,
+        ts: int | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "session_id": session_id,
+            "case_id": case_id,
+            "evidence": mask_text(evidence or ""),
+            **self._base(trace_id=trace_id, ts=ts),
+        }
+        return await self._publish(CHANNEL_STOP_CALL, payload)
+
+    async def publish_review_done(
+        self,
+        *,
+        qc_record_id: str,
+        action: str,
+        revised_score: int | None = None,
+        redline_tags: list[str] | None = None,
+        evidence_masked: str | None = None,
+        trace_id: str | None = None,
+        ts: int | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "qc_record_id": qc_record_id,
+            "action": action,
+            "revised_score": revised_score,
+            "redline_tags": list(redline_tags or []),
+            "evidence_masked": mask_text(evidence_masked or ""),
+            "sample_type": sample_type_for(action),
+            **self._base(trace_id=trace_id, ts=ts),
+        }
+        if payload["sample_type"] not in {"positive", "negative", "corrected"}:
+            raise ValueError("invalid sample_type")
+        return await self._publish(CHANNEL_REVIEW_DONE, payload)
+
+    async def publish_system_alert_raised(
+        self,
+        *,
+        event: str = "qc:llm_degraded",
+        error_code: str = ErrorCode.A2011.value,
+        service: str = "qc-service",
+        level: str = "high",
+        description: str = "LLM 审查熔断，已跳过语义复核",
+        alert_id: str | None = None,
+        trace_id: str | None = None,
+        ts: int | None = None,
+    ) -> dict[str, Any]:
+        if event != "qc:llm_degraded":
+            raise ValueError("1.4 仅允许 event=qc:llm_degraded")
+        payload = {
+            "alert_id": alert_id or str(uuid4()),
+            "level": level,
+            "event": event,
+            "service": service,
+            "description": description,
+            "error_code": error_code,
+            **self._base(trace_id=trace_id, ts=ts),
+        }
+        return await self._publish(CHANNEL_SYSTEM_ALERT, payload)

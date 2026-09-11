@@ -1,0 +1,9 @@
+# M1 同构 mock：GET /api/v1/sensitive-words/current.dict （text/plain，一行一词）
+# 与 rag-service 内置 sensitive_words.dict 同形态；qc_ac_probe_word 仅用于证明 AC hit（不在 R01–R15）。
+qc_ac_probe_word
+上门催收
+影响征信
+通知通讯录
+强制执行
+冻结账户
+找你家人

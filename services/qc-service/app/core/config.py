@@ -30,7 +30,7 @@ class QcSettings(BaseSettings):
     QC_TEXT_READY_RETRY_MAX: int = 20
     QC_ALERT_LEVEL_MIN: str = "high"
     QC_BATCH_MAX: int = 100
-    QC_MOCK_LLM: bool = False
+    QC_MOCK_LLM: bool = False  # true 跳过真实 LLM，不熔断、不发 A2011；默认 false
     QC_DEFAULT_ACTIVE_RULES_VERSION: str = "v1.0"
     QC_R14_RAG_ENABLED: bool = False
     QC_REDIS_DB: int = 3

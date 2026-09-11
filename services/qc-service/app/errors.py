@@ -25,6 +25,7 @@ HTTP_STATUS_BY_CODE: dict[str, int] = {
     ErrorCode.A2011.value: 200,
     ErrorCode.B0002.value: 401,
     ErrorCode.B0003.value: 403,
+    ErrorCode.B0006.value: 429,
 }
 
 SUCCESS_CODE = "0"

@@ -80,4 +80,6 @@ logs/
 *.log
 
 # ── 模型 / 大文件 ──────────────────────────────────────
-models/
+# 仅忽略仓库根 ML 权重目录。禁止写成未锚定的 models/，否则会误伤
+# common/db/models/ 与 services/*/app/models/（Python ORM 包）。
+/models/

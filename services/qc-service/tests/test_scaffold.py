@@ -66,9 +66,10 @@ class TestNoRealtimeSurface:
     def test_no_websocket_routes(self):
         assert not any(isinstance(route, WebSocketRoute) for route in app.router.routes)
 
-    def test_no_qc_http_paths_registered(self):
+    def test_no_ingest_or_websocket(self):
         paths = [getattr(route, "path", "") for route in app.router.routes]
-        assert not any("/qc/" in path for path in paths)
+        assert not any(isinstance(route, WebSocketRoute) for route in app.router.routes)
+        assert any("/api/v1/qc/replay/{session_id}" in path or "/replay/" in path for path in paths)
 
     def test_post_qc_check_not_ingest(self):
         client = TestClient(app)
@@ -84,3 +85,12 @@ class TestNoRealtimeSurface:
         assert not hasattr(RagClient, "search")
         assert not hasattr(RagClient, "kb_search")
         assert "search" not in vars(RagClient)
+
+    def test_dockerfile_healthcheck_is_root_health(self):
+        text = Path(__file__).resolve().parents[1].joinpath("Dockerfile").read_text(encoding="utf-8")
+        assert "HEALTHCHECK" in text
+        assert "http://localhost:8000/health" in text
+        assert "/api/v1/health" not in text
+        assert "EXPOSE 8000" in text
+        assert '"--port", "8000"' in text
+        assert "/kb/search" not in text
