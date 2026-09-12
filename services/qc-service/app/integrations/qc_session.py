@@ -58,7 +58,6 @@ class CaseSnapshot(BaseModel):
     @model_validator(mode="after")
     def _m1_force_nulls(self) -> CaseSnapshot:
         self.ptp_amount = None
-        self.standard_answer_hit = None
         if not isinstance(self.strategy_refs, list):
             self.strategy_refs = []
         return self
@@ -101,7 +100,6 @@ class QCSession(BaseModel):
             data.pop("dial_history_24h", None)
         if data.get("case_snapshot"):
             data["case_snapshot"]["ptp_amount"] = None
-            data["case_snapshot"]["standard_answer_hit"] = None
         if "result" not in data:
             data["result"] = None
         return data
@@ -122,7 +120,6 @@ def map_qc_source(payload: Any) -> QCSession:
         raw["case_snapshot"] = {
             **snap,
             "ptp_amount": None,
-            "standard_answer_hit": None,
         }
 
     return QCSession.model_validate(raw)

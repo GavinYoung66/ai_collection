@@ -112,8 +112,8 @@ class TestAlertPersist:
             compliance_score=98,
             risk_level="low",
             grade="EXCELLENT",
-            qc_result="violation",
-            qc_status="DONE",
+            qc_result="pending_review",
+            qc_status="PENDING_REVIEW",
             hits=hits,
             alerts=AlertService().on_high_risk(hits),
         )

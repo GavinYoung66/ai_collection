@@ -86,8 +86,8 @@ class TestScoringIndependent:
         assert scored.compliance_score == 76
         assert scored.risk_level == "medium"
         assert scored.grade == "WARNING"
-        assert scored.qc_result == "violation"
-        assert scored.qc_status == "DONE"
+        assert scored.qc_result == "pending_review"
+        assert scored.qc_status == "PENDING_REVIEW"
 
     def test_r05_threat_tag_not_suspected(self):
         r05 = WordHit(
@@ -103,6 +103,8 @@ class TestScoringIndependent:
         scored = ScoringService().score([r05])
         assert scored.compliance_score == 98
         assert scored.risk_level == "low"
+        assert scored.qc_result == "pending_review"
+        assert scored.qc_status == "PENDING_REVIEW"
 
 
 class TestOfflineQcService:

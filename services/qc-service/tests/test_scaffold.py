@@ -81,10 +81,8 @@ class TestNoRealtimeSurface:
         client = TestClient(app)
         assert client.get("/api/v1/health").status_code == 404
 
-    def test_rag_client_has_no_search(self):
-        assert not hasattr(RagClient, "search")
-        assert not hasattr(RagClient, "kb_search")
-        assert "search" not in vars(RagClient)
+    def test_rag_client_has_search(self):
+        assert hasattr(RagClient, "search")
 
     def test_dockerfile_healthcheck_is_root_health(self):
         text = Path(__file__).resolve().parents[1].joinpath("Dockerfile").read_text(encoding="utf-8")

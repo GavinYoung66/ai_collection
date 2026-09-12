@@ -7,6 +7,7 @@ from uuid import UUID
 from app.events.publisher import QcEventPublisher, sample_type_for
 from app.models.qc import QcRecord
 from app.repositories.review_repo import ReviewRepo
+from app.services.scoring_service import grade_for
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
 from common.security.mask import mask_text
@@ -65,6 +66,7 @@ class ReviewService:
             score_to_write = int(revised_score)
             record.compliance_score = score_to_write
         record.qc_status = "REVIEWED"
+        self._finalize_reviewed(record, action=action)
         if self.repo is not None:
             await self.repo.insert_review(
                 qc_record_id=record.id,
@@ -90,4 +92,18 @@ class ReviewService:
             "compliance_score": record.compliance_score,
             "qc_result": record.qc_result,
             "risk": record.risk_level,
+            "grade": record.grade,
         }
+
+    @staticmethod
+    def _finalize_reviewed(record: QcRecord, *, action: str) -> None:
+        """REVIEWED 后 qc_result 不得停在 pending_review；CORRECT 按新分重算 grade。"""
+        score = int(record.compliance_score or 0)
+        record.grade = grade_for(score)
+        if action == "CORRECT":
+            record.qc_result = "compliant" if score >= 100 else "violation"
+            if score >= 100:
+                record.risk_level = "low"
+            return
+        if action == "CONFIRM" and record.qc_result == "pending_review":
+            record.qc_result = "compliant" if score >= 100 else "violation"

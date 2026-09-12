@@ -1,7 +1,11 @@
-"""rag 词库客户端：只 GET current.dict。禁止知识库检索 HTTP。"""
+"""rag 客户端：GET current.dict；QC_R14_RAG_ENABLED 时 POST /kb/search。
+
+search 失败 MUST NOT 累加词库熔断计数。
+"""
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 import httpx
 
@@ -10,8 +14,13 @@ from common.llm.reliability import call_with_retry
 from common.trace.middleware import get_trace_id
 
 DICT_PATH = "/api/v1/sensitive-words/current.dict"
+SEARCH_PATH = "/api/v1/kb/search"
 RAG_RETRY_ATTEMPTS = 3
 RAG_BREAKER_FAILURES = 2
+SEARCH_SCORE_THRESHOLD = 0.6
+SEARCH_SNIPPET_MAX = 80
+SEARCH_DEFAULT_CATEGORY = "script"
+SEARCH_DEFAULT_TOP_K = 3
 
 
 def parse_current_dict(body: str) -> list[str]:
@@ -24,8 +33,38 @@ def parse_current_dict(body: str) -> list[str]:
     return words
 
 
+def parse_search_results(payload: Any) -> list[dict[str, Any]]:
+    """统一信封 data.results[]，兼容裸 {results}。"""
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    if not isinstance(data, dict):
+        return []
+    results = data.get("results") or []
+    return [item for item in results if isinstance(item, dict)]
+
+
+def pick_search_snippet(results: list[dict[str, Any]]) -> str | None:
+    if not results:
+        return None
+    first = results[0]
+    raw_score = first.get("score")
+    if raw_score is None:
+        raw_score = first.get("rerank_score")
+    try:
+        score = float(raw_score) if raw_score is not None else 0.0
+    except (TypeError, ValueError):
+        score = 0.0
+    if score < SEARCH_SCORE_THRESHOLD:
+        return None
+    content = str(first.get("content") or first.get("content_snippet") or "").strip()
+    if not content:
+        return None
+    return content[:SEARCH_SNIPPET_MAX]
+
+
 class RagClient:
-    """GET text/plain 词库。连续 2 次失败熔断 OPEN：不再 GET，直接返回上一版词表/AC。"""
+    """GET text/plain 词库；可选 POST /kb/search。词库连续 2 次失败熔断 OPEN。"""
 
     def __init__(
         self,
@@ -44,6 +83,7 @@ class RagClient:
         self._ac_ref: tuple[str, ...] | None = None
         self._consecutive_failures = 0
         self._request_log: list[tuple[str, str]] = []
+        self._last_search_payload: dict[str, Any] | None = None
 
     @property
     def words(self) -> list[str]:
@@ -65,6 +105,13 @@ class RagClient:
 
     def dict_url(self) -> str:
         return f"{self._base}{DICT_PATH}"
+
+    def search_url(self) -> str:
+        return f"{self._base}{SEARCH_PATH}"
+
+    @property
+    def last_search_payload(self) -> dict[str, Any] | None:
+        return self._last_search_payload
 
     async def aclose(self) -> None:
         if self._owns_client and self._client is not None:
@@ -110,7 +157,7 @@ class RagClient:
         return list(self._words)
 
     async def probe_dict_reachable(self, timeout: float = 1.0) -> bool:
-        """Health 短超时单次 GET。失败 False；熔断 OPEN 且无旧词表 False。无 search。"""
+        """Health 短超时单次 GET current.dict。失败 False；不发 /kb/search。"""
         if self.breaker_open:
             return bool(self._words or self._ac_ref)
         headers = {"Accept": "text/plain"}
@@ -136,3 +183,42 @@ class RagClient:
 
     def recorded_requests(self) -> Sequence[tuple[str, str]]:
         return list(self._request_log)
+
+    async def search(
+        self,
+        query: str,
+        *,
+        category: str = SEARCH_DEFAULT_CATEGORY,
+        top_k: int = SEARCH_DEFAULT_TOP_K,
+        answer: bool = False,
+    ) -> str | None:
+        """POST /api/v1/kb/search。score≥0.6 则截断 content 至 80 字；失败返回 None。
+
+        不重试、不累加 `_consecutive_failures`，避免误伤词库自动机。
+        """
+        q = (query or "").strip()
+        if not q:
+            return None
+        payload = {
+            "query": q[:500],
+            "category": category,
+            "top_k": int(top_k),
+            "answer": bool(answer),
+        }
+        self._last_search_payload = payload
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        trace_id = get_trace_id()
+        if trace_id:
+            headers["X-Trace-Id"] = trace_id
+        url = self.search_url()
+        self._request_log.append(("POST", url))
+        try:
+            client = await self._http()
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            body = resp.json()
+        except (httpx.HTTPError, OSError, ValueError):
+            return None
+        if not isinstance(body, dict):
+            return None
+        return pick_search_snippet(parse_search_results(body))

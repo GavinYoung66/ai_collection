@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core.config import qc_settings
 from app.deps import get_quality_repo
 from app.events.publisher import CHANNEL_COMPLAINT_SUSPECTED
 from app.integrations.guardrails_adapter import matcher_from_words
@@ -61,12 +62,10 @@ def _prime_ac(words: list[SensitiveWord]) -> None:
 
 def _assert_zero_kb_search(rag: RagClient | None = None) -> None:
     rag = rag or RagClient()
-    assert not hasattr(RagClient, "search")
+    assert qc_settings.QC_R14_RAG_ENABLED is False
     assert all("/kb/search" not in url for url in rag.recorded_urls())
     engine_src = (_APP / "services" / "rule_engine.py").read_text(encoding="utf-8")
-    rag_src = (_APP / "integrations" / "rag_client.py").read_text(encoding="utf-8")
     assert "/kb/search" not in engine_src
-    assert "/kb/search" not in rag_src
 
 
 def _r14_empty_pack() -> dict:
@@ -276,6 +275,8 @@ class TestAssertions15to28:
         r05 = [hit for hit in data["hits"] if hit.get("rule_id") == "R05"]
         assert r05
         assert data["compliance_score"] == 98
+        assert data["qc_result"] == "pending_review"
+        assert data["qc_status"] == "PENDING_REVIEW"
         assert [obj for obj in db.added if isinstance(obj, QcAlert)] == []
         assert CHANNEL_COMPLAINT_SUSPECTED not in _published_channels(redis)
 
@@ -291,7 +292,7 @@ class TestAssertions15to28:
         assert "R14" in result.skipped_rules
         assert not any(hit.rule_id == "R14" for hit in result.hits)
         assert result.qc_status != "PARTIAL"
-        assert result.qc_status == "DONE"
+        assert result.qc_status == "PENDING_REVIEW"
         _assert_zero_kb_search(rag)
 
     async def test_assertion_24_r14_keyword_hit_zero_kb_search(self):

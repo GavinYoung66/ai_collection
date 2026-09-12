@@ -56,13 +56,19 @@ class TestQcSourceMapping:
         assert session.turns[0].speaker == "agent"
         assert session.turns[2].speaker == "agent"
 
-    def test_m1_forces_ptp_and_standard_answer_hit_null(self):
+    def test_m1_forces_ptp_null_keeps_standard_answer_hit(self):
         raw = _fixture()
         raw["case_snapshot"]["ptp_amount"] = 1999.5
         raw["case_snapshot"]["standard_answer_hit"] = {"hit": True}
         mapped = map_qc_source(raw).to_mapped_dict()
         assert mapped["case_snapshot"]["ptp_amount"] is None
-        assert mapped["case_snapshot"]["standard_answer_hit"] is None
+        assert mapped["case_snapshot"]["standard_answer_hit"] == {"hit": True}
+
+    def test_standard_answer_hit_string_survives_mapping(self):
+        raw = _fixture()
+        raw["case_snapshot"]["standard_answer_hit"] = "条款原文截断"
+        mapped = map_qc_source(raw).to_mapped_dict()
+        assert mapped["case_snapshot"]["standard_answer_hit"] == "条款原文截断"
 
     def test_dial_history_kept_only_when_count_present(self):
         raw = _fixture()

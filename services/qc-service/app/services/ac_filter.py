@@ -39,6 +39,7 @@ class WordHit:
     end_offset_ms: int | None = None
     evidence_text: str | None = None
     rule_id: str | None = None
+    kb_snippet: str | None = None
     extras: dict[str, Any] = field(default_factory=dict)
 
 

@@ -191,6 +191,7 @@ class TestR14:
         assert "/kb/search" not in src
         assert "RagClient" not in src
         assert "guardrail.pass" not in src
+        assert qc_settings.QC_R14_RAG_ENABLED is False
         RuleEngine().run(_session(turns=_turns(("agent", "强制执行", 1))))
         RuleEngine(_r14_pack(keywords=[])).run(_session())
 

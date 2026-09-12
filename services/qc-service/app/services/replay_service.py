@@ -11,9 +11,11 @@ from app.integrations.qc_session import QCSession
 from app.models.qc import QcRecord
 from app.observability import emit_check_completed
 from app.repositories.alert_repo import AlertRepo
+from app.repositories.demo_store import DemoTraceStore
 from app.repositories.job_store import QcJobStore
 from app.repositories.quality_repo import QualityRepo
 from app.services.ac_filter import WordHit
+from app.services.demo_trace import elapsed_ms, make_trace_event, safe_append, safe_set_meta, utc_now
 from app.services.offline_qc_service import CODE_OK, SUSPECTED_RULE_IDS, OfflineQcService, QcRunResult
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
@@ -39,7 +41,11 @@ def hit_to_http(hit: WordHit) -> dict[str, Any]:
         "severity": hit.severity,
         "redline_tag": hit.redline_tag,
         "speaker": hit.speaker,
+        "score_eligible": bool(hit.score_eligible),
         "evidence_text": mask_text(hit.evidence_text or ""),
+        "source": hit.source,
+        "word": hit.word or None,
+        "kb_snippet": hit.kb_snippet,
     }
 
 
@@ -85,15 +91,18 @@ class ReplayService:
         job_store: QcJobStore | None = None,
         quality_repo: QualityRepo | None = None,
         dp_client: DpClient | None = None,
+        trace_store: DemoTraceStore | None = None,
     ) -> None:
         if offline is None:
-            self.offline = OfflineQcService(job_store=job_store)
+            self.offline = OfflineQcService(job_store=job_store, trace_store=trace_store)
         else:
             if job_store is not None:
                 if offline.job_store is None:
                     offline.job_store = job_store
                 elif offline.job_store is not job_store:
                     raise ValueError("ReplayService must reuse OfflineQcService.job_store")
+            if trace_store is not None and getattr(offline, "trace_store", None) is None:
+                offline.trace_store = trace_store
             self.offline = offline
         self.quality_repo = quality_repo
         self.dp_client = dp_client
@@ -174,6 +183,9 @@ class ReplayService:
                 redline_tag=hit.redline_tag,
                 speaker=hit.speaker,
                 evidence_text=hit.evidence_text,
+                source=hit.source,
+                word=hit.word or None,
+                kb_snippet=hit.kb_snippet,
             )
             if vrow is not None and getattr(vrow, "id", None) is not None:
                 violation_ids[(hit.rule_id, hit.turn_id, hit.speaker)] = vrow.id
@@ -215,6 +227,16 @@ class ReplayService:
             violation_count=len(result.hits),
         )
         await self._publish_terminal_events(result, qc)
+        await safe_append(
+            getattr(self.offline, "trace_store", None),
+            qc.session_id,
+            make_trace_event(
+                category="events",
+                name="outbound",
+                status="ok",
+                summary=f"inserted={result.inserted} qc_status={result.qc_status}",
+            ),
+        )
         return result
 
     async def _publish_terminal_events(self, result: QcRunResult, qc: QCSession) -> None:
@@ -310,7 +332,26 @@ class ReplayService:
     async def replay_by_session_id(self, session_id: str, *, force: bool = False) -> QcRunResult:
         if self.dp_client is None:
             raise RuntimeError("DpClient is required for path replay")
+        t0 = time.perf_counter()
+        started = utc_now()
         qc = await self.dp_client.get_qc_source(session_id)
+        await safe_append(
+            getattr(self.offline, "trace_store", None),
+            session_id,
+            make_trace_event(
+                category="dp",
+                name="qc-source",
+                status="ok",
+                summary=f"turns={len(qc.turns or [])}",
+                duration_ms=elapsed_ms(t0),
+                started_at=started,
+            ),
+        )
+        await safe_set_meta(
+            getattr(self.offline, "trace_store", None),
+            session_id,
+            call_id=event_call_id(qc.call_id, session_id=session_id),
+        )
         return await self.replay_session(qc, force=force, persist=True)
 
     async def replay_raw(self, qc: QCSession, *, force: bool = False, idempotency_key: str) -> QcRunResult:

@@ -1,7 +1,8 @@
-"""QC-3.1：rag 只拉 current.dict；无 search；失败保持旧词表。"""
+"""QC-3.1：rag GET current.dict；search 独立于词库熔断。"""
 from __future__ import annotations
 
 import inspect
+import json
 
 import httpx
 import pytest
@@ -17,12 +18,10 @@ def _assert_no_search(urls: list[str]) -> None:
 
 
 class TestRagClientSurface:
-    def test_no_search_method(self):
-        assert not hasattr(RagClient, "search")
-        assert not hasattr(RagClient, "kb_search")
+    def test_search_method_exists(self):
+        assert hasattr(RagClient, "search")
         names = [name for name, _ in inspect.getmembers(RagClient, predicate=inspect.isfunction)]
-        assert not any("search" in name.lower() for name in names)
-        assert "search" not in vars(RagClient)
+        assert "search" in names or "search" in vars(RagClient)
 
     def test_r14_flag_stays_false(self):
         assert qc_settings.QC_R14_RAG_ENABLED is False
@@ -141,3 +140,75 @@ class TestRagClientFetch:
         assert client.ac_ref == ("起诉",)
         assert client._consecutive_failures == 0
         assert client.breaker_open is False
+
+
+class TestRagClientSearch:
+    @pytest.mark.asyncio
+    async def test_search_posts_kb_path_and_returns_snippet(self):
+        seen: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["method"] = request.method
+            seen["url"] = str(request.url)
+            seen["body"] = json.loads(request.content.decode("utf-8"))
+            seen["trace"] = request.headers.get("X-Trace-Id")
+            return httpx.Response(
+                200,
+                json={
+                    "code": "0",
+                    "data": {
+                        "results": [
+                            {
+                                "content": "公约59严禁虚构免息、全额减免。" + ("补" * 80),
+                                "score": 0.81,
+                            }
+                        ]
+                    },
+                },
+            )
+
+        http = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=3.0)
+        client = RagClient(base_url="http://rag-service:8000", retry_delay=0, client=http)
+        snippet = await client.search("再不还就起诉你")
+        assert seen["method"] == "POST"
+        assert str(seen["url"]).endswith("/api/v1/kb/search")
+        assert "/api/v1" not in "http://rag-service:8000"
+        body = seen["body"]
+        assert body == {
+            "query": "再不还就起诉你",
+            "category": "script",
+            "top_k": 3,
+            "answer": False,
+        }
+        assert snippet is not None
+        assert snippet.startswith("公约59严禁虚构免息")
+        assert len(snippet) == 80
+        assert ("POST", client.search_url()) in client.recorded_requests()
+
+    @pytest.mark.asyncio
+    async def test_search_timeout_does_not_trip_dict_breaker(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                raise httpx.ReadTimeout("search timeout")
+            return httpx.Response(200, text="起诉\n")
+
+        http = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=3.0)
+        client = RagClient(base_url="http://rag-service:8000", retry_delay=0, client=http)
+        client._words = ["起诉"]
+        client._ac_ref = ("起诉",)
+        snippet = await client.search("再不还就起诉你")
+        assert snippet is None
+        assert client._consecutive_failures == 0
+        assert client.breaker_open is False
+        words = await client.fetch_current_dict()
+        assert words == ["起诉"]
+
+    @pytest.mark.asyncio
+    async def test_empty_results_returns_none(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"results": []})
+
+        http = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=3.0)
+        client = RagClient(base_url="http://rag-service:8000", retry_delay=0, client=http)
+        assert await client.search("强制执行") is None
+

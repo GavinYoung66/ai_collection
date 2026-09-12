@@ -8,11 +8,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.config import qc_settings
-from app.deps import get_job_store, get_quality_repo, get_redis
+from app.deps import get_job_store, get_quality_repo, get_rag_client, get_redis
 from app.errors import envelope, http_status_for, success
 from app.events.publisher import QcEventPublisher
 from app.integrations.dp_client import DpClient
 from app.integrations.qc_session import QCSession, map_qc_source
+from app.integrations.rag_client import RagClient
+from app.repositories.demo_store import DemoTraceStore
 from app.repositories.job_store import QcJobStore
 from app.repositories.quality_repo import QualityRepo
 from app.services.llm_reviewer import LLMReviewer
@@ -88,17 +90,27 @@ async def get_replay_service(
     quality_repo: QualityRepo = Depends(get_quality_repo),
     dp_client: DpClient = Depends(get_dp_client),
     llm: LLMReviewer = Depends(get_llm_reviewer),
+    rag: RagClient = Depends(get_rag_client),
 ) -> ReplayService:
     llm.job_store = job_store
     llm.circuit.job_store = job_store
-    publisher = QcEventPublisher(getattr(job_store, "_redis", None))
+    redis = getattr(job_store, "_redis", None)
+    publisher = QcEventPublisher(redis)
     llm.publisher = publisher
-    offline = OfflineQcService(job_store=job_store, llm=llm, publisher=publisher)
+    trace_store = DemoTraceStore(redis) if redis is not None else None
+    offline = OfflineQcService(
+        job_store=job_store,
+        llm=llm,
+        publisher=publisher,
+        rag=rag,
+        trace_store=trace_store,
+    )
     return ReplayService(
         offline,
         job_store=job_store,
         quality_repo=quality_repo,
         dp_client=dp_client,
+        trace_store=trace_store,
     )
 
 

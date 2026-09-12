@@ -102,6 +102,8 @@ class TestReviewHttp:
         data = resp.json()["data"]
         assert data["qc_status"] == "REVIEWED"
         assert data["compliance_score"] == 72
+        assert data["qc_result"] == "violation"
+        assert data["grade"] == "WARNING"
         assert "score" not in data
         assert data["risk"] == "high"
         assert row.qc_status == "REVIEWED"
@@ -109,6 +111,49 @@ class TestReviewHttp:
         assert repo.reviews and repo.reviews[0].action == "CORRECT"
         channels = [ch for ch, _msg in redis.published]
         assert CHANNEL_REVIEW_DONE in channels
+
+    def test_correct_100_sets_reviewed_and_score(self):
+        repo = FakeReviewRepo()
+        redis = MemoryRedis(db=3)
+        row = _record(compliance_score=80, qc_status="PENDING_REVIEW")
+        repo.add(row)
+        client = _client(repo, redis)
+        resp = client.post(
+            f"/api/v1/qc/reviews/{row.id}",
+            headers=_token("QC"),
+            json={"action": "CORRECT", "revised_score": 100, "reason": "误报"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["qc_status"] == "REVIEWED"
+        assert data["compliance_score"] == 100
+        assert data["qc_result"] == "compliant"
+        assert data["grade"] == "EXCELLENT"
+        assert data["risk"] == "low"
+        assert row.qc_status == "REVIEWED"
+        assert row.compliance_score == 100
+        assert row.qc_result == "compliant"
+
+    def test_confirm_does_not_change_score(self):
+        repo = FakeReviewRepo()
+        row = _record(compliance_score=64, qc_status="PENDING_REVIEW")
+        repo.add(row)
+        client = _client(repo)
+        resp = client.post(
+            f"/api/v1/qc/reviews/{row.id}",
+            headers=_token("QC"),
+            json={"action": "CONFIRM", "reason": "扣分正确"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["qc_status"] == "REVIEWED"
+        assert data["compliance_score"] == 64
+        assert data["qc_result"] == "violation"
+        assert data["grade"] == "WARNING"
+        assert row.compliance_score == 64
+        assert row.qc_result == "violation"
+        assert repo.reviews and repo.reviews[0].action == "CONFIRM"
+        assert repo.reviews[0].revised_score is None
 
     def test_reviewed_again_is_a2007(self):
         repo = FakeReviewRepo()

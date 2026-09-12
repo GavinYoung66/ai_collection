@@ -42,7 +42,7 @@ RuleEngine SHALL 按 DD-02 §5.2.2 skip 条件执行 R01–R09、R11–R15。ski
 
 R04 SHALL 使用 DD-02 §5.2.4 确认词/披露词；确认后披露 MUST NOT 命中 R04；自称公权力 SHALL 走 R12 而非 R04。R04 MUST NOT 依赖 `debtor_name`。
 
-R14 SHALL 按 DD-02 §5.2.3 比对 `qc_rules` 关键词和/或 `standard_answer_hit`。无关键词且无 hit_text SHALL skip R14。R14 MUST NOT 调用 `POST /kb/search`。R14 severity SHALL 为 medium，默认 `QC_ALERT_LEVEL_MIN=high` 时 MUST NOT 告警。`QC_R14_RAG_ENABLED` MUST 为 false。
+R14 SHALL 按 DD-02 §5.2.3 比对 `qc_rules` 关键词和/或 `standard_answer_hit`。无关键词且无 hit_text 且检索未命中 SHALL skip R14。当 `QC_R14_RAG_ENABLED=true` 时 R14 MUST 允许调用 `POST /kb/search` 并将命中写入 `standard_answer_hit` 或 hits 条款字段；为 false 时 MUST NOT 检索。R14 severity SHALL 为 medium，默认 `QC_ALERT_LEVEL_MIN=high` 时 MUST NOT 告警。演示默认 `QC_R14_RAG_ENABLED` MUST 为 true。
 
 缺护栏日志 MUST NOT 标 `unverified`，MUST NOT 伪造 R10 hit。缺 `result` 时 R10 skip SHALL 只在合并后 R10 步骤求值，不在本轮规则中求值。
 
@@ -53,8 +53,13 @@ R14 SHALL 按 DD-02 §5.2.3 比对 `qc_rules` 关键词和/或 `standard_answer_
 
 #### Scenario: R14 永不检索知识库
 
-- **WHEN** M1 求值 R14
+- **WHEN** `QC_R14_RAG_ENABLED=false` 且求值 R14
 - **THEN** 无论命中或 skip，均不 HTTP 调用 `/kb/search`
+
+#### Scenario: R14 开关开启时检索知识库
+
+- **WHEN** `QC_R14_RAG_ENABLED=true` 且求值 R14
+- **THEN** 允许 HTTP 调用 `/kb/search`；失败则回退关键词，不 PARTIAL
 
 ### Requirement: MergeHits 去重键与严重度
 
@@ -87,7 +92,7 @@ R10 SHALL 至多追加一条会话级 hit（`rule_id=R10`，`redline_tag=unverif
 
 `grade` SHALL 按分数阈值：≥90 EXCELLENT / ≥80 PASS / ≥60 WARNING / <60 SERIOUS。`grade` 与 `risk_level` SHALL 独立。单条 agent high（−20）SHALL 同时得到 `compliance_score=80`、`risk_level=high`、`grade=PASS`。
 
-未复核时 `qc_result` / `qc_status` 映射：agent+high SHALL 设 `qc_result=pending_review` 且 `qc_status=PENDING_REVIEW`；有坐席违规但无 high SHALL 设 `qc_result=violation` 且 `qc_status=DONE`；无坐席违规 SHALL 设 `qc_result=compliant` 且 `qc_status=DONE`。分数 MUST NOT 改写 `qc_result`。RUNNING 中崩溃 SHALL 落 `PARTIAL` 且 A2001 HTTP 200。raw replay 无 `call_records` SHALL 返回 A2003 且 MUST NOT 插 `qc_records`。
+未复核时 `qc_result` / `qc_status` 映射：可计分扣分合计 >0 SHALL 设 `qc_result=pending_review` 且 `qc_status=PENDING_REVIEW`（含仅中低危扣分；不再因「无 agent-high」自动 `DONE`）。可计分扣分合计 =0 SHALL 设 `qc_result=compliant` 且 `qc_status=DONE`。分数 MUST NOT 改写 `qc_result`。RUNNING 中崩溃 SHALL 落 `PARTIAL` 且 A2001 HTTP 200。raw replay 无 `call_records` SHALL 返回 A2003 且 MUST NOT 插 `qc_records`。
 
 `qc.complaint.suspected` 资格 SHALL 由合并 hits 计算：仅 `speaker=agent` 且 `severity=high` 且 `rule_id∈{R11,R12,R13}`。R05 即使 `redline_tag=threat` MUST NOT 合格。`qc.stop_call.detected` SHALL 在合并 hits 含坐席 R13 且为停呼场景时合格（用户说停止致电/不要再打后坐席仍催收）。仅用户原话 MUST NOT 发布 stop_call 或 suspected。
 
@@ -98,10 +103,10 @@ R10 SHALL 至多追加一条会话级 hit（`rule_id=R10`，`redline_tag=unverif
 
 #### Scenario: 仅坐席中低危为 violation DONE
 
-- **WHEN** 合并 hits 含坐席 medium/low 且无 agent high
-- **THEN** 库存 `qc_result=violation` 且 `qc_status=DONE`；`risk_level` 为 `low` 或 `medium`（扣分≥20），无 agent-high 时不得为 `high`
+- **WHEN** 合并 hits 含坐席 medium/low 且无 agent high，且可计分扣分 >0
+- **THEN** 库存 `qc_result=pending_review` 且 `qc_status=PENDING_REVIEW`；`risk_level` 为 `low` 或 `medium`（扣分≥20），无 agent-high 时不得为 `high`
 
 #### Scenario: R05 threat 标签不发 suspected
 
 - **WHEN** 仅有 R05 hits（agent、low、tag=threat）
-- **THEN** 扣 2 分，无 `qc_alerts` 行，且 suspected 不合格
+- **THEN** 扣 2 分，`qc_status=PENDING_REVIEW`，无 `qc_alerts` 行，且 suspected 不合格

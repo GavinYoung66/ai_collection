@@ -263,6 +263,17 @@ class TestReplayPath:
         assert "skipped_rules" not in data
         assert data["call_id"] is None
         assert _qc_records(db)
+        assert data["hits"]
+        for hit in data["hits"]:
+            assert "source" in hit
+            assert "word" in hit
+            assert "kb_snippet" in hit
+        stored = [item for item in db.added if isinstance(item, tuple) and item[0] == "violation"]
+        assert stored
+        for _kind, _rid, fields in stored:
+            assert "source" in fields
+            assert "word" in fields
+            assert "kb_snippet" in fields
 
     def test_retry_max_inserts_partial_a2003(self):
         db = ApiFakeSession()

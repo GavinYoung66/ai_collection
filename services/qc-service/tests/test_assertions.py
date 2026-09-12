@@ -92,6 +92,9 @@ class MaskingQualityRepo(FakeQualityRepo):
             redline_tag=fields.get("redline_tag"),
             speaker=fields.get("speaker") or "agent",
             evidence_text=fields.get("evidence_text"),
+            source=fields.get("source"),
+            word=fields.get("word"),
+            kb_snippet=fields.get("kb_snippet"),
         )
         row.id = uuid4()
         self.session.add(row)
@@ -367,6 +370,8 @@ class TestAssertions1to14:
         r02 = [hit for hit in data["hits"] if hit.get("rule_id") == "R02"]
         assert r02
         assert data["compliance_score"] == 92
+        assert data["qc_result"] == "pending_review"
+        assert data["qc_status"] == "PENDING_REVIEW"
 
     def test_assertion_08_stop_call_r13_user_not_scored(self):
         db = ApiFakeSession()

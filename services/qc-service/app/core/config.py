@@ -32,7 +32,7 @@ class QcSettings(BaseSettings):
     QC_BATCH_MAX: int = 100
     QC_MOCK_LLM: bool = False  # true 跳过真实 LLM，不熔断、不发 A2011；默认 false
     QC_DEFAULT_ACTIVE_RULES_VERSION: str = "v1.0"
-    QC_R14_RAG_ENABLED: bool = False
+    QC_R14_RAG_ENABLED: bool = False  # 单测/无 rag 默认 false；compose 演示钉 true
     QC_REDIS_DB: int = 3
 
     @model_validator(mode="after")

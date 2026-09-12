@@ -92,4 +92,5 @@ class TestMergeHits:
         scored = ScoringService().score(only_r05)
         assert scored.compliance_score == 98
         assert scored.risk_level == "low"
-        assert scored.qc_result == "violation"
+        assert scored.qc_result == "pending_review"
+        assert scored.qc_status == "PENDING_REVIEW"

@@ -1,12 +1,14 @@
-"""QC-11.4：M2+ 能力明确 skip，禁止为跳过而去实现。"""
+"""M2+ 能力：红线 6 / WS 仍 skip；kb/search 已由本 change 解禁。"""
 from __future__ import annotations
 
 import pytest
 
+from app.integrations.rag_client import RagClient
 
-@pytest.mark.skip(reason="M2+: 不测 RAG 标准答案检索 POST /api/v1/kb/search；M1 QC_R14_RAG_ENABLED=false")
-def test_skip_rag_standard_answer_kb_search():
-    raise AssertionError("M1 must not execute /kb/search")
+
+def test_kb_search_client_covered_elsewhere():
+    """RagClient.search 与管道调用见 test_rag_client.py / test_kb_search.py。"""
+    assert hasattr(RagClient, "search")
 
 
 @pytest.mark.skip(reason="M2+: 不测红线 6；不测 audit_logs.action=guardrail.pass；红线 6 非 M1 必过")

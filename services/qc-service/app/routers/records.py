@@ -70,7 +70,11 @@ def violation_to_hit(row: QcViolation) -> dict[str, Any]:
         "severity": row.severity,
         "redline_tag": row.redline_tag,
         "speaker": row.speaker,
+        "score_eligible": str(row.speaker or "") != "user",
         "evidence_text": evidence,
+        "source": row.source,
+        "word": row.word,
+        "kb_snippet": row.kb_snippet,
     }
 
 

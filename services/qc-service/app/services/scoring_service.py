@@ -37,12 +37,9 @@ class ScoringService:
         penalty = 0
         high = med = low = 0
         agent_high = False
-        agent_violation = False
         for hit in hits:
             if hit.speaker == "agent" and hit.severity == "high":
                 agent_high = True
-            if hit.speaker == "agent" and hit.score_eligible:
-                agent_violation = True
             if not hit.score_eligible:
                 continue
             penalty += PENALTY.get(hit.severity, 0)
@@ -59,10 +56,8 @@ class ScoringService:
             risk = "medium"
         else:
             risk = "low"
-        if agent_high:
+        if penalty > 0:
             qc_result, qc_status = "pending_review", "PENDING_REVIEW"
-        elif agent_violation:
-            qc_result, qc_status = "violation", "DONE"
         else:
             qc_result, qc_status = "compliant", "DONE"
         return ScoreResult(

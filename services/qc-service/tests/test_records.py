@@ -175,6 +175,9 @@ class TestRecordsDetail:
             redline_tag="fake_identity",
             speaker="agent",
             evidence_text=mask_text(f"请回拨{phone}"),
+            source="rule",
+            word=None,
+            kb_snippet=None,
         )
         repo.records[row.session_id] = row
         repo.violations[str(row.id)] = [viol]
@@ -192,6 +195,9 @@ class TestRecordsDetail:
         evidence = data["hits"][0]["evidence_text"]
         assert phone not in evidence
         assert "13812345678" not in resp.text
+        assert data["hits"][0]["source"] == "rule"
+        assert "word" in data["hits"][0]
+        assert "kb_snippet" in data["hits"][0]
 
     def test_detail_empty_skipped_rules_key_present(self):
         repo = FakeRecordsRepo()
@@ -201,6 +207,7 @@ class TestRecordsDetail:
         data = client.get(f"/api/v1/qc/records/{row.session_id}").json()["data"]
         assert "skipped_rules" in data
         assert data["skipped_rules"] == []
+        assert data["hits"] == []
 
     def test_partial_wait_text_job_falls_through_to_audit(self):
         redis = MemoryRedis(db=3)

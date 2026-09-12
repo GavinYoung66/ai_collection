@@ -24,6 +24,7 @@ class MemoryRedis:
     def __init__(self, db: int = 3):
         self.connection_pool = type("Pool", (), {"connection_kwargs": {"db": db}})()
         self.data: dict[str, str] = {}
+        self.lists: dict[str, list[str]] = {}
         self.ttl: dict[str, int | None] = {}
         self.published: list[tuple[str, str]] = []
         self.xadd_log: list[tuple[str, dict]] = []
@@ -39,6 +40,18 @@ class MemoryRedis:
         for key in keys:
             self.data.pop(key, None)
             self.ttl.pop(key, None)
+            self.lists.pop(key, None)
+
+    async def rpush(self, key: str, *values: str) -> int:
+        bucket = self.lists.setdefault(key, [])
+        bucket.extend(str(v) for v in values)
+        return len(bucket)
+
+    async def lrange(self, key: str, start: int, end: int) -> list[str]:
+        items = self.lists.get(key, [])
+        if end == -1:
+            return items[start:]
+        return items[start : end + 1]
 
     async def incr(self, key: str) -> int:
         current = int(self.data.get(key) or 0) + 1

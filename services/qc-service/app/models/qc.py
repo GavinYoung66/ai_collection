@@ -119,6 +119,10 @@ class QcViolation(Base, PublicFieldsMixin):
             name="qc_violations_redline_tag_check",
         ),
         CheckConstraint("speaker IN ('agent','user')", name="qc_violations_speaker_check"),
+        CheckConstraint(
+            "source IS NULL OR source IN ('ac','rule','llm')",
+            name="qc_violations_source_check",
+        ),
         CheckConstraint("is_delete IN ('0','1')", name="qc_violations_is_delete_check"),
         Index("idx_qc_violations_qc_record_id", "qc_record_id"),
         Index("idx_qc_violations_redline_tag", "redline_tag"),
@@ -136,6 +140,9 @@ class QcViolation(Base, PublicFieldsMixin):
     severity = Column(String(10), nullable=False)
     redline_tag = Column(String(30), nullable=True)
     speaker = Column(String(10), nullable=False)
+    source = Column(String(10), nullable=True, comment="命中来源 ac|rule|llm")
+    word = Column(String(255), nullable=True, comment="AC 命中词")
+    kb_snippet = Column(Text, nullable=True, comment="检索条款原文")
     evidence_text = Column(Text, nullable=True)
     start_offset_ms = Column(Integer, nullable=True)
     end_offset_ms = Column(Integer, nullable=True)

@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
 # qc-service M1 冒烟（SSOT）：health → seed 通话 → replay/raw → records → alerts
 #
-# 依赖：rag-dict-mock（current.dict）+ data-platform + PostgreSQL + Redis。
+# 依赖：data-platform + PostgreSQL + Redis。
 # MUST NOT 启动 call-service（qc 不 ingest、无 WS、不把 call 当冒烟依赖）。
-# MUST NOT 为词库去起 rag-service / ES / milvus。
 #
 # 前置：
 #   1. postgres / redis 已起；qc-service 映射 localhost:8003（容器内 8000）
-#   2. QC_MOCK_LLM=true（compose.dev 已钉死；跳过真模型、不熔断、不误报 A2011）
-#   3. 词库探活需要 rag-dict-mock（宿主机 8002）；路径 replay 需要 data-platform。本脚本主路径用 replay/raw
-#   4. seed 需要能连 PG（psql，或 docker exec 正在跑的 postgres 容器）
-#   5. alerts 签发 JWT 需要能 import common.security.rbac（jose）。pick_python 优先 conda ai_collection；
+#   2. 轻量冒烟可选 QC_MOCK_LLM=true + rag-dict-mock（非演示默认）
+#   3. 演示默认见 docker-compose.dev.yml：QC_MOCK_LLM=false、QC_R14_RAG_ENABLED=true、
+#      QC_RAG_SENSITIVE_BASE=http://rag-service:8000（~50 词 current.dict）。本脚本不强制起 milvus。
+#   4. 路径 replay 需要 data-platform。本脚本主路径用 replay/raw
+#   5. seed 需要能连 PG（psql，或 docker exec 正在跑的 postgres 容器）
+#   6. alerts 签发 JWT 需要能 import common.security.rbac（jose）。pick_python 优先 conda ai_collection；
 #        也可 PYTHON=/path/to/ai_collection/bin/python bash scripts/smoke/smoke_qc.sh
 #
-# 起栈（仓库根，不要起 call-service / rag-service）：
-#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d \
+# 轻量冒烟起栈（仓库根，不要起 call-service；非 demo 默认词库）：
+#   docker compose -f docker-compose.yml -f docker-compose.smoke-services.yml up -d --build \
 #       postgres redis data-platform rag-dict-mock qc-service
+#
+# 演示栈（rag-service ~50 词 + kb/search）：
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build \
+#       postgres redis data-platform rag-service qc-service
 
 #
 # 用法（仓库根）：

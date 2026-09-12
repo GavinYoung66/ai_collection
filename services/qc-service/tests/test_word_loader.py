@@ -33,7 +33,7 @@ class TestWordLoader:
         src = inspect.getsource(WordLoader)
         assert "since_v" not in src
         assert "/kb/search" not in src
-        assert not hasattr(RagClient, "search")
+        assert "search(" not in src
 
     @pytest.mark.asyncio
     async def test_load_once_writes_words_version(self):

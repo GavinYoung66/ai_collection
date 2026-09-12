@@ -5,9 +5,11 @@
 #   构建+启动：docker compose -f docker-compose.yml -f docker-compose.smoke-services.yml up -d --build \
 #                data-platform qc-service call-service case-service complaint-service review-service
 #   （显式列出服务避免拉起 base 中的 ocr-service，其基础镜像 paddlepaddle 在本机网络拉不动）
-#   仅 qc 冒烟栈（不起 call-service、不起 rag 全栈；词库用 rag-dict-mock）：
+#   仅 qc 轻量冒烟可选（不起 rag 全栈、词库仍可用 rag-dict-mock 7 词；非演示默认）：
 #     docker compose -f docker-compose.yml -f docker-compose.smoke-services.yml up -d --build \
 #         data-platform rag-dict-mock qc-service
+#   演示默认请用 docker-compose.dev.yml：qc 依赖 rag-service（~50 词 dict + /kb/search），
+#   QC_MOCK_LLM=false、QC_R14_RAG_ENABLED=true。不要把 rag-dict-mock 当成 demo 词库。
 #   若走 docker-compose.dev.yml 起 rag：会连带 minio/ES；不要用已失效的 ustc 镜像源
 #   （docker.mirrors.ustc.edu.cn DNS 失败 → minio / elasticsearch-ik pull 挂）。见 docker-compose.dev.yml 文头。
 #   跑冒烟：bash scripts/smoke/smoke_data_platform.sh && bash scripts/smoke/smoke_qc.sh ...
@@ -77,7 +79,7 @@ services:
       PG_PORT: "5432"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
-      # DD-02 §12；host 不含 /api/v1。M1 词库走 rag-dict-mock，不要拉 rag 全栈。
+      # 轻量冒烟可选：7 词 mock。演示默认见 docker-compose.dev.yml（rag-service:8000，非 rag-dict-mock）。
       QC_RAG_SENSITIVE_BASE: http://rag-dict-mock:8000
       QC_RAG_INITIAL_TIMEOUT: "3"
       QC_RAG_HOURLY_CRON: "0 * * * *"

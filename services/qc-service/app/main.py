@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.health import router as health_router
 from app.auth import register_auth_handlers
@@ -11,6 +12,7 @@ from app.errors import register_qc_exception_handlers
 from app.events.subscriber import start_background_tasks
 from app.routers.alerts import router as alerts_router
 from app.routers.check import router as check_router
+from app.routers.demo import router as demo_router
 from app.routers.records import router as records_router
 from app.routers.review import router as review_router
 from app.routers.rules import router as rules_router
@@ -37,12 +39,25 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="QC Service", version="1.0.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:5500",
+        "http://127.0.0.1:5500",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.add_middleware(TraceMiddleware)
 register_exception_handlers(app)
 register_qc_exception_handlers(app)
 register_auth_handlers(app)
 app.include_router(health_router)
 app.include_router(check_router)
+app.include_router(demo_router)
 app.include_router(records_router)
 app.include_router(alerts_router)
 app.include_router(review_router)

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from app.core.config import qc_settings
 from app.integrations.rag_client import RagClient
 from app.seeds.qc_rules_v1 import V1_SEED
 from app.services.ac_filter import ACFilter, SensitiveWord, WordHit
@@ -166,28 +167,33 @@ class TestAssertion22:
         scored = ScoringService().score([r05])
         alerts = AlertService().on_high_risk([r05])
         assert scored.compliance_score == 98
+        assert scored.qc_result == "pending_review"
+        assert scored.qc_status == "PENDING_REVIEW"
         assert alerts == []
         assert suspected_eligible([r05]) is False
 
 
 class TestAssertion23:
     @pytest.mark.asyncio
-    async def test_r14_skip_without_search_not_partial(self):
-        assert not hasattr(RagClient, "search")
+    async def test_r14_skip_without_search_not_partial(self, monkeypatch):
+        monkeypatch.setattr(qc_settings, "QC_R14_RAG_ENABLED", False)
+        rag = RagClient()
         src = (_APP / "services" / "rule_engine.py").read_text(encoding="utf-8")
         assert "/kb/search" not in src
         engine = RuleEngine(_r14_pack(keywords=[]))
         svc = _offline(rules=engine)
+        svc.rag = rag
         result = await svc.run(_session(turns=_turns(("agent", "请尽快处理账单", 1))))
         assert "R14" in result.skipped_rules
         assert not any(hit.rule_id == "R14" for hit in result.hits)
         assert result.qc_status != "PARTIAL"
-        assert result.qc_status == "DONE"
+        assert result.qc_status == "PENDING_REVIEW"
+        assert all("/kb/search" not in url for url in rag.recorded_urls())
 
 
 class TestAssertion24:
-    def test_r14_keyword_hits_without_rag_http(self):
-        assert not hasattr(RagClient, "search")
+    def test_r14_keyword_hits_without_rag_http(self, monkeypatch):
+        monkeypatch.setattr(qc_settings, "QC_R14_RAG_ENABLED", False)
         result = RuleEngine().run(_session(turns=_turns(("agent", "再不还就起诉你", 1))))
         r14 = [hit for hit in result.hits if hit.rule_id == "R14"]
         assert r14

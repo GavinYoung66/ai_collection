@@ -73,7 +73,13 @@ class TestChildTables:
         assert "agent" in sql and "user" in sql
         assert "high" in sql and "medium" in sql and "low" in sql
         assert QcViolation.__tablename__ == "qc_violations"
-        assert "qc_record_id" in _cols(QcViolation)
+        cols = _cols(QcViolation)
+        assert "qc_record_id" in cols
+        assert "source" in cols
+        assert "word" in cols
+        assert "kb_snippet" in cols
+        sql = _check_sql(QcViolation)
+        assert "ac" in sql and "rule" in sql and "llm" in sql
 
     def test_alerts_level_high_only(self):
         sql = _check_sql(QcAlert)

@@ -12,6 +12,7 @@ from app.deps import get_active_qc_rules, get_rag_client, get_redis
 from app.events.publisher import FORBIDDEN_CHANNELS, QcEventPublisher
 from app.integrations.dp_client import DpClient
 from app.integrations.qc_session import QCSession
+from app.repositories.demo_store import DemoTraceStore
 from app.repositories.job_store import QcJobStore
 from app.repositories.quality_repo import QualityRepo
 from app.services.ac_filter import get_shared_ac
@@ -67,8 +68,10 @@ async def default_replay_session(qc: QCSession) -> QcRunResult:
             ac=get_shared_ac(),
             job_store=job_store,
             publisher=publisher,
+            rag=get_rag_client(),
+            trace_store=DemoTraceStore(redis),
         )
-        replay = ReplayService(offline, quality_repo=repo)
+        replay = ReplayService(offline, quality_repo=repo, trace_store=offline.trace_store)
         return await replay.replay_session(qc)
 
 
