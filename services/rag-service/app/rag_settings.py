@@ -61,10 +61,7 @@ class RagSettings(BaseSettings):
     KB_ASSETS_DIR: str = "data/assets"
     KB_ASSETS_MAX_SIZE: int = 1024
 
-    LANGSMITH_ENABLED: bool = False
-    LANGSMITH_API_KEY: str = ""
-    LANGSMITH_PROJECT: str = "rag-service"
-    LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
+    # LangSmith 追踪配置已上收 common Settings（跨服务统一开关，见 common/trace/langsmith_gate.py）
 
     OCR_ENDPOINT: str = "http://ocr-service:8200/ocr"
     OCR_TIMEOUT: int = 30

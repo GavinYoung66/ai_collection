@@ -25,6 +25,15 @@ setup_logging()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # 链路追踪兜底：统一开关关闭时清除 LangSmith/LangChain SDK 环境变量，
+    # 防止 SDK 读 os.environ 绕过闸门自动上报（与 rag-service 对齐）。
+    from common.config.settings import settings as platform_settings
+    from common.trace.langfuse_gate import configure_langfuse_env
+    from common.trace.langsmith_gate import configure_langsmith_env
+
+    configure_langsmith_env(platform_settings)
+    configure_langfuse_env(platform_settings)
+
     tasks = await start_background_tasks()
     try:
         yield

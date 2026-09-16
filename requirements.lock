@@ -58,6 +58,7 @@ faster-whisper==1.0.3       # Whisper 本地转写（ASR_PROVIDER=whisper，懒�
 # === RAG V5 增量依赖 ===
 # gradio 不进全局锁：与既有 fastapi==0.104.1 等 V4 锁定硬冲突，独立锁定于 deploy/gradio/requirements.txt
 langsmith==0.1.147          # 可选链路追踪（LANGSMITH_ENABLED=true 时生效）
+langfuse==4.15.2            # 可选链路追踪（LANGFUSE_ENABLED=true 时生效，本地自托管）
 pydub==0.25.1               # ffmpeg 封装（AMR/WMA 解码）
 
 # === 调度、熔断与限流 ===

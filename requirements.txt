@@ -46,6 +46,7 @@ faster-whisper==1.0.3
 
 # === RAG V5 增量 ===
 langsmith==0.1.147
+langfuse==4.15.2
 pydub==0.25.1
 
 # === 调度、熔断与限流 ===

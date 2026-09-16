@@ -168,17 +168,25 @@ services:
       KB_SUMMARY_ES_BOOST: "1.0"
       KB_SUMMARY_MAX_LEN: "200"
       KB_ASR_OPENING_TRIM_ENABLED: "false"
-      # V5 LLM 回答 + LangSmith 追踪（从 .env 继承，dev 显式透传便于调试）
+      # V5 LLM 回答 + LangSmith 追踪（统一开关从 .env 继承，dev 显式透传便于调试）
       KB_LLM_ANSWER_ENABLED: ${KB_LLM_ANSWER_ENABLED:-true}
       LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
       LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
       LLM_TIMEOUT: ${LLM_TIMEOUT:-30}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
-      LANGSMITH_ENABLED: ${LANGSMITH_ENABLED:-true}
+      # 关闭时默认值必须为 false，避免漏传时把 LangSmith 又打开
+      LANGSMITH_ENABLED: ${LANGSMITH_ENABLED:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
-      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-rag-service}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-ai_collection}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_TRACE_URL_TEMPLATE: ${LANGSMITH_TRACE_URL_TEMPLATE:-}
+      # Langfuse 本地自托管（与 LangSmith 同构）；容器内不能写 localhost，
+      # 统一走 host.docker.internal 访问宿主机 3000
+      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL_DOCKER:-http://host.docker.internal:3000}
       # P1：PDF 内嵌图 OCR 文搜图（dev 默认开启，生产可按需关闭）
       KB_IMAGE_EXTRACT_ENABLED: ${KB_IMAGE_EXTRACT_ENABLED:-true}
       KB_TABLE_EXTRACT_ENABLED: ${KB_TABLE_EXTRACT_ENABLED:-false}
@@ -226,6 +234,11 @@ services:
       PG_PORT: "5432"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      # Langfuse 本地自托管（与 LangSmith 同构）；容器内经 host.docker.internal 访问宿主机
+      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL_DOCKER:-http://host.docker.internal:3000}
       # DD-02 §12；host 不含 /api/v1。演示词库走 rag-service（~50 词 current.dict + /kb/search）。
       # 容器内 rag-service 听 8000；宿主机映射 8002。不要用 rag-dict-mock 当默认。
       QC_RAG_SENSITIVE_BASE: http://rag-service:8000
@@ -356,6 +369,11 @@ services:
       REDIS_PORT: "6379"
       REDIS_DB: "6"
       MCP_GATEWAY_MODE: inline
+      # Langfuse 本地自托管（与 LangSmith 同构）；容器内经 host.docker.internal 访问宿主机
+      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL_DOCKER:-http://host.docker.internal:3000}
       # Mock 默认：不设 RAG_SERVICE_URL；真路径需 USE_MOCK_MCP=false + RAG_SERVICE_URL=http://rag-service:8000
       # 并显式 depends_on rag-service（见 docker-compose.complaint.yml / external-deps README）。
       USE_MOCK_MCP: "true"

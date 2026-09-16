@@ -43,13 +43,8 @@ class ComplaintSettings(Settings):
     DEEPSEEK_API_KEY: str = ""
     DASHSCOPE_API_KEY: str = ""
 
-    # ── LangSmith（P1 外链；common Settings 无此字段，须在此声明）──
-    LANGSMITH_ENABLED: bool = False
-    LANGSMITH_API_KEY: str = ""
-    LANGSMITH_PROJECT: str = "complaint-service"
-    LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
-    # 可点击 URL 模板；未配置则隐藏按钮，避免错误 404
-    LANGSMITH_TRACE_URL_TEMPLATE: str = ""  # e.g. …/p/{project}/r/{run_id}
+    # ── LangSmith 追踪配置已上收 common Settings（跨服务统一开关）──
+    # 见 common/trace/langsmith_gate.py；本服务默认 project 由闸门 fallback 提供
 
 
 settings = ComplaintSettings()

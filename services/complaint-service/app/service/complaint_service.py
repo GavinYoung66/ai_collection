@@ -242,6 +242,7 @@ class ComplaintService:
         from app.models.state import ComplaintSessionState
         from app.service.trace import (
             NodeTimer,
+            OptionalLangfuseRun,
             OptionalLangSmithRun,
             filter_new_logs,
             llm_entry_to_event,
@@ -274,10 +275,13 @@ class ComplaintService:
         rec.setdefault("trace_events", [])
         run_events: list[dict] = []
         timer = NodeTimer()
-        ls_run = OptionalLangSmithRun(
-            "complaint_judge",
-            {"complaint_id": complaint_id, "trace_id": trace_id, "session_id": sid},
-        )
+        judge_inputs = {
+            "complaint_id": complaint_id,
+            "trace_id": trace_id,
+            "session_id": sid,
+        }
+        ls_run = OptionalLangSmithRun("complaint_judge", judge_inputs)
+        lf_run = OptionalLangfuseRun("complaint_judge", judge_inputs)
         interrupt_err: Exception | None = None
         final: dict = {}
 
@@ -364,10 +368,12 @@ class ComplaintService:
 
         if ls_run.run_id:
             rec["langsmith_run_id"] = ls_run.run_id
-        ls_run.end(
-            outputs={"verdict": str((final or {}).get("verdict_draft") or "")[:200]},
-            error=None if interrupt_err is None else f"{type(interrupt_err).__name__}",
-        )
+        run_outputs = {
+            "verdict": str((final or {}).get("verdict_draft") or "")[:200],
+        }
+        run_error = None if interrupt_err is None else f"{type(interrupt_err).__name__}"
+        ls_run.end(outputs=run_outputs, error=run_error)
+        lf_run.end(outputs=run_outputs, error=run_error)
 
         # 推进 session 状态
         ok = session_service.transition(sid, TaskStatus.pending_review)

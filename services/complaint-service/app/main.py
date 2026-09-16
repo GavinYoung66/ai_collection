@@ -55,6 +55,14 @@ async def lifespan(app: FastAPI):
     - Mock 默认路径：不要求 rag-service
     """
     # ── startup ──
+    # 链路追踪兜底：统一开关关闭时清除 LangSmith/LangChain SDK 环境变量，
+    # 防止 LangGraph 等 SDK 读 os.environ 绕过闸门自动上报（与 rag-service 对齐）。
+    from common.trace.langfuse_gate import configure_langfuse_env
+    from common.trace.langsmith_gate import configure_langsmith_env
+
+    configure_langsmith_env(settings)
+    configure_langfuse_env(settings)
+
     app.state.pg_degraded = False
     app.state.redis_degraded = False
     app.state.mcp_degraded = False

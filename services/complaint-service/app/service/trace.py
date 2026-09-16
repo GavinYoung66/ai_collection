@@ -4,12 +4,16 @@
 """
 from __future__ import annotations
 
-import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.service.security import mask_before_persist
+from common.trace.langfuse_gate import (
+    LangfuseRun,
+    configure_langfuse_env as _configure_langfuse_env,
+)
+from common.trace.langsmith_gate import LangSmithRun, langsmith_url
 
 
 def utc_now() -> datetime:
@@ -125,76 +129,46 @@ def snapshot_call_log_len(obj: Any) -> int:
 
 
 def build_langsmith_url(run_id: Optional[str]) -> Optional[str]:
-    """有外部 run id、Key 且配置了 URL 模板时返回外链；否则 None（避免错误 404 链）。
+    """有外部 run id、统一开关开启且配置了 URL 模板时返回外链；否则 None。
 
-    必须设置 `LANGSMITH_TRACE_URL_TEMPLATE`（env 或 settings），占位符：
-    `{run_id}` / `{project}`。无模板时即使有 run id 也隐藏按钮。
+    判断与模板构造统一由 common 闸门负责（`LANGSMITH_TRACE_URL_TEMPLATE`，
+    占位符 `{run_id}` / `{project}`）；无模板时即使有 run id 也隐藏按钮。
     """
-    if not run_id:
-        return None
     try:
         from app.config import settings
     except Exception:  # noqa: BLE001
         return None
-    key = (getattr(settings, "LANGSMITH_API_KEY", "") or "").strip()
-    enabled = bool(getattr(settings, "LANGSMITH_ENABLED", False))
-    if not enabled or not key:
-        return None
-    project = getattr(settings, "LANGSMITH_PROJECT", "complaint-service") or "complaint-service"
-    tmpl = (
-        (os.environ.get("LANGSMITH_TRACE_URL_TEMPLATE") or "").strip()
-        or (getattr(settings, "LANGSMITH_TRACE_URL_TEMPLATE", "") or "").strip()
-    )
-    if not tmpl:
-        return None
-    try:
-        return tmpl.format(run_id=run_id, project=project)
-    except Exception:  # noqa: BLE001
-        return None
+    return langsmith_url(run_id, settings, fallback_project="complaint-service")
 
 
-class OptionalLangSmithRun:
-    """可选包裹一次 judge 图执行；失败不影响本地时间线。"""
+def configure_langfuse_env() -> None:
+    """启动时按统一开关写入 / 清除 Langfuse SDK 环境变量（转发 common 闸门）。"""
+    from app.config import settings
+
+    _configure_langfuse_env(settings)
+
+
+class OptionalLangSmithRun(LangSmithRun):
+    """可选包裹一次 judge 图执行；统一开关关闭或异常时为空操作。"""
 
     def __init__(self, name: str, inputs: dict[str, Any]):
-        self._root = None
-        self.run_id: Optional[str] = None
-        try:
-            from app.config import settings
+        from app.config import settings
 
-            if not (getattr(settings, "LANGSMITH_ENABLED", False) and getattr(settings, "LANGSMITH_API_KEY", "")):
-                return
-            # 写入进程环境，供 SDK 读取（不落 git）
-            os.environ.setdefault("LANGSMITH_TRACING", "true")
-            os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
-            os.environ["LANGSMITH_API_KEY"] = settings.LANGSMITH_API_KEY
-            if getattr(settings, "LANGSMITH_PROJECT", ""):
-                os.environ["LANGSMITH_PROJECT"] = settings.LANGSMITH_PROJECT
-            from langsmith.run_trees import RunTree
+        super().__init__(
+            name,
+            inputs,
+            settings=settings,
+            fallback_project="complaint-service",
+        )
 
-            self._root = RunTree(
-                name=name,
-                run_type="chain",
-                inputs=inputs,
-                project_name=getattr(settings, "LANGSMITH_PROJECT", None) or "complaint-service",
-            )
-            self._root.post()
-            self.run_id = str(getattr(self._root, "id", "") or "") or None
-        except Exception:  # noqa: BLE001
-            self._root = None
-            self.run_id = None
 
-    def end(self, outputs: Optional[dict[str, Any]] = None, error: Optional[str] = None) -> None:
-        if self._root is None:
-            return
-        try:
-            if error:
-                self._root.end(error=error)
-            else:
-                self._root.end(outputs=outputs or {})
-            self._root.patch()
-        except Exception:  # noqa: BLE001
-            pass
+class OptionalLangfuseRun(LangfuseRun):
+    """可选包裹一次 judge 图执行（Langfuse 侧）；统一开关关闭或异常时为空操作。"""
+
+    def __init__(self, name: str, inputs: dict[str, Any]):
+        from app.config import settings
+
+        super().__init__(name, inputs, settings=settings)
 
 
 class NodeTimer:

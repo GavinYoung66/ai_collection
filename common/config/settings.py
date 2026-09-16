@@ -42,6 +42,21 @@ class Settings(BaseSettings):
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
     DASHSCOPE_API_KEY: str = ""
 
+    # 链路追踪（跨服务统一开关；唯一事实源，各服务不再自判）
+    # LANGSMITH_ENABLED=false 时全线不建 run / 不写 SDK 环境变量 / 不外链
+    LANGSMITH_ENABLED: bool = False
+    LANGSMITH_API_KEY: str = ""
+    LANGSMITH_PROJECT: str = ""
+    LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
+    LANGSMITH_TRACE_URL_TEMPLATE: str = ""
+
+    # Langfuse 链路追踪（与 LangSmith 同构；本地自托管默认 http://localhost:3000）
+    # LANGFUSE_ENABLED=false 时全线不建 span / 不写 SDK 环境变量
+    LANGFUSE_ENABLED: bool = False
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    LANGFUSE_BASE_URL: str = "http://localhost:3000"
+
     # ASR / TTS / CCC（呼叫相关公共密钥占位）
     ASR_APP_KEY: str = "change_me"
     ASR_ACCESS_TOKEN: str = "change_me"

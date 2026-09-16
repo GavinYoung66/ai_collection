@@ -14,7 +14,7 @@ from app.events.publisher import QcEventPublisher
 from app.observability import emit_llm_review_completed, emit_llm_review_degraded, emit_llm_review_started
 from app.repositories.job_store import QcJobStore
 from app.services.ac_filter import WordHit
-from app.services.demo_trace import OptionalLangSmithRun
+from app.services.demo_trace import OptionalLangfuseRun, OptionalLangSmithRun
 from app.services.llm_circuit import QcLlmCircuit, is_timeout_or_5xx
 from common.db.models.llm_log import LLMCallLog
 from common.llm.prompts.loader import load_qc_review_prompt
@@ -287,16 +287,18 @@ class LLMReviewer:
         session_id: str | None = None,
     ) -> list[WordHit]:
         self.last_langsmith_run_id = None
-        ls_run = OptionalLangSmithRun(
-            name="qc_llm_review",
-            inputs={"session_id": session_id or "", "turn_count": len(turns or [])},
-        )
+        run_inputs = {"session_id": session_id or "", "turn_count": len(turns or [])}
+        ls_run = OptionalLangSmithRun(name="qc_llm_review", inputs=run_inputs)
+        lf_run = OptionalLangfuseRun("qc_llm_review", run_inputs)
         try:
             hits = await self._review_impl(turns, session_id=session_id)
-            ls_run.end(outputs={"hit_count": len(hits), "degraded": self.degraded})
+            outputs = {"hit_count": len(hits), "degraded": self.degraded}
+            ls_run.end(outputs=outputs)
+            lf_run.end(outputs=outputs)
             return hits
         except Exception as exc:
             ls_run.end(error=str(exc)[:300])
+            lf_run.end(error=str(exc)[:300])
             raise
         finally:
             self.last_langsmith_run_id = ls_run.run_id

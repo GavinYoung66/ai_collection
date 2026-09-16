@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 from datetime import datetime, timezone
 from typing import Any
 
+from common.config.settings import settings as platform_settings
 from common.security.mask import mask_text
+from common.trace.langfuse_gate import (
+    LangfuseRun,
+    configure_langfuse_env as _configure_langfuse_env,
+)
+from common.trace.langsmith_gate import LangSmithRun, langsmith_url
 
 from app.repositories.demo_store import DemoTraceStore
 
@@ -61,22 +66,8 @@ def call_qc_skip_event() -> dict[str, Any]:
 
 
 def build_langsmith_url(run_id: str | None) -> str | None:
-    """仅当 Key + run id + URL 模板（含 {run_id} 或 {project}）齐全时返回外链。"""
-    if not run_id:
-        return None
-    key = (os.environ.get("LANGSMITH_API_KEY") or "").strip()
-    if not key:
-        return None
-    tmpl = (os.environ.get("LANGSMITH_TRACE_URL_TEMPLATE") or "").strip()
-    if not tmpl:
-        return None
-    if "{run_id}" not in tmpl and "{project}" not in tmpl:
-        return None
-    project = (os.environ.get("LANGSMITH_PROJECT") or "qc-service").strip() or "qc-service"
-    try:
-        return tmpl.format(run_id=run_id, project=project)
-    except Exception:
-        return None
+    """仅当统一开关开启 + run id + URL 模板（含 {run_id} 或 {project}）齐全时返回外链。"""
+    return langsmith_url(run_id, platform_settings, fallback_project="qc-service")
 
 
 async def safe_append(store: DemoTraceStore | None, session_id: str | None, event: dict[str, Any]) -> None:
@@ -97,41 +88,25 @@ async def safe_set_meta(store: DemoTraceStore | None, session_id: str | None, **
         logger.debug("demo trace meta failed session_id=%s", session_id, exc_info=True)
 
 
-class OptionalLangSmithRun:
-    """可选包裹 LLM 复核；失败不影响本地时间线。不引入 LangGraph。"""
+def configure_langfuse_env() -> None:
+    """启动时按统一开关写入 / 清除 Langfuse SDK 环境变量（转发 common 闸门）。"""
+    _configure_langfuse_env(platform_settings)
+
+
+class OptionalLangSmithRun(LangSmithRun):
+    """可选包裹 LLM 复核；统一开关关闭或异常时为空操作，不影响本地时间线。不引入 LangGraph。"""
 
     def __init__(self, name: str, inputs: dict[str, Any]):
-        self._root = None
-        self.run_id: str | None = None
-        try:
-            key = (os.environ.get("LANGSMITH_API_KEY") or "").strip()
-            if not key:
-                return
-            os.environ.setdefault("LANGSMITH_TRACING", "true")
-            os.environ["LANGSMITH_API_KEY"] = key
-            project = (os.environ.get("LANGSMITH_PROJECT") or "qc-service").strip() or "qc-service"
-            from langsmith.run_trees import RunTree
+        super().__init__(
+            name,
+            inputs,
+            settings=platform_settings,
+            fallback_project="qc-service",
+        )
 
-            self._root = RunTree(
-                name=name,
-                run_type="chain",
-                inputs=inputs,
-                project_name=project,
-            )
-            self._root.post()
-            self.run_id = str(getattr(self._root, "id", "") or "") or None
-        except Exception:
-            self._root = None
-            self.run_id = None
 
-    def end(self, outputs: dict[str, Any] | None = None, error: str | None = None) -> None:
-        if self._root is None:
-            return
-        try:
-            if error:
-                self._root.end(error=error)
-            else:
-                self._root.end(outputs=outputs or {})
-            self._root.patch()
-        except Exception:
-            pass
+class OptionalLangfuseRun(LangfuseRun):
+    """可选包裹 LLM 复核（Langfuse 侧）；统一开关关闭或异常时为空操作。"""
+
+    def __init__(self, name: str, inputs: dict[str, Any]):
+        super().__init__(name, inputs, settings=platform_settings)
