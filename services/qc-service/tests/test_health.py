@@ -2,12 +2,22 @@
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+import pytest
 
 from app.deps import get_rag_client, get_redis
 from app.main import app
 from app.observability import captured_events, reset_events
-from app.repositories.job_store import KEY_LLM_DEGRADED, KEY_WORDS_VERSION
+from app.core.config import qc_settings
+from app.repositories.job_store import KEY_WORDS_VERSION, llm_chain_models, llm_degraded_key
+from common.llm import reliability as reliability_mod
 from tests.test_job_store import MemoryRedis
+
+
+@pytest.fixture(autouse=True)
+def _clear_llm_breakers():
+    reliability_mod._llm_breakers.clear()
+    yield
+    reliability_mod._llm_breakers.clear()
 
 
 class FakeRag:
@@ -58,10 +68,26 @@ class TestHealthEnvelope:
         assert "llm_open" not in data
         assert body["code"] not in {"A2001", "A2002", "A2003", "A2005", "A2011"}
 
-    def test_llm_degraded_sets_status_degraded(self):
+    def test_primary_only_open_llm_degraded_false(self):
+        reliability_mod._llm_breakers.clear()
         redis = MemoryRedis(db=3)
         redis.data[KEY_WORDS_VERSION] = "3"
-        redis.data[KEY_LLM_DEGRADED] = "1"
+        redis.data[llm_degraded_key(qc_settings.QC_LLM_MODEL)] = "1"
+        client = _health_client(redis, FakeRag(connected=True))
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["code"] == "0"
+        assert body["data"]["llm_degraded"] is False
+        assert body["data"]["status"] in {"ok", "healthy"}
+        assert "unhealthy" not in body["data"]
+
+    def test_whole_chain_open_llm_degraded_true(self):
+        reliability_mod._llm_breakers.clear()
+        redis = MemoryRedis(db=3)
+        redis.data[KEY_WORDS_VERSION] = "3"
+        redis.data[llm_degraded_key(qc_settings.QC_LLM_MODEL)] = "1"
+        redis.data[llm_degraded_key(qc_settings.QC_LLM_FALLBACK_CHAIN[0])] = "1"
         client = _health_client(redis, FakeRag(connected=True))
         resp = client.get("/health")
         assert resp.status_code == 200
@@ -112,3 +138,32 @@ class TestHealthEnvelope:
         names = {e["event"] for e in captured_events()}
         assert "rag.words.stale" not in names
         assert "rag.words.loaded" not in names
+
+    @pytest.mark.asyncio
+    async def test_redis_error_falls_back_to_process_chain_open(self):
+        from app.api.health import _probe_health
+
+        for model in llm_chain_models():
+            breaker = reliability_mod._llm_breakers.get_or_create(llm_degraded_key(model))
+            for _ in range(3):
+                await breaker.record_failure()
+            assert breaker.state == "open"
+
+        class BoomRedis(MemoryRedis):
+            async def get(self, key):
+                raise OSError("redis down")
+
+        data = await _probe_health(BoomRedis(db=3), FakeRag(connected=True))
+        assert data["llm_degraded"] is True
+        assert data["status"] == "degraded"
+
+    @pytest.mark.asyncio
+    async def test_redis_error_without_open_breakers_llm_degraded_false(self):
+        from app.api.health import _probe_health
+
+        class BoomRedis(MemoryRedis):
+            async def get(self, key):
+                raise OSError("redis down")
+
+        data = await _probe_health(BoomRedis(db=3), FakeRag(connected=True))
+        assert data["llm_degraded"] is False

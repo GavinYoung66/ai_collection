@@ -10,7 +10,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-# 4 主频道 + 扩展 topic
+# 业务频道目录（仅文档性枚举，publish 不做强制校验）：
+# 4 主频道 + 扩展 topic。韧性事件（csmp.rate_limit.hit / csmp.circuit_breaker.open /
+# csmp.degrade.triggered 等，命名见 common.resilience.hooks）不经此清单，
+# 由 hooks 适配器直接 publish 到同一 EventPublisher。
 CHANNELS = (
     "complaint.judged",
     "complaint.closed",

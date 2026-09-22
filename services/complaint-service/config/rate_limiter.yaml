@@ -1,24 +1,27 @@
-# complaint-service 限流配置（批次9 9.5）
+# complaint-service 限流配置（批次9 9.5 / complaint-resilience-wiring G4-G5）
 # 不硬编码，运行时可热加载
 
 complaint:
-  max_active: 20           # 工单接入并发 Semaphore
-  queue_max: 500            # csmp:queue:pending 最大长度
-  queue_timeout_minutes: 10 # 排队超时
-  lock_ttl_seconds: 1800    # 单工单 SETNX 锁 TTL（30min）
+  max_active: 20              # 维1 工单接入并发 Semaphore（P0 零件，阈值不变）
+  queue_max: 500              # 维2 BoundedQueue 最大长度（P0 零件，阈值不变）
+  queue_timeout_minutes: 10   # 排队 deadline：csmp:complaint:queue_start:{id} TTL
+  exec_timeout_seconds: 1800  # 执行 deadline：csmp:complaint:exec_start:{id} TTL（30min）
+  lock_ttl_seconds: 1800      # 维5 单工单幂等锁 TTL（30min，key=csmp:complaint:judge_lock:{id}）
 
 mcp:
-  qps:
-    business_ticket: 50     # 业务工单 MCP
-    call_quality: 30        # 通话质检 MCP
-    rag: 20                 # RAG MCP
+  qps:                        # 维3 按 MCP server 分桶令牌（window=1s，key=csmp:mcp:{server}）
+    business_ticket: 50       # 业务工单 MCP
+    call_qc: 30               # 通话质检 MCP
+    rag_kb: 20                # 法规知识库 MCP（compliance 节点）
+    data_platform: 30         # 数据中台 MCP
 
-llm:
-  qps:
-    deepseek_r1: 5
-    qwen_plus: 10
-    qwen_turbo: 30
+# 注：LLM 模型分桶限流由 common.llm.reliability.invoke_llm 内置承担
+# （csmp:llm_ratelimit:{model}，60 次/60s），本服务不重复配置。
+
+user:
+  qps: 200                    # 用户维接入限流（X-User-Id 优先，缺失回退客户端 IP）
+  window: 1
 
 queue:
-  dynamic_consume: true     # 高投诉涌入动态消费速率
-  base_consume_rate: 5      # 基础每批消费条数
+  dynamic_consume: true       # 维4 高投诉涌入动态消费：深度>250 x2、>400 x3
+  base_consume_rate: 5        # 基础每批消费条数

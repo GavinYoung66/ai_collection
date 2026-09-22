@@ -82,35 +82,76 @@ class TestMode:
         assert ok is False and err == ErrorCode.A5014
 
 
-# ── 9.5 rate_limiter ──
+# ── 9.5 rate_limiter（G4 迁移 P0 零件后为 async API）──
+
+class _FakeRedis:
+    """限流测试用内存 Redis（set/get/delete/ping/incr/expire）。"""
+
+    def __init__(self):
+        self.store: dict[str, str] = {}
+        self.counts: dict[str, int] = {}
+
+    async def set(self, key, value, nx=False, ex=None):  # noqa: ARG002
+        if nx and key in self.store:
+            return None
+        self.store[key] = str(value)
+        return True
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def delete(self, *keys):
+        return sum(1 for k in keys if self.store.pop(k, None) is not None)
+
+    async def ping(self):
+        return True
+
+    async def incr(self, key):
+        self.counts[key] = self.counts.get(key, 0) + 1
+        return self.counts[key]
+
+    async def expire(self, key, window):  # noqa: ARG002
+        return None
+
 
 class TestRateLimiter:
-    def test_complaint_idempotent_lock(self):
-        r = RateLimiter()
-        assert r.acquire_complaint("c1") is True
-        assert r.acquire_complaint("c1") is False
+    @pytest.fixture(autouse=True)
+    def _reset_redis(self):
+        from common.resilience._redis import reset_redis
 
-    def test_mcp_llm_token_bucket(self):
-        r = RateLimiter()
-        assert r.acquire_mcp("rag") is True
-        assert r.acquire_llm("qwen_turbo") is True
+        yield
+        reset_redis()
+
+    @pytest.mark.asyncio
+    async def test_complaint_idempotent_lock(self):
+        r = RateLimiter(redis_client=_FakeRedis())
+        assert await r.acquire_complaint("c1") == "granted"
+        assert await r.acquire_complaint("c1") == "duplicate"
+
+    @pytest.mark.asyncio
+    async def test_mcp_token_bucket(self):
+        r = RateLimiter(redis_client=_FakeRedis())
+        assert await r.acquire_mcp("rag_kb") is True
 
     def test_config_from_yaml(self):
         assert RateLimiter().config["complaint"]["max_active"] == 20
 
-    def test_consume_pending_dim4(self):
+    @pytest.mark.asyncio
+    async def test_consume_pending_dim4(self):
         r = RateLimiter(config={
             "complaint": {"max_active": 1, "queue_max": 500,
-                          "queue_timeout_minutes": 10, "lock_ttl_seconds": 1800},
+                          "queue_timeout_minutes": 10,
+                          "exec_timeout_seconds": 1800,
+                          "lock_ttl_seconds": 1800},
             "mcp": {"qps": {"rag": 20}},
-            "llm": {"qps": {"qwen_turbo": 30}},
+            "user": {"qps": 200, "window": 1},
             "queue": {"dynamic_consume": True, "base_consume_rate": 5},
-        })
-        assert r.acquire_complaint("active") is True
-        assert r.acquire_complaint("queued") is False  # 入队
+        }, redis_client=_FakeRedis())
+        assert await r.acquire_complaint("active") == "granted"
+        assert await r.acquire_complaint("queued") == "queued"
         r.release_complaint()
-        consumed = r.consume_pending(max_n=5)
-        assert "queued" in consumed
+        ready, expired = await r.consume_pending(max_n=5)
+        assert "queued" in ready and expired == []
 
 
 # ── 9.2a degrade_llm ──

@@ -11,9 +11,9 @@ from common.trace.middleware import TraceMiddleware
 
 class TestErrorCodes:
     def test_error_code_count(self):
-        """错误码总数：A1(13)+A2(11)+A3(6)+A4(15)+A5(14)+A6(15)+A7(6)+B(10)=90。"""
+        """错误码总数：A1(13)+A2(11)+A3(6)+A4(15)+A5(17)+A6(15)+A7(6)+B(10)=93。"""
         codes = [c for c in ErrorCode]
-        assert len(codes) == 90
+        assert len(codes) == 93
 
     def test_all_codes_have_messages(self):
         """每个错误码都有对应的消息。"""

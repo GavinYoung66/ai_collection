@@ -1,5 +1,9 @@
 (() => {
-  const DEFAULT_API = "http://localhost:8006";
+  const DEFAULT_API = "/api/v1";
+  const LEGACY_API_BASES = new Set([
+    "http://localhost:8006",
+    "http://127.0.0.1:8006",
+  ]);
   const params = new URLSearchParams(window.location.search);
   const stored = localStorage.getItem("complaint_api_base");
 
@@ -72,12 +76,26 @@
     { id: "closed", label: "已关单" },
   ];
 
+  function normalizeBase(raw) {
+    return String(raw || "").replace(/\/$/, "");
+  }
+
+  function isLegacyDefault(raw) {
+    return LEGACY_API_BASES.has(normalizeBase(raw));
+  }
+
   function apiBase() {
-    return (els.apiBase.value || DEFAULT_API).replace(/\/$/, "");
+    const value = normalizeBase(els.apiBase.value || DEFAULT_API);
+    return value || DEFAULT_API;
+  }
+
+  function apiPrefix() {
+    const base = apiBase();
+    return /\/api\/v1$/i.test(base) ? base : `${base}/api/v1`;
   }
 
   function syncLabel() {
-    els.apiLabel.textContent = `${apiBase()}/api/v1`;
+    els.apiLabel.textContent = apiPrefix();
     localStorage.setItem("complaint_api_base", apiBase());
   }
 
@@ -88,7 +106,7 @@
   }
 
   async function api(path, options = {}) {
-    const url = `${apiBase()}/api/v1${path}`;
+    const url = `${apiPrefix()}${path}`;
     const res = await fetch(url, {
       headers: { "Content-Type": "application/json", ...(options.headers || {}) },
       ...options,
@@ -118,7 +136,14 @@
   }
 
   function canRejudge(st) {
-    return st === "pending" || st === "pending_review" || st === "pending_senior_review";
+    // 退回取证 / 反思重试后也必须能再跑，否则人审按钮全灰会卡死
+    return (
+      st === "pending" ||
+      st === "evidence_gathering" ||
+      st === "reflection_retry" ||
+      st === "pending_review" ||
+      st === "pending_senior_review"
+    );
   }
 
   function setPendingBanner(aiVerdict, status) {
@@ -142,6 +167,14 @@
       }
       if (els.btnReject && !els.btnReject.disabled) {
         els.btnReject.classList.add("emphasize");
+      }
+    } else if (status === "evidence_gathering" || status === "reflection_retry") {
+      els.pendingBanner.hidden = false;
+      els.pendingBanner.innerHTML =
+        "工单已退回<strong>取证/反思</strong>，当前还不能定责或关单。" +
+        "请点「<strong>重新研判</strong>」再跑一轮 AI，进入待人审后再确认成立性。";
+      if (els.btnRejudge && !els.btnRejudge.disabled) {
+        els.btnRejudge.classList.add("emphasize");
       }
     } else if (status === "pending_callback") {
       els.pendingBanner.hidden = false;
@@ -668,8 +701,11 @@
         body: JSON.stringify(body),
       });
       currentStatus = data.task_status;
-      showToast(`退回 AI 重跑 → ${currentStatus}`);
+      showToast(`退回 AI 重跑 → ${currentStatus}，正在重新研判…`);
       await openDetail(currentId);
+      if (canRejudge(currentStatus)) {
+        await runJudge(currentId, { refreshDetail: true });
+      }
     } catch (e) {
       showToast(`退回失败：${e.message}`, true);
     }
@@ -721,7 +757,7 @@
     }
   }
 
-  els.apiBase.value = params.get("api") || stored || DEFAULT_API;
+  els.apiBase.value = params.get("api") || (stored && !isLegacyDefault(stored) ? stored : DEFAULT_API);
   syncLabel();
   els.apiBase.addEventListener("change", () => {
     syncLabel();

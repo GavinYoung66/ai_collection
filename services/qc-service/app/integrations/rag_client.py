@@ -11,6 +11,7 @@ import httpx
 
 from app.core.config import qc_settings
 from common.llm.reliability import call_with_retry
+from common.resilience.breaker import BreakerRegistry, make_mcp_breaker_key
 from common.trace.middleware import get_trace_id
 
 DICT_PATH = "/api/v1/sensitive-words/current.dict"
@@ -21,6 +22,16 @@ SEARCH_SCORE_THRESHOLD = 0.6
 SEARCH_SNIPPET_MAX = 80
 SEARCH_DEFAULT_CATEGORY = "script"
 SEARCH_DEFAULT_TOP_K = 3
+RAG_MCP_BREAKER_KEY = make_mcp_breaker_key("qc", "rag_kb")
+_search_breakers = BreakerRegistry(fail_max=3, reset_timeout=60)
+
+
+def rag_search_breaker():
+    return _search_breakers.get_or_create(RAG_MCP_BREAKER_KEY)
+
+
+def reset_rag_search_breaker() -> None:
+    _search_breakers.clear()
 
 
 def parse_current_dict(body: str) -> list[str]:
@@ -194,7 +205,7 @@ class RagClient:
     ) -> str | None:
         """POST /api/v1/kb/search。score≥0.6 则截断 content 至 80 字；失败返回 None。
 
-        不重试、不累加 `_consecutive_failures`，避免误伤词库自动机。
+        瞬时 ``call_with_retry``（与 current.dict 同次数）；不累加 `_consecutive_failures`。
         """
         q = (query or "").strip()
         if not q:
@@ -206,19 +217,35 @@ class RagClient:
             "answer": bool(answer),
         }
         self._last_search_payload = payload
+        breaker = rag_search_breaker()
+        if not await breaker.before_call():
+            return None
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         trace_id = get_trace_id()
         if trace_id:
             headers["X-Trace-Id"] = trace_id
         url = self.search_url()
-        self._request_log.append(("POST", url))
-        try:
+
+        async def _post_once() -> Any:
+            self._request_log.append(("POST", url))
             client = await self._http()
             resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
-            body = resp.json()
-        except (httpx.HTTPError, OSError, ValueError):
+            return resp.json()
+
+        try:
+            body = await call_with_retry(
+                _post_once,
+                max_attempts=RAG_RETRY_ATTEMPTS,
+                delay=self._retry_delay,
+                backoff=2.0,
+                exceptions=(httpx.HTTPError, OSError),
+            )
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            await breaker.record_failure(exc)
             return None
         if not isinstance(body, dict):
+            await breaker.record_success()
             return None
+        await breaker.record_success()
         return pick_search_snippet(parse_search_results(body))

@@ -66,6 +66,10 @@ def cache_enabled(monkeypatch):
     monkeypatch.setattr(settings, "KB_CACHE_ENABLED", True)
 
 
+_MOCK_DOC_ID = str(uuid.uuid4())
+_MOCK_CHUNK_ID = str(uuid.uuid4())
+
+
 # ---------- 单元：key 生成与读写/失效 ----------
 
 class TestQueryCacheUnit:
@@ -136,12 +140,27 @@ class TestQueryCacheUnit:
 
 # ---------- 路由级：search 缓存切面 ----------
 
-class MockResult:
-    def scalars(self):
-        return self
-
+class _EmptyScalars:
     def all(self):
         return []
+
+
+class MockResult:
+    def scalars(self):
+        # content/chunk_index 补齐走 scalars().all()；检索内容来自 ES mock
+        return _EmptyScalars()
+
+    def all(self):
+        # 同一 mock 行同时满足 get_active_doc_id_set / get_titles_map / get_meta_dict
+        return [(
+            uuid.UUID(_MOCK_DOC_ID),
+            "催收制度",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )]
 
     def scalar_one_or_none(self):
         return None
@@ -163,10 +182,6 @@ class MockDB:
 
     async def rollback(self):
         pass
-
-
-_MOCK_DOC_ID = str(uuid.uuid4())
-_MOCK_CHUNK_ID = str(uuid.uuid4())
 
 
 class MockMilvus:
@@ -417,9 +432,12 @@ class TestDocumentInvalidationHook:
         fake_redis.sets["rag:cache:keys:regulation"] = {key}
 
         doc = MockDoc("regulation")
+        async def _get_embed():
+            return MockEmbed()
+
         monkeypatch.setattr(documents_api, "get_milvus_client", lambda: MockMilvus())
         monkeypatch.setattr(documents_api, "get_es_client", lambda: MockES())
-        monkeypatch.setattr(documents_api, "get_embed_client", lambda: MockEmbed())
+        monkeypatch.setattr(documents_api, "get_embed_client", _get_embed)
 
         resp = await documents_api.delete_document(str(doc.id), db=MockDocDB(doc))
         assert resp["code"] == "0"

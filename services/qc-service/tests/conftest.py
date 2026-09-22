@@ -20,3 +20,15 @@ def _reset_shared_ac():
     yield
     reset_shared_ac()
 
+
+@pytest.fixture(autouse=True)
+def _reset_qc_resilience_state():
+    from app.integrations.rag_client import reset_rag_search_breaker
+    from app.services.inflight import reset_inflight_gate
+
+    reset_rag_search_breaker()
+    reset_inflight_gate()
+    yield
+    reset_rag_search_breaker()
+    reset_inflight_gate()
+

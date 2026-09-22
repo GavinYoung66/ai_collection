@@ -3,12 +3,14 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
+from app.events.resilience import clear_emitted, emitted, on_resilience_event
 from app.services import rate_limit
+from common.resilience import hooks
 from common.trace.middleware import TraceMiddleware
 
 
 class FakeRedis:
-    """内存版 Redis mock：incr + expire。"""
+    """内存版 Redis mock：SET NX EX + incr（common allow 崩溃安全配方）。"""
 
     def __init__(self, fail=False):
         self.store: dict = {}
@@ -17,6 +19,13 @@ class FakeRedis:
     def _maybe_fail(self):
         if self.fail:
             raise ConnectionError("redis down")
+
+    async def set(self, key, value, ex=None, nx=False):  # noqa: ARG002
+        self._maybe_fail()
+        if nx and key in self.store:
+            return None
+        self.store[key] = int(value)
+        return True
 
     async def incr(self, key):
         self._maybe_fail()
@@ -56,6 +65,26 @@ class TestRateLimiter:
             assert resp.status_code == 200
             assert resp.json() == {"ok": True}
         assert fake_redis.store["rag:ratelimit:test_bucket:testclient"] == 2
+
+    def test_over_limit_emits_hit_with_trace_id(self, client, fake_redis):
+        """超限发 rag.rate_limit.hit，payload 含请求 trace_id。"""
+        clear_emitted()
+        hooks.set_publisher(on_resilience_event)
+        try:
+            headers = {"X-Trace-Id": "trace-rag-rl"}
+            for _ in range(2):
+                assert client.get("/test", headers=headers).status_code == 200
+            resp = client.get("/test", headers=headers)
+            assert resp.status_code == 429
+            assert resp.json()["code"] == "B0006"
+            hits = [payload for name, payload in emitted if name == "rag.rate_limit.hit"]
+            assert hits
+            assert hits[0]["trace_id"] == "trace-rag-rl"
+            assert hits[0]["key"] == "rag:ratelimit:test_bucket:testclient"
+            assert hits[0]["reason"] == "rate_limited"
+        finally:
+            hooks.set_publisher(None)
+            clear_emitted()
 
     def test_over_limit_returns_429(self, client, fake_redis):
         """limit=2：第 3 次请求返回 429 + 统一响应包（B0006）。"""

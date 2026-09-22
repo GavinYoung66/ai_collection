@@ -1,9 +1,14 @@
 (() => {
-  const DEFAULT_API = "http://localhost:8003";
+  const DEFAULT_API = "/api/v1";
+  const LEGACY_API_BASES = new Set([
+    "http://localhost:8003",
+    "http://127.0.0.1:8003",
+  ]);
   const STORE_API = "qc_api_base";
   const STORE_TOKEN = "qc_demo_token";
   const STORE_SESSIONS = "qc_demo_sessions";
   const params = new URLSearchParams(window.location.search);
+  const stored = localStorage.getItem(STORE_API);
 
   const PENALTY = { high: 20, medium: 8, low: 2 };
   const SOURCE_LABEL = { ac: "AC", rule: "规则", llm: "LLM" };
@@ -73,8 +78,35 @@
   let currentRecord = null;
   let rescoreMode = false;
 
+  function normalizeBase(raw) {
+    return String(raw || "").replace(/\/$/, "");
+  }
+
+  function isLegacyDefault(raw) {
+    return LEGACY_API_BASES.has(normalizeBase(raw));
+  }
+
   function apiBase() {
-    return (els.apiBase.value || DEFAULT_API).replace(/\/$/, "");
+    const value = normalizeBase(els.apiBase.value || DEFAULT_API);
+    return value || DEFAULT_API;
+  }
+
+  function apiPrefix() {
+    const base = apiBase();
+    return /\/api\/v1$/i.test(base) ? base : `${base}/api/v1`;
+  }
+
+  function serviceRoot() {
+    const base = apiBase();
+    if (/\/api\/v1$/i.test(base)) {
+      return base.slice(0, -"/api/v1".length);
+    }
+    return base;
+  }
+
+  function healthUrl() {
+    const root = serviceRoot();
+    return root ? `${root}/health` : "/health";
   }
 
   function token() {
@@ -82,7 +114,7 @@
   }
 
   function syncLabel() {
-    els.apiLabel.textContent = apiBase();
+    els.apiLabel.textContent = apiPrefix();
     localStorage.setItem(STORE_API, apiBase());
   }
 
@@ -121,7 +153,7 @@
   }
 
   async function api(path, options = {}) {
-    const url = `${apiBase()}/api/v1${path}`;
+    const url = `${apiPrefix()}${path}`;
     const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
     const res = await fetch(url, { ...options, headers });
     let body = null;
@@ -146,7 +178,7 @@
   async function loadHealth() {
     if (!els.healthBar) return;
     try {
-      const res = await fetch(`${apiBase()}/health`);
+      const res = await fetch(healthUrl());
       let body = null;
       try {
         body = await res.json();
@@ -694,7 +726,7 @@
     }
   }
 
-  els.apiBase.value = params.get("api") || localStorage.getItem(STORE_API) || DEFAULT_API;
+  els.apiBase.value = params.get("api") || (stored && !isLegacyDefault(stored) ? stored : DEFAULT_API);
   els.jwtToken.value = localStorage.getItem(STORE_TOKEN) || "";
   for (const row of loadCachedSessions()) {
     if (row && row.session_id) sessions.set(row.session_id, row);

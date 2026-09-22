@@ -81,9 +81,12 @@ class TestDeleteDocumentCleanup:
             async def batch_embed(self, texts):
                 return [[0.1] * 1024 for _ in texts]
 
+        async def _get_embed():
+            return MockEmbed()
+
         monkeypatch.setattr(documents_api, "get_milvus_client", lambda: MockMilvus())
         monkeypatch.setattr(documents_api, "get_es_client", lambda: MockES())
-        monkeypatch.setattr(documents_api, "get_embed_client", lambda: MockEmbed())
+        monkeypatch.setattr(documents_api, "get_embed_client", _get_embed)
 
         with patch(
             "app.services.ingest_service._delete_assets_with_retry",

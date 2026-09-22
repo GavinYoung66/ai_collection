@@ -31,7 +31,7 @@
 
 WAIT_TEXT SHALL 只写入 Redis 键 `qc:job:{session_id}`，JSON 含 `status` 及可选 `qc_record_id` / `skipped_rules[]`，TTL 24h，Redis DB 3。WAIT_TEXT MUST NOT INSERT `qc_records`。Redis 任务 `status` MUST 仅为 `WAIT_TEXT|RUNNING|DONE`。Redis `DONE` SHALL 表示任务结束（含库 `qc_status` 为 `PENDING_REVIEW` 或 `PARTIAL`）；Redis MUST NOT 把 `PENDING_REVIEW`、`REVIEWED`、`PARTIAL` 或 `WAIT_TEXT` 存为数据库 `qc_status`。库终态写入 SHALL 仅使用 `qc_status∈{DONE,PENDING_REVIEW,REVIEWED,PARTIAL}`。
 
-qc-service MUST NOT INSERT 或 UPSERT `call_records` 或 `dialog_turns`。额外 Redis 键 SHALL 包括 `qc:words:version`、`qc:rules:active`、`qc:replay:run:{session_id}`、`qc:llm_degraded`（SET/DEL，除熔断策略外无固定 EXPIRE）。
+qc-service MUST NOT INSERT 或 UPSERT `call_records` 或 `dialog_turns`。额外 Redis 键 SHALL 包括 `qc:words:version`、`qc:rules:active`、`qc:replay:run:{session_id}`、`qc:llm_degraded:{model}`（STRING `"1"`，TTL 60s，由 `invoke_llm` / `mark_degraded_flag` 按模型写入，到期自动恢复）。系统 MUST NOT 再写入或查询全局键 `qc:llm_degraded`（原 SET/DEL、无固定 EXPIRE 口径废弃）。
 
 #### Scenario: 文本未齐不插行
 
@@ -47,6 +47,11 @@ qc-service MUST NOT INSERT 或 UPSERT `call_records` 或 `dialog_turns`。额外
 
 - **WHEN** 跑完且 agent+high（`qc_status=PENDING_REVIEW`）
 - **THEN** Redis `qc:job.status` 为 `DONE`（任务结束），MUST NOT 等于 `PENDING_REVIEW`
+
+#### Scenario: 熔断只写带模型后缀的键
+
+- **WHEN** LLM 复核失败触发熔断
+- **THEN** Redis 出现 `qc:llm_degraded:{model}` 且 TTL 为 60s 量级；全局键 `qc:llm_degraded` MUST NOT 被 SET
 
 ### Requirement: skipped_rules 耐久且不加列
 
@@ -92,7 +97,7 @@ qc-service SHALL 仅作为 HTTP 客户端消费 data-platform：
 - `GET {QC_DP_BASE}/api/v1/data/sessions/{session_id}/qc-source`（超时 5s，重试 3×）
 - `GET {QC_DP_BASE}/api/v1/data/sessions:pending-qc?etl_date=&limit=`（超时 5s，重试 3×）
 
-字段映射 MUST 逐行遵循 DD-02 §4.6.1。`result` MUST 出键（允许 JSON null）。缺失 `dial_history_24h` SHALL 整段省略（R05 skip）。M1 下 `ptp_amount` 与 `standard_answer_hit` SHALL 为 JSON null。qc MUST NOT 反查 `cases`。data-platform MUST NOT HTTP 回调 qc。pending-qc SHALL 只返回 `session_ids[]`；每个 id SHALL 再调 qc-source。pending-qc 熔断 SHALL 跳过本轮补检。
+字段映射 MUST 逐行遵循 DD-02 §4.6.1。`result` MUST 出键（允许 JSON null）。缺失 `dial_history_24h` SHALL 整段省略（R05 skip）。M1 下 `ptp_amount` 与 `standard_answer_hit` SHALL 为 JSON null。qc MUST NOT 反查 `cases`。data-platform MUST NOT HTTP 回调 qc。pending-qc SHALL 只返回 `session_ids[]`；每个 id SHALL 再调 qc-source。pending-qc 熔断 SHALL 使用进程内 `CircuitBreaker`，key `qc:mcp_degraded:data_platform`，open 时跳过本轮补检。qc-source 与 pending-qc 的 HTTP 有界重试 SHALL 使用共享 `call_with_retry`。
 
 本 change MUST NOT 实现 data-platform ETL 或宽表。本 change MUST NOT 实现 call-service。qc-service MUST NOT HTTP 调用 call-service。
 
@@ -100,6 +105,11 @@ qc-service SHALL 仅作为 HTTP 客户端消费 data-platform：
 
 - **WHEN** 加载 qc-source 夹具
 - **THEN** 含 `result`（可空）；聚合失败时省略 `dial_history_24h`；`ptp_amount`/`standard_answer_hit` 为 null
+
+#### Scenario: pending-qc 熔断跳过补检
+
+- **WHEN** pending-qc 连续失败达阈值使 `qc:mcp_degraded:data_platform` 熔断 open
+- **THEN** 本轮补检跳过，不再拉取 qc-source
 
 #### Scenario: 本 change 无 DP ETL
 

@@ -428,6 +428,8 @@ class IngestService:
         try:
             texts = [c["content"] for c in chunks]
             vectors = await self.embed.batch_embed(texts)
+            if texts and not vectors:
+                raise RuntimeError("Embedding service returned empty vectors")
         except Exception as e:
             logger.error(
                 "ingest_body_index_failed",
@@ -698,6 +700,8 @@ class IngestService:
         try:
             texts = [c["content"] for c in chunks]
             vectors = await self.embed.batch_embed(texts)
+            if texts and not vectors:
+                raise RuntimeError("Embedding service returned empty vectors")
         except Exception as e:
             logger.error(
                 "ingest_body_index_failed",

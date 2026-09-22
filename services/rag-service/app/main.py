@@ -243,13 +243,42 @@ register_rate_limit_handler(app)
 register_auth_handlers(app)
 
 
+def wire_resilience_hooks() -> None:
+    """把 common.resilience.hooks 接到 rag 适配器（记录 rag.*，不进投诉六频道）。
+
+    shutdown 必须 set_publisher(None)，避免测试间泄漏。
+    """
+    from app.events.resilience import on_resilience_event
+    from common.resilience import hooks
+
+    hooks.set_publisher(on_resilience_event)
+
+
+def _unwire_resilience_hooks() -> None:
+    from common.resilience import hooks
+
+    hooks.set_publisher(None)
+
+
+def wire_resilience_redis() -> None:
+    """把 rag Redis（RAG_REDIS_DB）注入 common 零件，与限流共用连接池。"""
+    from app.services.rate_limit import _ensure_common_client
+
+    _ensure_common_client()
+
+
 @app.on_event("startup")
 async def startup():
+    """启动时注入韧性接线，再初始化 Milvus collection + ES index。"""
+    from common.llm.reliability import set_default_service
     from app.services.search_trace import configure_langfuse_env, configure_langsmith_env
+
+    set_default_service("rag")
+    wire_resilience_hooks()
+    wire_resilience_redis()
 
     configure_langsmith_env()
     configure_langfuse_env()
-    """启动时初始化 Milvus collection + ES index。"""
     from app.api.deps import get_es_client, get_milvus_client
 
     # 注册 SIGHUP 热重载（意图路由配置 reload，不重启进程，对齐 §8.5）
@@ -344,6 +373,7 @@ async def shutdown():
             await _redis_client.aclose()
         except Exception as e:
             logger.warning("shutdown_redis_close_failed", error=str(e))
+    _unwire_resilience_hooks()
 
 
 @app.get("/health")

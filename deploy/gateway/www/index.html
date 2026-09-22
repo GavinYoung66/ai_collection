@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Collection 演示入口</title>
+  <style>
+    :root { color-scheme: light; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f4f6f8;
+      color: #1f2933;
+    }
+    main {
+      max-width: 720px;
+      margin: 12vh auto;
+      padding: 0 24px;
+    }
+    h1 { font-size: 1.6rem; margin: 0 0 8px; }
+    p { margin: 0 0 24px; color: #52606d; }
+    ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+    a {
+      display: block;
+      padding: 16px 18px;
+      background: #fff;
+      border: 1px solid #d9e2ec;
+      border-radius: 8px;
+      text-decoration: none;
+      color: inherit;
+    }
+    a:hover { border-color: #48639a; }
+    strong { display: block; margin-bottom: 4px; }
+    span { color: #627d98; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>AI Collection 演示入口</h1>
+    <p>同一 origin（:8080）进入三个前端，API 经网关转发。</p>
+    <ul>
+      <li>
+        <a href="/complaint/">
+          <strong>投诉研判演示</strong>
+          <span>/complaint/</span>
+        </a>
+      </li>
+      <li>
+        <a href="/qc/">
+          <strong>质检演示</strong>
+          <span>/qc/</span>
+        </a>
+      </li>
+      <li>
+        <a href="/rag/">
+          <strong>Gradio 知识库演示</strong>
+          <span>/rag/</span>
+        </a>
+      </li>
+    </ul>
+  </main>
+</body>
+</html>

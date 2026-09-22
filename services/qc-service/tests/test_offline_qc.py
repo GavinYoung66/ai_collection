@@ -11,6 +11,8 @@ from app.services.scoring_service import ScoringService
 from common.errors.codes import ERROR_MESSAGES
 from tests.test_job_store import MemoryRedis
 
+import pytest
+
 
 def _turns(*rows: tuple[str, str, int]) -> list[dict]:
     return [
@@ -236,3 +238,179 @@ class TestOfflineQcService:
         from app.events.publisher import FORBIDDEN_CHANNELS
 
         assert "qc.escalate.human" in FORBIDDEN_CHANNELS
+
+
+class TestInflightGate:
+    async def test_concurrent_runs_cap_and_queue_without_drop(self):
+        import asyncio
+
+        from app.services.inflight import InflightGate
+
+        gate = InflightGate(max_inflight=2, wait_timeout=0)
+        seen_inflight: list[int] = []
+        hold = asyncio.Event()
+        started = asyncio.Event()
+
+        async def occupy():
+            await gate.acquire_wait()
+            try:
+                seen_inflight.append(gate.inflight)
+                started.set()
+                await hold.wait()
+            finally:
+                await gate.release()
+
+        t1 = asyncio.create_task(occupy())
+        t2 = asyncio.create_task(occupy())
+        await asyncio.sleep(0.05)
+        assert gate.inflight == 2
+        assert max(seen_inflight) <= 2
+
+        third_entered = asyncio.Event()
+
+        async def third():
+            await gate.acquire_wait()
+            try:
+                third_entered.set()
+                seen_inflight.append(gate.inflight)
+            finally:
+                await gate.release()
+
+        t3 = asyncio.create_task(third())
+        await asyncio.sleep(0.05)
+        assert third_entered.is_set() is False
+        assert gate.inflight == 2
+        hold.set()
+        await asyncio.gather(t1, t2, t3)
+        assert third_entered.is_set() is True
+        assert max(seen_inflight) <= 2
+        assert gate.inflight == 0
+
+    async def test_cancel_and_exception_release_slot(self):
+        import asyncio
+
+        from app.services.inflight import InflightGate
+
+        gate = InflightGate(max_inflight=1, wait_timeout=0)
+
+        async def blocker():
+            await gate.acquire_wait()
+            try:
+                await asyncio.sleep(30)
+            finally:
+                await gate.release()
+
+        blocked = asyncio.create_task(blocker())
+        await asyncio.sleep(0.05)
+        assert gate.inflight == 1
+
+        waiter_entered = asyncio.Event()
+
+        async def waiter():
+            await gate.acquire_wait()
+            try:
+                waiter_entered.set()
+            finally:
+                await gate.release()
+
+        waiting = asyncio.create_task(waiter())
+        await asyncio.sleep(0.05)
+        assert waiter_entered.is_set() is False
+        blocked.cancel()
+        await asyncio.gather(blocked, waiting, return_exceptions=True)
+        assert waiter_entered.is_set() is True
+        assert gate.inflight == 0
+
+        async def boom():
+            await gate.acquire_wait()
+            try:
+                raise RuntimeError("pipeline boom")
+            finally:
+                await gate.release()
+
+        with pytest.raises(RuntimeError, match="pipeline boom"):
+            await boom()
+        assert gate.inflight == 0
+
+        later_entered = asyncio.Event()
+
+        async def later():
+            await gate.acquire_wait()
+            try:
+                later_entered.set()
+            finally:
+                await gate.release()
+
+        await later()
+        assert later_entered.is_set() is True
+
+    async def test_offline_run_respects_max_inflight(self):
+        import asyncio
+
+        from app.services.inflight import InflightGate
+
+        gate = InflightGate(max_inflight=1, wait_timeout=0)
+        inflight_seen: list[int] = []
+
+        class _SlowLLM:
+            degraded = False
+
+            async def review(self, turns=None, *, session_id=None):
+                inflight_seen.append(gate.inflight)
+                await asyncio.sleep(0.05)
+                return []
+
+        svc = OfflineQcService(llm=_SlowLLM(), inflight_gate=gate)  # type: ignore[arg-type]
+        first, second = await asyncio.gather(
+            svc.run(_ready_session(session_id="s1")),
+            svc.run(_ready_session(session_id="s2")),
+        )
+        assert first.code == "0"
+        assert second.code == "0"
+        assert first.qc_status != "PARTIAL"
+        assert second.qc_status != "PARTIAL"
+        assert inflight_seen
+        assert max(inflight_seen) <= 1
+        assert gate.inflight == 0
+
+    async def test_queued_run_not_running_until_slot(self):
+        import asyncio
+
+        from app.services.inflight import InflightGate
+
+        redis = MemoryRedis(db=3)
+        store = QcJobStore(redis)
+        gate = InflightGate(max_inflight=1, wait_timeout=0)
+        hold = asyncio.Event()
+        first_running = asyncio.Event()
+
+        class _HoldLLM:
+            degraded = False
+
+            async def review(self, turns=None, *, session_id=None):
+                first_running.set()
+                await hold.wait()
+                return []
+
+        svc = OfflineQcService(
+            llm=_HoldLLM(),  # type: ignore[arg-type]
+            inflight_gate=gate,
+            job_store=store,
+        )
+        t1 = asyncio.create_task(svc.run(_ready_session(session_id="s_run")))
+        await first_running.wait()
+        job1 = await store.get_job("s_run")
+        assert job1 is not None
+        assert job1["status"] == "RUNNING"
+
+        t2 = asyncio.create_task(svc.run(_ready_session(session_id="s_wait")))
+        await asyncio.sleep(0.05)
+        assert gate.inflight == 1
+        job2 = await store.get_job("s_wait")
+        assert job2 is None
+        hold.set()
+        await asyncio.gather(t1, t2)
+        job2 = await store.get_job("s_wait")
+        assert job2 is not None
+        assert job2["status"] == "RUNNING"
+        assert gate.inflight == 0

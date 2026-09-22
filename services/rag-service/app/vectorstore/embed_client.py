@@ -6,12 +6,12 @@ import structlog
 from redis.asyncio import Redis
 
 from app.settings import settings
+from common.resilience.breaker import CircuitBreaker, make_mcp_breaker_key
+from common.resilience.timeout import Timeout
 
 logger = structlog.get_logger()
 
-_DEGRADED_KEY = "rag:embed:degraded"
-_FAILURE_THRESHOLD = 3
-_CIRCUIT_TTL = 60
+_BREAKER_KEY = make_mcp_breaker_key("rag", "embed")
 
 
 class EmbedClient:
@@ -21,78 +21,63 @@ class EmbedClient:
         redis: Redis | None = None,
     ):
         self.endpoint = endpoint or settings.EMBEDDING_SERVICE_URL
-        self._redis = redis
+        self._redis = redis  # 保留构造签名；进程内熔断，不写废弃全局键
         self._client: httpx.AsyncClient | None = None
-        self._failure_count = 0
+        self._breaker = CircuitBreaker(_BREAKER_KEY, fail_max=3, reset_timeout=60)
+        self._timeout = Timeout(total=float(settings.EMBED_TIMEOUT))
+        self._batch_timeout = Timeout(total=float(settings.EMBED_BATCH_TIMEOUT))
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient()
         return self._client
 
-    async def _is_degraded(self) -> bool:
-        if self._redis is None:
-            return False
-        return await self._redis.exists(_DEGRADED_KEY) > 0
-
-    async def _on_success(self) -> None:
-        self._failure_count = 0
-
-    async def _on_failure(self, error: Exception) -> None:
-        self._failure_count += 1
-        if self._failure_count >= _FAILURE_THRESHOLD:
-            await self._set_degraded()
-            logger.error(
-                "embed_circuit_break_open",
-                failures=self._failure_count,
-                error=str(error),
-            )
-
-    async def _set_degraded(self, ttl: int = _CIRCUIT_TTL) -> None:
-        if self._redis is not None:
-            await self._redis.setex(_DEGRADED_KEY, ttl, "1")
+    async def _post(self, payload: dict, timeout: Timeout) -> httpx.Response:
+        client = await self._get_client()
+        return await asyncio.wait_for(
+            client.post(
+                f"{self.endpoint}/embed",
+                json=payload,
+                timeout=timeout.total,
+            ),
+            timeout=timeout.total,
+        )
 
     async def embed(self, text: str) -> list[float]:
-        if await self._is_degraded():
-            raise RuntimeError("Embedding service is in circuit-break state")
-        client = await self._get_client()
-        for attempt in range(3):
-            try:
-                resp = await client.post(
-                    f"{self.endpoint}/embed",
-                    json={"texts": [text]},
-                    timeout=settings.EMBED_TIMEOUT,
-                )
-                resp.raise_for_status()
-                await self._on_success()
-                return resp.json()["vectors"][0]
-            except (httpx.HTTPError, KeyError, IndexError) as e:
-                if attempt < 2:
-                    await asyncio.sleep(1.0 * (2 ** attempt))
-                else:
-                    await self._on_failure(e)
-                    raise
+        if not await self._breaker.before_call():
+            logger.warning("embed_circuit_open_skip")
+            return []
+        try:
+            resp = await self._post({"texts": [text]}, self._timeout)
+            resp.raise_for_status()
+            vector = resp.json()["vectors"][0]
+            if not vector:
+                raise RuntimeError("Embedding service returned empty vector")
+            await self._breaker.record_success()
+            return vector
+        except Exception as e:
+            await self._breaker.record_failure(e)
+            logger.warning("embed_http_failed", error=str(e))
+            return []
 
     async def batch_embed(self, texts: list[str]) -> list[list[float]]:
-        if await self._is_degraded():
-            raise RuntimeError("Embedding service is in circuit-break state")
-        client = await self._get_client()
-        for attempt in range(3):
-            try:
-                resp = await client.post(
-                    f"{self.endpoint}/embed",
-                    json={"texts": texts},
-                    timeout=settings.EMBED_BATCH_TIMEOUT,
-                )
-                resp.raise_for_status()
-                await self._on_success()
-                return resp.json()["vectors"]
-            except (httpx.HTTPError, KeyError, IndexError) as e:
-                if attempt < 2:
-                    await asyncio.sleep(1.0 * (2 ** attempt))
-                else:
-                    await self._on_failure(e)
-                    raise
+        if not texts:
+            return []
+        if not await self._breaker.before_call():
+            logger.warning("embed_circuit_open_skip_batch")
+            return []
+        try:
+            resp = await self._post({"texts": texts}, self._batch_timeout)
+            resp.raise_for_status()
+            vectors = resp.json()["vectors"]
+            if not vectors:
+                raise RuntimeError("Embedding service returned empty vectors")
+            await self._breaker.record_success()
+            return vectors
+        except Exception as e:
+            await self._breaker.record_failure(e)
+            logger.warning("embed_batch_http_failed", error=str(e))
+            return []
 
     async def close(self) -> None:
         if self._client is not None and not self._client.is_closed:

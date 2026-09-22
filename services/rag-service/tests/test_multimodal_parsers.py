@@ -16,6 +16,12 @@ import pytest
 from app.parsers import ParserFactory
 from app.parsers.audio_parser import AudioParser
 from app.parsers.image_parser import ImageParser
+from app.services.asr_providers.dashscope_provider import (
+    DashScopeASRProvider,
+    _asr_breakers,
+)
+from app.services.ocr_client import OCRClient
+from app.settings import settings
 
 
 class TestImageParser:
@@ -98,6 +104,8 @@ class TestIngestDegradedFallback:
         """KB_EMBED_DEGRADED_KEEP_TEXT=true 时 Embedding 失败 → 写 ES，不抛 A3003。"""
         from app.settings import settings
         monkeypatch.setattr(settings, "KB_EMBED_DEGRADED_KEEP_TEXT", True)
+        monkeypatch.setattr(settings, "KB_IMAGE_EXTRACT_ENABLED", False)
+        monkeypatch.setattr(settings, "KB_TABLE_EXTRACT_ENABLED", False)
 
         from app.services.ingest_service import IngestService
 
@@ -134,6 +142,8 @@ class TestIngestDegradedFallback:
         """KB_EMBED_DEGRADED_KEEP_TEXT=false 时 Embedding 失败 → 抛 A3003（V1 一致）。"""
         from app.settings import settings
         monkeypatch.setattr(settings, "KB_EMBED_DEGRADED_KEEP_TEXT", False)
+        monkeypatch.setattr(settings, "KB_IMAGE_EXTRACT_ENABLED", False)
+        monkeypatch.setattr(settings, "KB_TABLE_EXTRACT_ENABLED", False)
 
         from app.services.ingest_service import IngestService
         from common.errors.exceptions import BizException
@@ -161,3 +171,68 @@ class TestIngestDegradedFallback:
             with pytest.raises(BizException) as exc_info:
                 await svc.ingest(Path("test.txt"), "test.txt", "regulation")
             assert exc_info.value.code == ErrorCode.A3003
+
+
+async def _trip_open(breaker) -> None:
+    for _ in range(breaker.fail_max):
+        await breaker.record_failure(RuntimeError("down"))
+
+
+class TestOcrCircuitBreaker:
+    @pytest.mark.asyncio
+    async def test_ocr_breaker_open_raises_not_empty_string(self, tmp_path):
+        """breaker open → 短路 HTTP 并抛错，不得返回空串（避免误走 A3002）。"""
+        ocr = OCRClient()
+        await _trip_open(ocr._breaker)
+
+        async def boom(*args, **kwargs):
+            raise AssertionError("OCR HTTP must be skipped when breaker is open")
+
+        ocr._get_client = boom  # type: ignore[method-assign]
+        img = tmp_path / "t.png"
+        img.write_bytes(b"fake")
+        parser = ImageParser(ocr_client=ocr)
+        with pytest.raises(RuntimeError, match="circuit-break"):
+            await parser.extract_text(img)
+
+    @pytest.mark.asyncio
+    async def test_ocr_success_empty_text_is_blank_image(self):
+        """HTTP 200 空文本是真空白图，返回 "" 且不记熔断失败。"""
+        ocr = OCRClient()
+
+        class FakeResp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"text": ""}
+
+        class FakeClient:
+            is_closed = False
+
+            async def post(self, *args, **kwargs):
+                return FakeResp()
+
+        ocr._client = FakeClient()  # type: ignore[assignment]
+        text = await ocr.recognize(b"white", "blank.png")
+        assert text == ""
+        assert ocr._breaker.state == "closed"
+
+
+class TestAsrCircuitBreaker:
+    @pytest.mark.asyncio
+    async def test_dashscope_breaker_open_raises(self, monkeypatch):
+        """DashScope breaker open → 转写失败标记，不调 HTTP。"""
+        _asr_breakers.clear()
+        monkeypatch.setattr(settings, "DASHSCOPE_API_KEY", "test-key")
+        provider = DashScopeASRProvider()
+        await _trip_open(provider._breaker)
+
+        async def boom(*args, **kwargs):
+            raise AssertionError("ASR HTTP must be skipped when breaker is open")
+
+        provider._get_client = boom  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="circuit-break"):
+            await provider.transcribe(b"fake-audio", "mp3")
+        _asr_breakers.clear()
+

@@ -10,10 +10,15 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+import structlog
+
 from app.events.publisher import publisher
 from app.models.state import ReviewAction, TaskStatus, VerdictType
+from app.service.rate_limiter import rate_limiter
 from app.service.security import prepare_agent_log
 from app.service.session_service import session_service
+
+logger = structlog.get_logger()
 
 
 class ComplaintNotFound(Exception):
@@ -172,8 +177,82 @@ class ComplaintService:
         """异步研判入口（FastAPI 路由使用）。"""
         if run_graph:
             rec = self.get_or_raise(complaint_id)
+            # G5 排队 deadline：入队超 10min（queue_start 已失效）→ A5010 转人审，不进图
+            if not await rate_limiter.check_queue_deadline(complaint_id):
+                return self._handle_queue_timeout(rec)
             return await self._judge_with_graph(rec, complaint_id)
         return self._judge_stub(complaint_id)
+
+    def _handle_queue_timeout(self, rec: dict, node: str = "judge_async") -> dict:
+        """排队超 10min：A5010 + pending_review（HTTP 仍 200，前端按状态展示）。"""
+        from app.models.state import ExceptionInfo
+        from app.service.degrade_flow import QUEUE_TIMEOUT_SECONDS, degrade_flow
+
+        sid = rec["session_id"]
+        degrade_flow.handle_queue_timeout(
+            QUEUE_TIMEOUT_SECONDS,
+            trace_id=f"trace-{rec['complaint_id']}",
+            node=node,
+        )  # 发 complaint.degraded/A5010（真实 trace_id + 来源 node）
+        session_service.transition(sid, TaskStatus.pending_review)
+        rec = self._sync_from_session(rec)
+        exc_info = ExceptionInfo(
+            error_type="queue_timeout",
+            message=f"排队超过 {QUEUE_TIMEOUT_SECONDS // 60}min 未获执行槽",
+            node=node,
+        ).model_dump()
+        rec["exception_info"] = exc_info
+        session = session_service.get_session(sid)
+        if session is not None:
+            session["exception_info"] = exc_info
+        return rec
+
+    async def fail_queue_timeout(self, complaint_id: str) -> dict:
+        """排队超时公共入口（main.py 队列消费循环对 expired 工单调用的）：
+        A5010 转 pending_review，并释放维5幂等锁（工单已出队，允许后续重判）。"""
+        rec = self.get_or_raise(complaint_id)
+        rec = self._handle_queue_timeout(rec, node="queue_consumer")
+        await rate_limiter.release_complaint_lock(complaint_id)
+        return rec
+
+    async def fail_shutdown(self, complaint_id: str) -> bool:
+        """进程关停取消在途研判时的 best-effort 状态兜底（P3-4）。
+
+        shutdown 取消排队研判任务后，session 可能滞留 judging：此处把流水线内
+        会话经合法多步流转推进到 pending_review，并写
+        exception_info(error_type=shutdown_cancelled, node=queue_consumer)。
+
+        - 已在 pending_review：幂等 no-op，返回 True；
+        - 已 resolved/closed 等终态：transition 返回 False，MUST NOT 回退或覆盖；
+        - 不发 A5010（本场景是进程关停，非排队/执行 deadline 超时）。
+
+        注意：本协程体内不含 await 挂起点（全部为内存态操作），可在
+        CancelledError except 块中被原子地 await 完成，不会被取消信号二次打断；
+        批次4 换成 Redis 持久化 session 后，调用处需改用 asyncio.shield 包裹。
+        """
+        from app.models.state import ExceptionInfo
+
+        rec = self.get_or_raise(complaint_id)
+        sid = rec["session_id"]
+        session = session_service.get_session(sid)
+        prev_status = session["task_status"].value if session is not None else None
+        if prev_status == TaskStatus.pending_review.value:
+            # 已到人审（可能刚写完自己的 exception_info 即被取消）：幂等 no-op，不覆盖
+            return True
+        ok = session_service.transition(sid, TaskStatus.pending_review)
+        if not ok:
+            return False
+        rec = self._sync_from_session(rec)
+        exc_info = ExceptionInfo(
+            error_type="shutdown_cancelled",
+            message="服务关停，在途研判被取消，已转人审兜底",
+            node="queue_consumer",
+        ).model_dump()
+        rec["exception_info"] = exc_info
+        session = session_service.get_session(sid)
+        if session is not None:
+            session["exception_info"] = exc_info
+        return True
 
     def _judge_stub(self, complaint_id: str) -> dict:
         """stub 路径：沿合法状态机推进到 pending_review，写 mock verdict。"""
@@ -233,13 +312,39 @@ class ComplaintService:
         rec["updated_at"] = datetime.now(timezone.utc)
         return rec
 
+    async def _collect_graph_updates(
+        self, graph, state_in: dict, config: dict, run_events: list, timer
+    ) -> None:
+        """消费 graph astream updates，逐节点落 Agent trace（供 wait_for 包执行 deadline）。"""
+        from app.service.trace import make_trace_event
+
+        async for chunk in graph.astream(state_in, config, stream_mode="updates"):
+            if not isinstance(chunk, dict):
+                continue
+            for node_name, _update in chunk.items():
+                name = str(node_name)
+                if name.startswith("__"):
+                    continue
+                run_events.append(
+                    make_trace_event(
+                        category="Agent",
+                        name=name,
+                        status="success",
+                        duration_ms=timer.lap_ms(),
+                        summary=f"node={name}",
+                    )
+                )
+
     async def _judge_with_graph(self, rec: dict, complaint_id: str) -> dict:
         """run_graph=True：编译并执行真图，回写 verdict 等字段，并落单 trace_events。"""
         from langgraph.checkpoint.memory import MemorySaver
+        from langgraph.errors import GraphInterrupt
 
         from app.api.deps import get_llm_provider, get_mcp_client
         from app.graph.builder import build_complaint_graph
-        from app.models.state import ComplaintSessionState
+        from app.llm.provider import CircuitBreakerOpenError
+        from app.models.state import ComplaintSessionState, ExceptionInfo
+        from common.llm.reliability import LLMRateLimitError
         from app.service.trace import (
             NodeTimer,
             OptionalLangfuseRun,
@@ -283,40 +388,65 @@ class ComplaintService:
         ls_run = OptionalLangSmithRun("complaint_judge", judge_inputs)
         lf_run = OptionalLangfuseRun("complaint_judge", judge_inputs)
         interrupt_err: Exception | None = None
+        graph_error: Exception | None = None
+        graph_error_type: str = ""
         final: dict = {}
 
         try:
-            async for chunk in graph.astream(state_in, config, stream_mode="updates"):
-                if not isinstance(chunk, dict):
-                    continue
-                for node_name, _update in chunk.items():
-                    name = str(node_name)
-                    if name.startswith("__"):
-                        continue
-                    run_events.append(
-                        make_trace_event(
-                            category="Agent",
-                            name=name,
-                            status="success",
-                            duration_ms=timer.lap_ms(),
-                            summary=f"node={name}",
-                        )
-                    )
+            # G5 执行 deadline：exec_start(30min TTL) 已写；wait_for 超时 → A5010
+            await rate_limiter.start_execution(complaint_id)
             try:
-                snap = await graph.aget_state(config)
-                if snap and snap.values:
-                    final = dict(snap.values)
-            except Exception:  # noqa: BLE001
-                final = {}
-        except Exception as e:  # noqa: BLE001 — 含 GraphInterrupt：图停在人工断点
+                await asyncio.wait_for(
+                    self._collect_graph_updates(
+                        graph, state_in, config, run_events, timer
+                    ),
+                    timeout=rate_limiter.exec_timeout_seconds,
+                )
+            finally:
+                # 5.3：exec key 在 ainvoke 完成（含超时/异常）时即删，与 queue_start 独立
+                await rate_limiter.finish_execution(complaint_id)
+        except GraphInterrupt as e:
+            # 正常人审挂起：转 pending_review，不写 exception_info（spec session-service）
             interrupt_err = e
+        except TimeoutError as e:
+            # G5 执行超 30min：发 complaint.degraded/A5010，再走 G3 超时分支
+            from app.service.degrade_flow import GLOBAL_TIMEOUT_SECONDS, degrade_flow
+
+            deadline = rate_limiter.exec_timeout_seconds
+            # 语义上即「撞满 30min 全局上限」，按常量阈值触发，便于测试缩短实际 wait_for
+            degrade_flow.handle_global_timeout(
+                float(GLOBAL_TIMEOUT_SECONDS),
+                trace_id=trace_id,
+                node="graph",
+            )
+            logger.warning("judge_exec_timeout", complaint_id=complaint_id, deadline=deadline)
+            graph_error = TimeoutError(f"exec deadline {deadline}s exceeded")
+            graph_error_type = "timeout"
+        except (CircuitBreakerOpenError, RuntimeError) as e:
+            # 运行时/韧性错误：pending_review + exception_info
+            graph_error = e
+            if isinstance(e, CircuitBreakerOpenError):
+                graph_error_type = "circuit_open"
+            elif isinstance(e, LLMRateLimitError):
+                # 内部模型维限流（非用户维 B0006）：转人审，落明确错误类型
+                graph_error_type = "llm_rate_limited"
+            else:
+                graph_error_type = type(e).__name__
+        except Exception as e:  # noqa: BLE001 — 兜底：unknown_error + pending_review
+            graph_error = e
+            graph_error_type = "unknown_error"
+
+        # 保留部分终态快照（成功与异常路径统一）
+        try:
+            snap = await graph.aget_state(config)
+            if snap and snap.values:
+                final = dict(snap.values)
+        except Exception:  # noqa: BLE001
             final = {}
-            try:
-                snap = await graph.aget_state(config)
-                if snap and snap.values:
-                    final = dict(snap.values)
-            except Exception:  # noqa: BLE001
-                final = {}
+
+        if interrupt_err is not None or graph_error is not None:
+            e = interrupt_err if interrupt_err is not None else graph_error
+            assert e is not None
             rec.setdefault("agent_logs", []).append(
                 prepare_agent_log(
                     "judge_graph_interrupt",
@@ -329,11 +459,20 @@ class ComplaintService:
                 make_trace_event(
                     category="Agent",
                     name="human_review_or_error",
-                    status="paused" if "Interrupt" in type(e).__name__ else "error",
+                    status="paused" if interrupt_err is not None else "error",
                     duration_ms=timer.lap_ms(),
                     summary=f"{type(e).__name__}: {e}",
                 )
             )
+
+        if graph_error is not None:
+            exc_info = ExceptionInfo(
+                error_type=graph_error_type, message=str(graph_error)[:300], node="graph"
+            ).model_dump()
+            rec["exception_info"] = exc_info
+            session = session_service.get_session(sid)
+            if session is not None:
+                session["exception_info"] = exc_info
 
         # 落单 MCP / LLM / RAG（本轮 call_log 增量 → 工单存储）
         try:
@@ -354,11 +493,16 @@ class ComplaintService:
             pass
 
         if not any(e.get("category") == "Agent" for e in run_events):
+            status = "success"
+            if interrupt_err is not None and graph_error is None:
+                status = "paused"
+            elif graph_error is not None:
+                status = "error"
             run_events.append(
                 make_trace_event(
                     category="Agent",
                     name="judge_graph",
-                    status="success" if interrupt_err is None else "paused",
+                    status=status,
                     duration_ms=0,
                     summary=f"complaint_id={complaint_id}",
                 )
@@ -371,7 +515,8 @@ class ComplaintService:
         run_outputs = {
             "verdict": str((final or {}).get("verdict_draft") or "")[:200],
         }
-        run_error = None if interrupt_err is None else f"{type(interrupt_err).__name__}"
+        run_err = interrupt_err if interrupt_err is not None else graph_error
+        run_error = None if run_err is None else f"{type(run_err).__name__}"
         ls_run.end(outputs=run_outputs, error=run_error)
         lf_run.end(outputs=run_outputs, error=run_error)
 

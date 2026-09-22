@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -19,7 +18,6 @@ from app.repositories.job_store import QcJobStore
 from app.routers.check import get_dp_client, get_llm_reviewer, get_quality_repo
 from app.services.ac_filter import WordHit
 from app.services.dedup_ac import DedupACWindow
-from app.services.llm_circuit import QcLlmCircuit
 from app.services.llm_reviewer import LLMReviewer
 from app.services.scoring_service import ScoringService
 from common.db.session import get_session
@@ -462,15 +460,26 @@ class TestAssertions1to14:
         assert "score" not in data
         assert data["session_id"] == qc.session_id
 
-    def test_assertion_12_llm_circuit_open_still_scores(self):
+    def test_assertion_12_llm_circuit_open_still_scores(self, monkeypatch):
+        monkeypatch.setattr("app.core.config.qc_settings.QC_MOCK_LLM", False)
+        monkeypatch.setattr("app.services.llm_reviewer.qc_settings.QC_MOCK_LLM", False)
+        from common.llm import reliability as reliability_mod
+        from common.llm.reliability import set_default_service
+        from common.resilience._redis import configure_redis
+
+        reliability_mod._llm_breakers.clear()
+        set_default_service("qc")
+        monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+
+        async def _boom(model, messages, timeout_seconds):
+            raise TimeoutError("timeout")
+
         db = ApiFakeSession()
         db.call_ids.add("sess_a12")
         redis = MemoryRedis(db=3)
+        configure_redis(redis)
         store = QcJobStore(redis)
-        circuit = QcLlmCircuit(store)
-        circuit.state = "open"
-        circuit.opened_at = time.monotonic()
-        llm = LLMReviewer(invoke=_empty_llm, job_store=store, circuit=circuit, retry_delay=0.0)
+        llm = LLMReviewer(invoke=_boom, job_store=store, retry_delay=0.0)
         client = _client(db, redis, FakeDp({}), llm=llm)
         resp = _post_raw(client, _raw_body("sess_a12", _one_high_turns()))
         assert resp.status_code == 200
@@ -480,6 +489,7 @@ class TestAssertions1to14:
         assert data is not None
         assert data["compliance_score"] == 80
         assert "score" not in data
+        assert data.get("qc_status") != "PARTIAL"
 
     def test_assertion_13_evidence_masked_no_full_pii(self):
         db = ApiFakeSession()

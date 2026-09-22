@@ -8,6 +8,7 @@ import pytest
 
 from app.events.publisher import (
     ALERT_STREAM,
+    ALLOWED_CHANNELS,
     CHANNEL_ALERT_RAISED,
     CHANNEL_CHECK_COMPLETED,
     CHANNEL_COMPLAINT_SUSPECTED,
@@ -318,8 +319,153 @@ class TestSystemAlertUnchanged:
         await pub.publish_system_alert_raised()
         assert pub.emitted[0][0] == CHANNEL_SYSTEM_ALERT
         assert pub.emitted[0][1]["event"] == "qc:llm_degraded"
+        assert pub.emitted[0][1]["error_code"] == "A2011"
         assert "qc.llm.degraded" in FORBIDDEN_CHANNELS
         with pytest.raises(ValueError):
             await pub._publish("qc.escalate.human", {"x": 1})
         with pytest.raises(ValueError):
             await pub._publish("qc.llm.degraded", {"x": 1})
+
+
+class TestResilienceHooks:
+    def teardown_method(self):
+        from app.events.resilience import clear_emitted
+        from app.main import _unwire_resilience_hooks
+        from common.resilience._redis import reset_redis
+
+        from tests.test_replay_api import _cleanup
+
+        _cleanup()
+        _unwire_resilience_hooks()
+        clear_emitted()
+        reset_redis()
+
+    def test_allowed_channels_still_exactly_six(self):
+        assert len(ALLOWED_CHANNELS) == 6
+        assert ALLOWED_CHANNELS == {
+            CHANNEL_ALERT_RAISED,
+            CHANNEL_CHECK_COMPLETED,
+            CHANNEL_COMPLAINT_SUSPECTED,
+            CHANNEL_STOP_CALL,
+            CHANNEL_REVIEW_DONE,
+            CHANNEL_SYSTEM_ALERT,
+        }
+
+    def test_rate_limit_hit_emits_qc_event_with_trace_id_not_redis_channel(self):
+        from app.events.resilience import clear_emitted, emitted
+        from app.main import wire_resilience_hooks
+        from tests.test_replay_api import (
+            ApiFakeSession,
+            FakeDp,
+            _assert_envelope,
+            _client,
+            _ready,
+        )
+
+        db = ApiFakeSession()
+        db.call_ids.add("sess_ok")
+        redis = MemoryRedis(db=3)
+        wire_resilience_hooks()
+        clear_emitted()
+        client = _client(db, redis, FakeDp({}))
+        for i in range(11):
+            resp = client.post(
+                "/api/v1/qc/replay/raw",
+                headers={
+                    "X-Idempotency-Key": f"hook-{i}",
+                    "X-User-Id": "u-hook-rate",
+                    "X-Trace-Id": "trace-hook-rate",
+                },
+                json=_ready(),
+            )
+        _assert_envelope(resp.json(), code="B0006")
+        hits = [payload for name, payload in emitted if name == "qc.rate_limit.hit"]
+        assert hits
+        assert hits[0]["trace_id"] == "trace-hook-rate"
+        assert hits[0]["key"] == "qc:ratelimit:raw:u-hook-rate"
+        assert hits[0]["reason"] == "rate_limited"
+        published = {ch for ch, _ in redis.published}
+        assert "qc.rate_limit.hit" not in published
+        assert "qc.llm.degraded" not in published
+        assert published <= ALLOWED_CHANNELS
+
+    def test_shutdown_sets_hooks_publisher_none(self):
+        from app.main import _unwire_resilience_hooks, app, wire_resilience_hooks
+        from common.resilience import hooks
+        from fastapi.testclient import TestClient
+
+        wire_resilience_hooks()
+        assert hooks.get_publisher() is not None
+        _unwire_resilience_hooks()
+        assert hooks.get_publisher() is None
+
+        with TestClient(app):
+            assert hooks.get_publisher() is not None
+        assert hooks.get_publisher() is None
+
+    async def test_adapter_failure_does_not_block_rate_limit(self):
+        from common.resilience import hooks
+        from tests.test_replay_api import (
+            ApiFakeSession,
+            FakeDp,
+            _assert_envelope,
+            _client,
+            _ready,
+        )
+
+        async def _boom(_name, _payload):
+            raise RuntimeError("adapter down")
+
+        db = ApiFakeSession()
+        db.call_ids.add("sess_ok")
+        redis = MemoryRedis(db=3)
+        hooks.set_publisher(_boom)
+        client = _client(db, redis, FakeDp({}))
+        codes = []
+        for i in range(11):
+            resp = client.post(
+                "/api/v1/qc/replay/raw",
+                headers={"X-Idempotency-Key": f"boom-{i}", "X-User-Id": "u-boom"},
+                json=_ready(),
+            )
+            codes.append((resp.status_code, resp.json()["code"]))
+        assert codes[:10] == [(200, "0")] * 10
+        _assert_envelope(resp.json(), code="B0006")
+        assert codes[10] == (429, "B0006")
+
+    async def test_adapter_records_circuit_and_degrade_variants_not_redis(self):
+        from app.events.resilience import clear_emitted, emitted, on_resilience_event
+        from common.resilience import hooks
+
+        clear_emitted()
+        hooks.set_publisher(on_resilience_event)
+        await hooks.on_event(
+            "qc.circuit_breaker.open",
+            {"key": "qc:llm_degraded:qwen-plus", "reason": "open"},
+        )
+        await hooks.on_event(
+            "qc.degrade.triggered",
+            {"key": "qc:llm_degraded:qwen-plus", "reason": "circuit_open"},
+        )
+        await hooks.on_event(
+            "qc.rate_limit.degraded",
+            {"key": "qc:ratelimit:raw:anon", "error": "redis down"},
+        )
+        names = [name for name, _ in emitted]
+        assert "qc.circuit_breaker.open" in names
+        assert "qc.degrade.triggered" in names
+        assert "qc.rate_limit.degraded" in names
+        assert all(not name.startswith("qc.llm.degraded") for name, _ in emitted)
+
+    async def test_adapter_swallows_internal_errors(self, monkeypatch):
+        from app.events import resilience
+
+        class _Boom:
+            def append(self, _item):
+                raise RuntimeError("emitted list down")
+
+        monkeypatch.setattr(resilience, "emitted", _Boom())
+        await resilience.on_resilience_event(
+            "qc.circuit_breaker.open",
+            {"key": "qc:llm_degraded:qwen-plus"},
+        )

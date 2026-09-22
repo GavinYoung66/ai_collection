@@ -147,11 +147,63 @@ async def get_complaint(complaint_id: str, request: Request):
 
 @router.post("/{complaint_id}/judge")
 async def judge_complaint(complaint_id: str, request: Request, req: JudgeRequest = Body(default=None)):
+    """G8 接线：五维限流入口。
+
+    - full → B0006（队列满，数据中台退避重试，非 500、不转人审）；
+    - duplicate → B0005（同工单并发重复提交冲突）；
+    - queued → 受理成功，message 携带排队状态（页面展示排队中）；
+    - granted → 执行研判，结束（含异常）释放并发槽与维5幂等锁。
+    """
+    from app.service.rate_limiter import (
+        OUTCOME_DUPLICATE,
+        OUTCOME_FULL,
+        OUTCOME_GRANTED,
+        OUTCOME_QUEUED,
+        rate_limiter,
+    )
+
     run_graph = bool(req.run_graph) if req is not None else False
+    # 先验存在：防 404 工单先占用幂等锁/排队位
     try:
-        rec = await complaint_service.judge_async(complaint_id, run_graph=run_graph)
+        complaint_service.get_or_raise(complaint_id)
     except ComplaintNotFound:
         return fail(ErrorCode.A5001, f"投诉工单不存在: {complaint_id}", request=request)
+    # 用户维接入限流（X-User-Id 优先回退 IP，Redis 挂零件层静默放行）
+    client_host = request.client.host if request.client else None
+    user_key = rate_limiter.resolve_user_key(request.headers, client_host)
+    user_allowed = await rate_limiter.acquire_user(
+        user_key, trace_id=request.headers.get("x-trace-id", "")
+    )
+    if not user_allowed:
+        return fail(
+            ErrorCode.B0006, "请求过于频繁，请稍后再试", request=request
+        )
+    outcome = await rate_limiter.acquire_complaint(complaint_id)
+    try:
+        if outcome == OUTCOME_FULL:
+            return fail(
+                ErrorCode.B0006, "排队队列已满，请稍后重试", request=request
+            )
+        if outcome == OUTCOME_DUPLICATE:
+            return fail(
+                ErrorCode.B0005, "同工单正在处理中，请勿重复提交", request=request
+            )
+        if outcome == OUTCOME_QUEUED:
+            rec = complaint_service.get_or_raise(complaint_id)
+            data = JudgeResponse(
+                complaint_id=complaint_id,
+                task_status=rec["task_status"],
+                message="judge queued (waiting for execution slot)",
+            )
+            return success(data=data.model_dump(mode="json"), request=request)
+        try:
+            rec = await complaint_service.judge_async(complaint_id, run_graph=run_graph)
+        except ComplaintNotFound:
+            return fail(ErrorCode.A5001, f"投诉工单不存在: {complaint_id}", request=request)
+    finally:
+        if outcome == OUTCOME_GRANTED:
+            await rate_limiter.release_complaint_lock(complaint_id)
+            rate_limiter.release_complaint()
     data = JudgeResponse(
         complaint_id=rec["complaint_id"],
         task_status=rec["task_status"],

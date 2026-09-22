@@ -117,6 +117,7 @@ services:
       # 内部访问 token（生产由运维提供 ADMIN/SUPERVISOR 角色的 JWT，前端不硬编码）
       - RAG_API_TOKEN=${RAG_API_TOKEN:?must set internal token}
       - GRADIO_SERVER_NAME=0.0.0.0
+      - GRADIO_ROOT_PATH=/rag
       # 与 rag-service 共享资产数据卷（图片/表格预览源），gradio app.py 读取同一 env 名
       - KB_ASSETS_DIR=/app/data/assets
     volumes:

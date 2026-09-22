@@ -9,6 +9,8 @@ import pytest
 
 from app.services.search_service import SearchService
 from app.settings import settings
+from app.vectorstore.embed_client import EmbedClient
+from app.vectorstore.rerank_client import RerankClient
 
 
 class MockMilvus:
@@ -71,6 +73,65 @@ class TestRerankIsDegradedFaultTolerance:
         )
         result = await svc.hybrid_search("测试", None, 5)
         assert len(result["results"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_is_degraded_reads_breaker_not_old_redis_key(self):
+        """is_degraded 读 CircuitBreaker，不探测 rag:rerank:degraded。"""
+        class RecordingRedis:
+            def __init__(self):
+                self.ops = []
+
+            async def exists(self, key):
+                self.ops.append(("exists", key))
+                return 0
+
+            async def setex(self, key, ttl, value):
+                self.ops.append(("setex", key))
+
+        redis = RecordingRedis()
+        client = RerankClient(redis=redis)
+        assert await client.is_degraded() is False
+        for _ in range(3):
+            await client._breaker.record_failure(RuntimeError("down"))
+        assert await client.is_degraded() is True
+        assert redis.ops == []
+
+    @pytest.mark.asyncio
+    async def test_is_degraded_breaker_probe_exception_is_not_open(self):
+        """熔断探测本身抛错 → 按未熔断，避免连锁 500。"""
+        client = RerankClient()
+
+        def boom() -> bool:
+            raise RuntimeError("breaker backend down")
+
+        client._open_blocks_calls = boom  # type: ignore[method-assign]
+        assert await client.is_degraded() is False
+
+    @pytest.mark.asyncio
+    async def test_embed_http_failure_does_not_set_old_redis_key(self):
+        """embed 失败只记 CircuitBreaker，不 SETEX rag:embed:degraded。"""
+        class RecordingRedis:
+            def __init__(self):
+                self.ops = []
+
+            async def exists(self, key):
+                self.ops.append(("exists", key))
+                return 0
+
+            async def setex(self, key, ttl, value):
+                self.ops.append(("setex", key))
+
+        redis = RecordingRedis()
+        embed = EmbedClient(redis=redis)
+
+        async def boom_post(payload, timeout):
+            raise ConnectionError("embed down")
+
+        embed._post = boom_post  # type: ignore[method-assign]
+        vector = await embed.embed("测试")
+        assert vector == []
+        assert redis.ops == []
+        assert embed._breaker.failures == 1
 
 
 class TestSessionRecordFaultTolerance:

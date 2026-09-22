@@ -9,20 +9,14 @@ import re
 import struct
 from pathlib import Path
 
+from redis.asyncio import Redis
 import structlog
 import yaml
-from redis.asyncio import Redis
-from redis.exceptions import RedisError
 
 from app.services.asr_providers import ASRFactory
 from app.settings import settings
-from common.trace.middleware import get_trace_id
 
 logger = structlog.get_logger()
-
-_DEGRADED_KEY = "rag:asr:degraded"
-_FAILURE_THRESHOLD = 3
-_CIRCUIT_TTL = 60
 _SEGMENT_SECONDS = 60
 _SUPPORTED_FORMATS = {"mp3", "wav", "m4a"}
 
@@ -48,43 +42,11 @@ class ASRClient:
     - 静音裁剪：仅 WAV(PCM) 按 RMS 能量阈值裁剪首尾静音（窗口 0.1s），
       非 WAV 透传（MP3/M4A 无解包能力，依赖 Provider 侧处理）。
     - 长音频分段：WAV 按 ≤60s 硬分片，非 WAV 透传单元素。
-    - 熔断：连续 3 次失败写入 Redis `rag:asr:degraded`（TTL 60s）。
+    - 熔断只留在 DashScope Provider；本客户端不探测、不写入废弃全局键。
     """
 
     def __init__(self, redis: Redis | None = None):
-        self._redis = redis
-        self._failure_count = 0
-
-    async def _is_degraded(self) -> bool:
-        if self._redis is None:
-            return False
-        try:
-            return await self._redis.exists(_DEGRADED_KEY) > 0
-        except (RedisError, OSError) as e:
-            # 熔断探测失败按未熔断处理：Redis 抖动不应阻断正常 ASR 链路（rag-service-final-fix 5.5）
-            logger.warning(
-                "asr_degraded_probe_failed",
-                error=str(e),
-                trace_id=get_trace_id(),
-            )
-            return False
-
-    async def _on_success(self) -> None:
-        self._failure_count = 0
-
-    async def _on_failure(self, error: Exception) -> None:
-        self._failure_count += 1
-        if self._failure_count >= _FAILURE_THRESHOLD:
-            await self._set_degraded()
-            logger.error(
-                "asr_client_circuit_break_open",
-                failures=self._failure_count,
-                error=str(error),
-            )
-
-    async def _set_degraded(self, ttl: int = _CIRCUIT_TTL) -> None:
-        if self._redis is not None:
-            await self._redis.setex(_DEGRADED_KEY, ttl, "1")
+        self._redis = redis  # 保留构造签名；熔断不在本层
 
     @staticmethod
     def _extract_format(filename: str) -> str:
@@ -353,26 +315,18 @@ class ASRClient:
             识别出的文本字符串（多段拼接结果；开关开启时已裁剪通话开场白）。
 
         Raises:
-            RuntimeError: 服务处于熔断状态。
+            RuntimeError: Provider 熔断或转写失败。
             ValueError: 音频格式不支持。
         """
-        if await self._is_degraded():
-            raise RuntimeError("ASR service is in circuit-break state")
-
         fmt = self._extract_format(filename)
         audio_bytes = self._trim_silence(file_bytes, fmt)
         segments = self._split_segments(audio_bytes, fmt)
 
         provider = ASRFactory.create()
         texts: list[str] = []
-        try:
-            for seg in segments:
-                text = await provider.transcribe(seg, fmt)
-                texts.append(text)
-        except Exception as e:
-            await self._on_failure(e)
-            raise
-        await self._on_success()
+        for seg in segments:
+            text = await provider.transcribe(seg, fmt)
+            texts.append(text)
 
         full_text = "".join(texts)
 

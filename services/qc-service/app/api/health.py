@@ -11,7 +11,7 @@ from app.deps import get_rag_client, get_redis
 from app.errors import success
 from app.integrations.rag_client import RagClient
 from app.observability import evaluate_words_stale
-from app.repositories.job_store import QcJobStore
+from app.repositories.job_store import QcJobStore, is_llm_chain_open_in_process
 
 router = APIRouter(tags=["health"])
 
@@ -21,20 +21,20 @@ HEALTH_RAG_TIMEOUT = 1.0
 
 async def _probe_health(redis, rag: RagClient) -> dict[str, Any]:
     ac_version: str | None = None
-    llm_degraded = False
+    llm_degraded = is_llm_chain_open_in_process()
     rag_connected = False
     try:
         store = QcJobStore(redis)
 
         async def _read() -> tuple[str | None, bool]:
             version = await store.get_words_version()
-            degraded = await store.get_llm_degraded()
-            return version, degraded is not None
+            degraded = await store.is_llm_chain_degraded()
+            return version, degraded
 
         ac_version, llm_degraded = await asyncio.wait_for(_read(), timeout=HEALTH_REDIS_TIMEOUT)
     except Exception:
         ac_version = None
-        llm_degraded = False
+        # Redis 挂/超时：保留进程内整链口径，避免把已 open 的熔断报成 false
 
     try:
         rag_connected = await asyncio.wait_for(

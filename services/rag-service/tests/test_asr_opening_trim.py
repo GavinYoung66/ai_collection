@@ -8,7 +8,6 @@
 - 规则缺失/解析失败 → 按开关关闭处理
 """
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -69,7 +68,6 @@ class TestTranscribeTrimGate:
             "app.services.asr_client.ASRFactory.create", lambda: provider
         )
         client = ASRClient(redis=None)
-        client._is_degraded = AsyncMock(return_value=False)
         return client
 
     @pytest.mark.asyncio

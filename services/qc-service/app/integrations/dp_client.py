@@ -11,10 +11,12 @@ import httpx
 from app.core.config import qc_settings
 from app.integrations.qc_session import QCSession, map_qc_source, unwrap_envelope
 from common.llm.reliability import call_with_retry
+from common.resilience.breaker import BreakerState, CircuitBreaker, make_mcp_breaker_key
 from common.trace.middleware import get_trace_id
 
 DP_RETRY_ATTEMPTS = 3
 PENDING_BREAKER_FAILURES = 3
+_PENDING_BREAKER_KEY = make_mcp_breaker_key("qc", "data_platform")
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 logger = logging.getLogger(__name__)
 
@@ -37,8 +39,11 @@ class DpClient:
         self._pending_path = qc_settings.QC_DP_PENDING_QC_PATH
         self._client = client
         self._owns_client = client is None
-        self._pending_failures = 0
-        self._pending_open = False
+        self._pending_breaker = CircuitBreaker(
+            _PENDING_BREAKER_KEY,
+            fail_max=PENDING_BREAKER_FAILURES,
+            reset_timeout=60,
+        )
         self._request_log: list[tuple[str, str]] = []
 
     async def aclose(self) -> None:
@@ -63,7 +68,7 @@ class DpClient:
 
     @property
     def pending_circuit_open(self) -> bool:
-        return self._pending_open
+        return self._pending_breaker.state == BreakerState.OPEN.value
 
     async def _get_json(self, url: str, params: dict[str, Any] | None = None) -> Any:
         client = await self._http()
@@ -100,27 +105,25 @@ class DpClient:
         return [str(item) for item in ids if item is not None and str(item) != ""]
 
     async def list_pending_session_ids(self, *, etl_date: str | None = None, limit: int = 100) -> list[str]:
-        if self._pending_open:
+        if not await self._pending_breaker.before_call():
             return []
         day = etl_date or datetime.now(_SHANGHAI).date().isoformat()
         capped = min(max(int(limit), 1), 500)
         url = self.pending_qc_url()
         try:
             payload = await self._get_json_retry(url, params={"etl_date": day, "limit": capped})
-        except (httpx.HTTPError, OSError):
-            self._pending_failures += 1
-            if self._pending_failures >= PENDING_BREAKER_FAILURES:
-                self._pending_open = True
+        except (httpx.HTTPError, OSError) as exc:
+            await self._pending_breaker.record_failure(exc)
             return []
-        self._pending_failures = 0
+        await self._pending_breaker.record_success()
         return self.parse_pending_qc(payload)
 
     async def complement_pending_qc(self, *, etl_date: str | None = None, limit: int = 100) -> list[QCSession]:
         """pending-qc 熔断则跳过本轮补检，不半套拉 qc-source。"""
-        if self._pending_open:
+        if self.pending_circuit_open:
             return []
         ids = await self.list_pending_session_ids(etl_date=etl_date, limit=limit)
-        if self._pending_open or not ids:
+        if self.pending_circuit_open or not ids:
             return []
         sessions: list[QCSession] = []
         for session_id in ids:

@@ -33,6 +33,9 @@ class ComplaintSettings(Settings):
     LLM_MODEL_PRIMARY: str = "deepseek-r1"
     LLM_MODEL_FALLBACK_1: str = "qwen-plus"
     LLM_MODEL_FALLBACK_2: str = "qwen-turbo"
+    # fallback_chain 全链（逗号分隔，顺序即优先级：主模型 → 备用 → 更弱模型）。
+    # 留空则由 LLM_MODEL_PRIMARY / FALLBACK_1 / FALLBACK_2 推导（向后兼容）。
+    LLM_FALLBACK_CHAIN: str = ""
 
     # ── LLM API 凭据 ──
     LLM_DEEPSEEK_API_KEY: str = "change_me"

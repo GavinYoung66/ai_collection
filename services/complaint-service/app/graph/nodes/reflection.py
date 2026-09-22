@@ -2,14 +2,17 @@
 
 收集全量证据，调用 LLM 输出反思报告，loop_count += 1。
 不自行发起取证循环，流转权交还调度。
+LLM 降级（spec graph-nodes）：超时/熔断/整链失败 → 规则兜底报告 + pending_review。
 """
 from __future__ import annotations
 
 import structlog
 
 from app.api.deps import get_llm_provider
+from app.llm.provider import CircuitBreakerOpenError, LLMCallError
 from app.models.state import ComplaintSessionState, ReflectionReport
 from app.prompt.loader import load_prompt
+from app.service.degrade_llm import node_degrade_fallback
 from app.utils.evidence_helper import _collect_all_evidence
 
 logger = structlog.get_logger()
@@ -25,13 +28,17 @@ async def reflection_node(state: ComplaintSessionState) -> dict:
         evidence_count=len(evidence),
     )
     llm = get_llm_provider()
-    report: ReflectionReport = await llm.invoke(
-        prompt,
-        schema=ReflectionReport,
-        trace_id=state.trace_id,
-        session_id=state.session_id,
-        agent_role="reflection",
-    )
+    try:
+        report: ReflectionReport = await llm.invoke(
+            prompt,
+            schema=ReflectionReport,
+            trace_id=state.trace_id,
+            session_id=state.session_id,
+            agent_role="reflection",
+        )
+    except (TimeoutError, CircuitBreakerOpenError, LLMCallError) as e:
+        # LLM 降级：规则兜底草稿 + pending_review，不抛（spec graph-nodes）
+        return await node_degrade_fallback("reflection", state, e)
     # 真实模型偶发误判「证据不足」：本地已采到通话+案件信息时强制充分，保证后续 Agent 能干活
     has_call = any(
         (getattr(b, "call_evidence", None) or (b.get("call_evidence") if isinstance(b, dict) else None))

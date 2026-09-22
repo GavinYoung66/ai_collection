@@ -1,7 +1,7 @@
 """qc-service 产品开关：DD-02 §12 全部 QC_*。平台 PG/Redis host 仍读 common Settings。"""
 from __future__ import annotations
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _HOST_FIELDS = ("QC_RAG_SENSITIVE_BASE", "QC_DP_BASE")
@@ -21,6 +21,9 @@ class QcSettings(BaseSettings):
     QC_DP_TIMEOUT: int = 5
     QC_LLM_MODEL: str = "qwen-plus"
     QC_LLM_TIMEOUT: int = 5
+    QC_LLM_FALLBACK_CHAIN: list[str] = ["qwen-turbo"]
+    QC_MAX_INFLIGHT: int = Field(default=3, ge=1)
+    QC_INFLIGHT_WAIT_TIMEOUT: int = Field(default=0, ge=0)
     QC_LLM_RETRY: int = 3
     QC_LLM_DEGRADE_AFTER: int = 3
     QC_DEDUP_WINDOW_MS: int = 30000

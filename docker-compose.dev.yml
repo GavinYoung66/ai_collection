@@ -35,8 +35,8 @@
 #      构建必失败）改为 context: . + dockerfile: services/<svc>/Dockerfile；
 #   2. embedding/rerank 健康检查由 curl 改为 python urllib（mock 镜像是 python-slim，无 curl）；
 #   3. 容器内必须用服务名连 PG/Redis/Milvus/ES（.env 是宿主机视角 localhost），显式覆盖；
-#   4. rag-service 不再 depends_on ocr-service（paddlepaddle 基础镜像本机网络拉不动，
-#      且无服务强依赖它，OCR 冒烟步骤 WARN 放行）；
+#   4. rag-service 依赖 ocr-service（图片入库走 http://ocr-service:8200/ocr）。
+#      镜像已可本地构建（deploy/ocr/Dockerfile）；未启动时 PNG/JPG 会 DNS 失败并标 failed。
 #   5. 7 个服务补 curl 健康检查（镜像已 apt 安装 curl）。
 #
 # dev 习惯：代码卷挂载（改宿主机代码即生效）+ uvicorn --reload 热重载。
@@ -215,7 +215,7 @@ services:
       elasticsearch: { condition: service_healthy }
       embedding: { condition: service_healthy }
       rerank-service: { condition: service_healthy }
-      # ocr-service 依赖已移除（paddlepaddle 基础镜像本机拉不动，OCR 冒烟步骤 WARN 放行）
+      ocr-service: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s

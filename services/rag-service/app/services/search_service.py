@@ -72,6 +72,23 @@ def _apply_entity_boost(items: list[dict], entity_ids: list[str]) -> list[dict]:
     )
 
 
+def _trim_entity_results(
+    items: list[dict], entity_ids: list[str], top_k: int
+) -> list[dict]:
+    """有实体命中时只保留命中 chunk，避免高分无关文档挤掉精确 ID。"""
+    if not entity_ids or not items:
+        return items[:top_k]
+    matched = [
+        item
+        for item in items
+        if item.get("entity_match")
+        or any(eid in (item.get("content") or "") for eid in entity_ids)
+    ]
+    if matched:
+        return matched[:top_k]
+    return items[:top_k]
+
+
 def _safe_uuid(value: str) -> uuid.UUID | None:
     """解析 UUID；非法值返回 None（召回脏数据跳过，不中断检索，rag-service-final-fix 5.13）。"""
     try:
@@ -189,10 +206,19 @@ class SearchService:
         query_vector: list[float] | None = None
         with trace.step("embed", category=category, entity_ids=entity_ids or None):
             try:
-                query_vector = await self.embed.embed(effective_query)
+                raw_vector = await self.embed.embed(effective_query)
             except Exception as e:
                 degraded = True
                 logger.warning("embed_failed_es_only_degraded", error=str(e))
+                raw_vector = None
+            if raw_vector:
+                query_vector = raw_vector
+            else:
+                query_vector = None
+                if raw_vector is not None:
+                    # 空列表与异常同为失败：禁止把 [] 送进 Milvus
+                    degraded = True
+                    logger.warning("embed_empty_vector_es_only_degraded")
 
         top_n = settings.KB_RETRIEVAL_TOP_N
 
@@ -465,6 +491,7 @@ class SearchService:
         # 实体 ID 精确匹配后置加权（结构化查询如 CS20260020）
         if entity_ids:
             reranked = _apply_entity_boost(reranked, entity_ids)
+            reranked = _trim_entity_results(reranked, entity_ids, top_k)
             if reranked:
                 max_rerank_score = max(float(x.get("rerank_score", 0.0)) for x in reranked)
 

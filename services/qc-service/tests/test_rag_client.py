@@ -187,8 +187,11 @@ class TestRagClientSearch:
 
     @pytest.mark.asyncio
     async def test_search_timeout_does_not_trip_dict_breaker(self):
+        posts = {"n": 0}
+
         def handler(request: httpx.Request) -> httpx.Response:
             if request.method == "POST":
+                posts["n"] += 1
                 raise httpx.ReadTimeout("search timeout")
             return httpx.Response(200, text="起诉\n")
 
@@ -198,10 +201,25 @@ class TestRagClientSearch:
         client._ac_ref = ("起诉",)
         snippet = await client.search("再不还就起诉你")
         assert snippet is None
+        assert posts["n"] == RAG_RETRY_ATTEMPTS
         assert client._consecutive_failures == 0
         assert client.breaker_open is False
         words = await client.fetch_current_dict()
         assert words == ["起诉"]
+
+    @pytest.mark.asyncio
+    async def test_search_connect_error_retries_then_none(self):
+        hits = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            hits["n"] += 1
+            raise httpx.ConnectError("rag kb down")
+
+        http = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=3.0)
+        client = RagClient(base_url="http://rag-service:8000", retry_delay=0, client=http)
+        assert await client.search("强制执行") is None
+        assert hits["n"] == RAG_RETRY_ATTEMPTS
+        assert client._consecutive_failures == 0
 
     @pytest.mark.asyncio
     async def test_empty_results_returns_none(self):
@@ -211,4 +229,25 @@ class TestRagClientSearch:
         http = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=3.0)
         client = RagClient(base_url="http://rag-service:8000", retry_delay=0, client=http)
         assert await client.search("强制执行") is None
+
+
+    @pytest.mark.asyncio
+    async def test_search_circuit_open_returns_none_without_http(self):
+        from app.integrations.rag_client import RAG_MCP_BREAKER_KEY, rag_search_breaker, reset_rag_search_breaker
+
+        reset_rag_search_breaker()
+        breaker = rag_search_breaker()
+        for _ in range(3):
+            await breaker.record_failure()
+        assert breaker.state == "open"
+        assert RAG_MCP_BREAKER_KEY == "qc:mcp_degraded:rag_kb"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("open breaker must not POST /kb/search")
+
+        http = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=3.0)
+        client = RagClient(base_url="http://rag-service:8000", retry_delay=0, client=http)
+        assert await client.search("再不还就起诉你") is None
+        assert all("/kb/search" not in url for url in client.recorded_urls())
+        reset_rag_search_breaker()
 

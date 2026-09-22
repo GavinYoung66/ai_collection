@@ -1,4 +1,4 @@
-"""DashScope Paraformer ASR Provider 实现，含重试与熔断逻辑。"""
+"""DashScope Paraformer ASR Provider 实现，含熔断逻辑。"""
 import asyncio
 import base64
 import os
@@ -9,17 +9,17 @@ import tempfile
 import httpx
 import structlog
 from redis.asyncio import Redis
-from redis.exceptions import RedisError
 
 from app.services.asr_providers.base import ASRProvider
 from app.settings import settings
+from common.resilience.breaker import BreakerRegistry, make_mcp_breaker_key
+from common.resilience.timeout import Timeout
 from common.trace.middleware import get_trace_id
 
 logger = structlog.get_logger()
 
-_DEGRADED_KEY = "rag:asr:degraded"
-_FAILURE_THRESHOLD = 3
-_CIRCUIT_TTL = 60
+_BREAKER_KEY = make_mcp_breaker_key("rag", "asr")
+_asr_breakers = BreakerRegistry(fail_max=3, reset_timeout=60)
 # 千问3-ASR-Flash 走 OpenAI 兼容 `/compatible-mode/v1/chat/completions`，
 # 同步返回识别文本，且支持以 data URI（base64）直接传入本地音频，无需公网 URL/OSS，
 # 是本地上传场景下最简的接入方式（Paraformer 非实时识别需公网 file_urls + 异步轮询）。
@@ -33,50 +33,20 @@ class DashScopeASRProvider(ASRProvider):
     """阿里云 DashScope 千问3-ASR-Flash 语音识别实现。
 
     通过 DashScope 兼容 OpenAI 的 Chat Completions 接口将音频转写为文本，
-    支持 mp3/wav/m4a 格式（base64 data URI 直传），包含 3 次指数退避重试
-    与熔断逻辑（连续 3 次失败写入 Redis `rag:asr:degraded`，TTL 60s）。
+    支持 mp3/wav/m4a 格式（base64 data URI 直传）。熔断由模块级
+    BreakerRegistry 共享（Factory 每次 create 新实例，fail_max 必须跨实例累计）。
     """
 
     def __init__(self, redis: Redis | None = None):
-        self._redis = redis
+        self._redis = redis  # 保留构造签名；进程内熔断，不写废弃全局键
         self._client: httpx.AsyncClient | None = None
-        self._failure_count = 0
+        self._breaker = _asr_breakers.get_or_create(_BREAKER_KEY)
+        self._timeout = Timeout(total=float(settings.ASR_TIMEOUT))
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient()
         return self._client
-
-    async def _is_degraded(self) -> bool:
-        if self._redis is None:
-            return False
-        try:
-            return await self._redis.exists(_DEGRADED_KEY) > 0
-        except (RedisError, OSError) as e:
-            # 熔断探测失败按未熔断处理：Redis 抖动不应阻断正常 ASR 链路（rag-service-final-fix 5.5）
-            logger.warning(
-                "asr_degraded_probe_failed",
-                error=str(e),
-                trace_id=get_trace_id(),
-            )
-            return False
-
-    async def _on_success(self) -> None:
-        self._failure_count = 0
-
-    async def _on_failure(self, error: Exception) -> None:
-        self._failure_count += 1
-        if self._failure_count >= _FAILURE_THRESHOLD:
-            await self._set_degraded()
-            logger.error(
-                "asr_circuit_break_open",
-                failures=self._failure_count,
-                error=str(error),
-            )
-
-    async def _set_degraded(self, ttl: int = _CIRCUIT_TTL) -> None:
-        if self._redis is not None:
-            await self._redis.setex(_DEGRADED_KEY, ttl, "1")
 
     @staticmethod
     def _resolve_api_key() -> str:
@@ -149,7 +119,7 @@ class DashScopeASRProvider(ASRProvider):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     async def _transcribe_single(self, audio_bytes: bytes, fmt: str, api_key: str) -> str:
-        """对单个音频片段调用 DashScope 千问3-ASR-Flash，含 3 次重试与熔断。"""
+        """对单个音频片段调用 DashScope 千问3-ASR-Flash（无自写退避）。"""
         audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
         mime = _ASR_MIME.get(fmt, "audio/mpeg")
         headers = {
@@ -174,24 +144,17 @@ class DashScopeASRProvider(ASRProvider):
         }
 
         client = await self._get_client()
-        for attempt in range(3):
-            try:
-                resp = await client.post(
-                    _ASR_ENDPOINT,
-                    headers=headers,
-                    json=payload,
-                    timeout=settings.ASR_TIMEOUT,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                await self._on_success()
-                return data["choices"][0]["message"]["content"]
-            except (httpx.HTTPError, KeyError, ValueError, TypeError, IndexError) as e:
-                if attempt < 2:
-                    await asyncio.sleep(1.0 * (2 ** attempt))
-                else:
-                    await self._on_failure(e)
-                    raise
+        resp = await asyncio.wait_for(
+            client.post(
+                _ASR_ENDPOINT,
+                headers=headers,
+                json=payload,
+                timeout=self._timeout.total,
+            ),
+            timeout=self._timeout.total,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
 
     async def transcribe(self, audio_bytes: bytes, fmt: str) -> str:
         """调用 DashScope 千问3-ASR-Flash 转写音频为文本。
@@ -208,11 +171,8 @@ class DashScopeASRProvider(ASRProvider):
 
         Raises:
             RuntimeError: 服务处于熔断状态或未配置 API Key。
-            httpx.HTTPError: 调用持续失败（已耗尽重试次数）。
+            httpx.HTTPError: HTTP 调用失败。
         """
-        if await self._is_degraded():
-            raise RuntimeError("ASR service is in circuit-break state")
-
         api_key = self._resolve_api_key()
         if not api_key:
             # 明确指明缺失配置项，便于定位；对外由 ingest 沿既有失败路径转为 A3001
@@ -221,27 +181,39 @@ class DashScopeASRProvider(ASRProvider):
                 "（或等价的可访问 DashScope 的千问 Key），否则音频转写无法完成"
             )
 
-        duration = self._probe_duration(audio_bytes, fmt)
-        # 超过 4 分钟才需要分段（接口上限 5 分钟，保留余量）
-        if duration is not None and duration > 240:
-            try:
-                segments = self._segment_audio(audio_bytes, fmt)
-            except Exception as e:
-                logger.warning(
-                    "asr_segment_failed",
-                    error=str(e),
-                    trace_id=get_trace_id(),
-                )
-                segments = [audio_bytes]  # 分段失败降级为整段直传（保持原行为）
-            if len(segments) > 1:
-                parts: list[str] = []
-                for seg in segments:
-                    text = await self._transcribe_single(seg, "mp3", api_key)
-                    if text and text.strip():
-                        parts.append(text.strip())
-                return "\n".join(parts)
+        if not await self._breaker.before_call():
+            logger.warning("asr_circuit_open_skip")
+            raise RuntimeError("ASR service is in circuit-break state")
 
-        return await self._transcribe_single(audio_bytes, fmt, api_key)
+        try:
+            duration = self._probe_duration(audio_bytes, fmt)
+            # 超过 4 分钟才需要分段（接口上限 5 分钟，保留余量）
+            if duration is not None and duration > 240:
+                try:
+                    segments = self._segment_audio(audio_bytes, fmt)
+                except Exception as e:
+                    logger.warning(
+                        "asr_segment_failed",
+                        error=str(e),
+                        trace_id=get_trace_id(),
+                    )
+                    segments = [audio_bytes]  # 分段失败降级为整段直传（保持原行为）
+                if len(segments) > 1:
+                    parts: list[str] = []
+                    for seg in segments:
+                        text = await self._transcribe_single(seg, "mp3", api_key)
+                        if text and text.strip():
+                            parts.append(text.strip())
+                    result = "\n".join(parts)
+                    await self._breaker.record_success()
+                    return result
+
+            result = await self._transcribe_single(audio_bytes, fmt, api_key)
+            await self._breaker.record_success()
+            return result
+        except Exception as e:
+            await self._breaker.record_failure(e)
+            raise
 
     async def close(self) -> None:
         if self._client is not None and not self._client.is_closed:

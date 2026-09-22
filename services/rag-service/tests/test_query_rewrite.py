@@ -78,13 +78,21 @@ class TestRewriteDegraded:
 
     @pytest.mark.asyncio
     async def test_circuit_break_bypass(self, fake_redis, api_key):
-        """Redis 熔断键存在 → 直接降级，不调 LLM。"""
-        fake_redis.exists = AsyncMock(return_value=1)
+        """进程内熔断 open → 直接降级，不调 LLM，不写 rag:rewrite:degraded。"""
         svc = RewriteService(redis=fake_redis)
-        result = await svc.rewrite("测试查询")
+        for _ in range(3):
+            await svc._breaker.record_failure(RuntimeError("rewrite failed"))
+        with patch.object(
+            svc,
+            "_get_client",
+            new=AsyncMock(side_effect=AssertionError("must not call LLM")),
+        ):
+            result = await svc.rewrite("测试查询")
         assert result.degraded is True
         assert result.rewritten_query == "测试查询"
         assert result.confidence == 0.0
+        fake_redis.setex.assert_not_called()
+        fake_redis.exists.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_invalid_json_fallback(self, fake_redis, api_key):

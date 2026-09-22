@@ -20,6 +20,20 @@ Enables qc-service to call rag knowledge-base search so deduction evidence can c
 - **WHEN** kb/search 超时或返回空
 - **THEN** 仍给出 AC+规则（及 LLM）分，`qc_status` 不是因检索失败而变为 PARTIAL
 
+### Requirement: RAG 检索熔断 key 规范化且失败仍出分
+
+qc-service 作为 RAG 客户端调用知识库检索时，熔断/降级标志 MUST 使用 `qc:mcp_degraded:rag_kb`。超时、熔断 open、连接失败或空结果 SHALL 回退规则包关键词 / 已有 hits 并继续打分。系统 MUST NOT 将整单标为失败、MUST NOT 返回 HTTP 500、MUST NOT 仅因检索失败将 `qc_status` 置为 PARTIAL、MUST NOT 发明新错误频道。传输层保持既有 HTTP 检索，MUST NOT 把该客户端改成独立 MCP 网关。
+
+#### Scenario: RAG 熔断仍回退关键词出分
+
+- **WHEN** 检索对端超时或熔断 key `qc:mcp_degraded:rag_kb` 为 open
+- **THEN** 管道回退关键词比对，仍给出 AC+规则（及若 LLM 可用则 LLM）分，HTTP 200，不是 500，`qc_status` 不因检索失败变为 PARTIAL
+
+#### Scenario: 检索空结果不整单失败
+
+- **WHEN** kb/search 返回空结果
+- **THEN** 与超时相同：回退关键词仍出分，不阻断离线质检
+
 ### Requirement: 条款回填 hits
 
 成功检索的条款原文 SHALL 写入该通详情 hits 的条款字段（或等价键，如 `clause` / `kb_snippet`），供前端展示为扣分证据。MUST NOT 仅用前端写死脚注充当检索结果。入库语料 MUST 包含 `data_materials` 中的测试手册 PDF、自律公约 txt、细则 docx 等约定材料。

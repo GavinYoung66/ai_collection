@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import settings
+from app.llm.provider import LLMCallError
 from app.llm.validate import LLMConfigError, validate_real_llm_config
 from app.main import app
 from app.models.state import ComplianceOpinion, JudgmentPackage
@@ -86,10 +87,12 @@ async def test_llm_transport_error_writes_call_log_sink(tmp_path, monkeypatch):
     set_call_log_sink(TempFileCallLogSink(path))
     try:
         p = ComplaintLLMProvider(transport=Boom())
-        with pytest.raises(RuntimeError, match="boom"):
+        # llm-layer spec：整条 fallback_chain 耗尽 → LLMCallError（节点级降级接管，非 500）
+        with pytest.raises(LLMCallError, match="boom"):
             await p.invoke("x", agent_role="verdict")
         text = path.read_text(encoding="utf-8")
-        assert "transport_error" in text
+        # llm-layer spec：整链失败审计记 llm_chain_degraded（原 transport_error 语义已并入整链编排）
+        assert "llm_chain_degraded" in text
         assert '"channel": "llm"' in text or '"channel":"llm"' in text
     finally:
         set_call_log_sink(None)

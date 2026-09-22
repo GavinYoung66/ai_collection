@@ -4,6 +4,8 @@
 核心方法：async invoke(prompt, schema, *, trace_id, session_id) -> BaseModel
 
 特性：
+- 统一入口走 common.llm.reliability.invoke_llm：熔断检查 → 有界重试 →
+  fallback_chain 换模型（主→备→更弱）→ 降级 flag（spec llm-layer）
 - Pydantic Schema 校验失败重试最多 3 次
 - Token 累计 total_tokens_consumed；超 max_token_threshold 抛错
 - response_format=json_object；temperature=0.1 / top_p=0.9 / seed=42
@@ -24,8 +26,17 @@ from pydantic import BaseModel, ValidationError
 
 from app.config import settings
 from app.service.security import mask_before_persist
+from common.llm.reliability import LLMCircuitOpenError, invoke_llm, set_default_service
+from common.resilience.breaker import make_llm_breaker_key
+from common.resilience.timeout import Timeout
 
 logger = structlog.get_logger()
+
+# spec 术语对齐：熔断打开错误统一名（common 实现为 LLMCircuitOpenError）
+CircuitBreakerOpenError = LLMCircuitOpenError
+
+# 本服务韧性 key 前缀（投诉服务固定 csmp）
+_SERVICE_NAME = "csmp"
 
 _SCHEMA_RETRY_MAX = 3
 _DEFAULT_MAX_TOKENS = 50000
@@ -33,6 +44,46 @@ _DEFAULT_MAX_TOKENS = 50000
 
 class TokenLimitExceededError(Exception):
     """累计 Token 超过 max_token_threshold。"""
+
+
+class LLMCallError(Exception):
+    """fallback_chain 整链失败（invoke_llm 返回 degraded outcome）。"""
+
+
+def get_llm_fallback_chain() -> list[str]:
+    """解析 LLM fallback_chain（有序：主模型 → 备用 → 更弱模型）。
+
+    - settings.LLM_FALLBACK_CHAIN 非空：逗号拆分，顺序即优先级（主模型在前）；
+    - 为空：回退 LLM_MODEL_PRIMARY / FALLBACK_1 / FALLBACK_2 推导（向后兼容）；
+    - 校验：全链非空、去重后无空项；重复项 fail-fast（配置错误宁可启动报错）。
+    """
+    raw = (getattr(settings, "LLM_FALLBACK_CHAIN", "") or "").strip()
+    if raw:
+        chain = [item.strip() for item in raw.split(",") if item.strip()]
+    else:
+        chain = [
+            getattr(settings, "LLM_MODEL_PRIMARY", "") or "",
+            getattr(settings, "LLM_MODEL_FALLBACK_1", "") or "",
+            getattr(settings, "LLM_MODEL_FALLBACK_2", "") or "",
+        ]
+        chain = [m for m in chain if m]
+    if not chain:
+        raise RuntimeError(
+            "LLM fallback_chain 为空：请配置 LLM_FALLBACK_CHAIN "
+            "或 LLM_MODEL_PRIMARY / LLM_MODEL_FALLBACK_1 / LLM_MODEL_FALLBACK_2"
+        )
+    if len(set(chain)) != len(chain):
+        raise RuntimeError(f"LLM fallback_chain 含重复模型，顺序非法: {chain}")
+    return chain
+
+
+def _serialize_raw(raw: Any) -> str:
+    """把 transport 返回值序列化为字符串（invoke_llm content 契约）。"""
+    if isinstance(raw, BaseModel):
+        return raw.model_dump_json()
+    if isinstance(raw, (dict, list)):
+        return json.dumps(raw, ensure_ascii=False)
+    return str(raw)
 
 
 class ComplaintLLMProvider:
@@ -43,17 +94,22 @@ class ComplaintLLMProvider:
             - True → 批次0 MockLLMProvider
             - False → common.llm.provider.chat_json 包装
         max_token_threshold: Token 上限，默认对齐 settings.COMPLAINT_MAX_TOKENS。
+        llm_timeout: 统一编排的三级超时，默认 Timeout(total=120.0)（LLM 层级）。
     """
 
     def __init__(
         self,
         transport: Any | None = None,
         max_token_threshold: int = settings.COMPLAINT_MAX_TOKENS,
+        llm_timeout: Timeout | None = None,
     ):
         self._transport = transport
         self._max_token_threshold = max_token_threshold
+        self._llm_timeout = llm_timeout or Timeout(total=120.0)
         self._total_tokens_consumed: int = 0
         self._call_log: list[dict] = []
+        # 韧性 key 派生依赖服务名（invoke_llm 熔断/降级 key 前缀），幂等设置
+        set_default_service(_SERVICE_NAME)
 
     @property
     def total_tokens_consumed(self) -> int:
@@ -90,18 +146,44 @@ class ComplaintLLMProvider:
         session_id: str = "",
         agent_role: str = "",
     ) -> BaseModel | dict:
-        """调用 LLM，返回 schema 实例（若提供）或 dict。"""
+        """调用 LLM，返回 schema 实例（若提供）或 dict。
+
+        统一走 common.llm.reliability.invoke_llm：主模型失败（超时/熔断 open/
+        业务错重试耗尽）自动换 fallback_chain 下一模型；整链失败抛 LLMCallError，
+        由节点级降级路径接管（规则草稿 + pending_review），不冒泡 500。
+        """
         start = time.monotonic()
+        chain = get_llm_fallback_chain()
+        primary, fallbacks = chain[0], chain[1:]
+        messages = [{"role": "user", "content": prompt}]
+
+        async def _transport_adapter(
+            model: str, _messages: list[dict], timeout_seconds: float
+        ) -> str:
+            # 适配 invoke_llm 传输签名 (model, messages, timeout_seconds) -> str：
+            # 透传目标模型（fallback 换模型），prompt/schema 由本次 invoke 上下文闭包
+            raw = await self._get_transport().invoke(
+                prompt=prompt,
+                schema=schema,
+                trace_id=trace_id,
+                session_id=session_id,
+                agent_role=agent_role,
+                model=model,
+                timeout_seconds=timeout_seconds,
+            )
+            return _serialize_raw(raw)
+
         last_exc: Exception | None = None
 
         for attempt in range(1, _SCHEMA_RETRY_MAX + 1):
             try:
-                raw = await self._get_transport().invoke(
-                    prompt=prompt,
-                    schema=schema,
-                    trace_id=trace_id,
-                    session_id=session_id,
-                    agent_role=agent_role,
+                result = await invoke_llm(
+                    model=primary,
+                    messages=messages,
+                    fallback_chain=fallbacks,
+                    timeout=self._llm_timeout,
+                    breaker_key=make_llm_breaker_key(_SERVICE_NAME, primary),
+                    transport=_transport_adapter,
                 )
             except Exception as e:
                 last_exc = e
@@ -117,7 +199,29 @@ class ComplaintLLMProvider:
                 )
                 raise
 
-            # 累计 Token（Mock 返回的是对象/字典，此处按字符数估算；真实路径由 transport 返回 usage）
+            # 整条 fallback_chain 耗尽 → degraded outcome，转 LLMCallError 交节点降级
+            if result.get("degraded") and result.get("content") is None:
+                last_exc = LLMCallError(result.get("error") or "all models failed")
+                self._record_audit(
+                    prompt,
+                    trace_id,
+                    session_id,
+                    start,
+                    attempt,
+                    f"llm_chain_degraded: {last_exc}",
+                    response=None,
+                    agent_role=agent_role,
+                )
+                raise last_exc
+
+            # 解析内容（adapter 已序列化为字符串）
+            content = result["content"]
+            try:
+                raw = json.loads(content)
+            except (json.JSONDecodeError, TypeError):
+                raw = {"raw_text": content}
+
+            # 累计 Token（按解析结果字符数估算；真实路径由 transport 返回 usage）
             consumed = self._estimate_tokens(raw)
             self._total_tokens_consumed += consumed
             if self._total_tokens_consumed > self._max_token_threshold:
@@ -134,17 +238,18 @@ class ComplaintLLMProvider:
 
             # Schema 校验
             try:
-                if isinstance(raw, schema):
-                    result = raw
-                else:
-                    result = schema(**raw) if isinstance(raw, dict) else schema.model_validate(raw)
+                result_model = (
+                    raw
+                    if isinstance(raw, schema)
+                    else schema(**raw) if isinstance(raw, dict) else schema.model_validate(raw)
+                )
                 # CoT 加密字段约定：若 schema 含 cot_encrypted 字段，填充占位
-                self._fill_cot_encrypted(result)
+                self._fill_cot_encrypted(result_model)
                 self._record_audit(
                     prompt, trace_id, session_id, start, attempt, None,
-                    response=result, agent_role=agent_role,
+                    response=result_model, agent_role=agent_role,
                 )
-                return result
+                return result_model
             except ValidationError as e:
                 last_exc = e
                 self._record_audit(

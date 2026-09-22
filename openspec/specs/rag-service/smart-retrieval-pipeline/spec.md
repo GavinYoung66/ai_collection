@@ -8,7 +8,7 @@
 
 ### Requirement: Query 改写链（LLM 纠错/术语归一/扩展）
 
-当 `KB_QUERY_REWRITE_ENABLED=true` 时，系统 SHALL 在 embed 前调用 DashScope LLM 对 query 执行改写：返回 `rewritten_query`（str，可与原 query 相同）和 `confidence`（float，[0,1]）；**当 confidence<0.6 时降级使用原 query**，标 `degraded=true`，不把低置信度改写结果送入召回。改写超时 10s、3 次重试、熔断 `rag:rewrite:degraded`（TTL 60s）。
+当 `KB_QUERY_REWRITE_ENABLED=true` 时，系统 SHALL 在 embed 前调用 DashScope LLM 对 query 执行改写：返回 `rewritten_query`（str，可与原 query 相同）和 `confidence`（float，[0,1]）；**当 confidence<0.6 时降级使用原 query**，标 `degraded=true`，不把低置信度改写结果送入召回。改写超时 10s、3 次重试、熔断使用进程内 `CircuitBreaker`，key 为 `rag:mcp_degraded:rewrite`（reset 60s）。MUST NOT 再写入或查询 `rag:rewrite:degraded`。
 
 #### Scenario: 改写成功且置信度高
 
@@ -22,7 +22,7 @@
 
 #### Scenario: LLM 服务熔断时 bypass
 
-- **WHEN** LLM 连续 3 次失败后 rag:rewrite:degraded=1
+- **WHEN** LLM 连续 3 次失败后 `rag:mcp_degraded:rewrite` 熔断 open
 - **THEN** 所有检索直接 bypass 改写，使用原 query 检索，degraded=true（不抛异常，不阻断主流程）
 
 #### Scenario: 开关关闭时行为与 V1 一致

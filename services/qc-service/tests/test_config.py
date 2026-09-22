@@ -13,6 +13,9 @@ _REQUIRED_QC_KEYS = (
     "QC_DP_TIMEOUT",
     "QC_LLM_MODEL",
     "QC_LLM_TIMEOUT",
+    "QC_LLM_FALLBACK_CHAIN",
+    "QC_MAX_INFLIGHT",
+    "QC_INFLIGHT_WAIT_TIMEOUT",
     "QC_LLM_RETRY",
     "QC_LLM_DEGRADE_AFTER",
     "QC_DEDUP_WINDOW_MS",
@@ -69,6 +72,9 @@ class TestQcSettings:
         assert qc_settings.QC_DP_TIMEOUT == 5
         assert qc_settings.QC_LLM_MODEL == "qwen-plus"
         assert qc_settings.QC_LLM_TIMEOUT == 5
+        assert qc_settings.QC_LLM_FALLBACK_CHAIN == ["qwen-turbo"]
+        assert qc_settings.QC_MAX_INFLIGHT == 3
+        assert qc_settings.QC_INFLIGHT_WAIT_TIMEOUT == 0
         assert qc_settings.QC_LLM_RETRY == 3
         assert qc_settings.QC_LLM_DEGRADE_AFTER == 3
         assert qc_settings.QC_DEDUP_WINDOW_MS == 30000

@@ -7,6 +7,8 @@ from uuid import UUID
 
 from redis.asyncio import Redis
 
+from common.resilience.breaker import make_llm_breaker_key
+
 JobStatus = Literal["WAIT_TEXT", "RUNNING", "DONE"]
 
 JOB_TTL_SECONDS = 24 * 3600
@@ -15,7 +17,36 @@ FORBIDDEN_JOB_STATUS: frozenset[str] = frozenset({"PENDING_REVIEW", "REVIEWED", 
 
 KEY_WORDS_VERSION = "qc:words:version"
 KEY_RULES_ACTIVE = "qc:rules:active"
-KEY_LLM_DEGRADED = "qc:llm_degraded"
+LLM_SERVICE = "qc"
+
+
+def llm_degraded_key(model: str) -> str:
+    return make_llm_breaker_key(LLM_SERVICE, model)
+
+
+def llm_chain_models() -> list[str]:
+    from app.core.config import qc_settings
+
+    models: list[str] = []
+    for item in [qc_settings.QC_LLM_MODEL, *(qc_settings.QC_LLM_FALLBACK_CHAIN or [])]:
+        name = (item or "").strip()
+        if name and name not in models:
+            models.append(name)
+    return models
+
+
+def is_llm_chain_open_in_process() -> bool:
+    """不读 Redis：配置链每个模型的进程内 breaker 均为 open 才为 true。"""
+    from common.llm.reliability import _llm_breakers
+
+    models = llm_chain_models()
+    if not models:
+        return False
+    for model in models:
+        breaker = _llm_breakers.get(llm_degraded_key(model))
+        if breaker is None or breaker.state != "open":
+            return False
+    return True
 
 
 def job_key(session_id: str) -> str:
@@ -158,18 +189,21 @@ class QcJobStore:
             return None
         return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
 
-    async def set_llm_degraded(self, value: str = "1") -> None:
-        """SET qc:llm_degraded，无固定 EXPIRE。不是 qc.llm.degraded 频道。"""
-        self._assert_db3()
-        await self._redis.set(KEY_LLM_DEGRADED, value)
+    async def is_llm_chain_degraded(self) -> bool:
+        """配置链全部 open 才为 true（Redis 分片键或进程内 breaker）。"""
+        from common.llm.reliability import _llm_breakers
 
-    async def get_llm_degraded(self) -> str | None:
         self._assert_db3()
-        raw = await self._redis.get(KEY_LLM_DEGRADED)
-        if raw is None:
-            return None
-        return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-
-    async def clear_llm_degraded(self) -> None:
-        self._assert_db3()
-        await self._redis.delete(KEY_LLM_DEGRADED)
+        models = llm_chain_models()
+        if not models:
+            return False
+        for model in models:
+            key = llm_degraded_key(model)
+            raw = await self._redis.get(key)
+            if raw is not None:
+                continue
+            breaker = _llm_breakers.get(key)
+            if breaker is not None and breaker.state == "open":
+                continue
+            return False
+        return True

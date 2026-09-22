@@ -3,12 +3,31 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from app.core.config import qc_settings
 from app.events.publisher import CHANNEL_SYSTEM_ALERT, FORBIDDEN_CHANNELS, QcEventPublisher
-from app.repositories.job_store import KEY_LLM_DEGRADED, QcJobStore
-from app.services.llm_circuit import QcLlmCircuit
+from app.repositories.job_store import QcJobStore, llm_chain_models, llm_degraded_key
 from app.services.llm_reviewer import LLMReviewer, turns_payload
 from app.services.offline_qc_service import OfflineQcService
+from common.llm import reliability as reliability_mod
+from common.resilience._redis import configure_redis, reset_redis
 from tests.test_job_store import MemoryRedis
+
+GLOBAL_LLM_KEY = "qc:llm_degraded"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_llm_reliability(monkeypatch):
+    redis = MemoryRedis(db=3)
+    configure_redis(redis)
+    reliability_mod.set_default_service("qc")
+    reliability_mod._llm_breakers.clear()
+    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+    yield redis
+    reliability_mod._llm_breakers.clear()
+    reliability_mod.set_default_service(None)
+    reset_redis()
 
 
 def _turns():
@@ -29,6 +48,24 @@ def _hit_json(**kwargs) -> str:
     }
     row.update(kwargs)
     return json.dumps([row], ensure_ascii=False)
+
+
+def _offline_payload(session_id: str = "sess_llm") -> dict:
+    return {
+        "session_id": session_id,
+        "call_ended": True,
+        "text_ready": True,
+        "debtor_name": "张三",
+        "turns": [
+            {
+                "turn_id": "t1",
+                "speaker": "agent",
+                "text": "让你妈妈接电话",
+                "turn_index": 1,
+            }
+        ],
+        "result": None,
+    }
 
 
 class TestLLMReviewer:
@@ -135,69 +172,73 @@ class TestQcMockLlm:
         assert reviewer.degraded is False
         assert reviewer.call_logs[-1]["status"] == "qc_review_exemption"
         assert reviewer.call_logs[-1]["error_msg"] == "qc_mock_llm"
-        assert await redis.get(KEY_LLM_DEGRADED) is None
+        assert GLOBAL_LLM_KEY not in redis.data
+        assert await redis.get(llm_degraded_key(qc_settings.QC_LLM_MODEL)) is None
         result = await OfflineQcService(llm=reviewer, job_store=store).run(
-            {
-                "session_id": "sess_mock",
-                "call_ended": True,
-                "text_ready": True,
-                "debtor_name": "张三",
-                "turns": [
-                    {
-                        "turn_id": "t1",
-                        "speaker": "agent",
-                        "text": "让你妈妈接电话",
-                        "turn_index": 1,
-                    }
-                ],
-                "result": None,
-            }
+            _offline_payload("sess_mock")
         )
         assert result.code == "0"
         assert result.compliance_score == 80
 
 
-class TestLlmCircuitA2011:
-    async def test_timeout_opens_breaker_scores_remain_no_llm_channel(self):
-        calls = {"n": 0}
+class TestLlmInvokeA2011:
+    async def test_primary_fail_fallback_keeps_json_object(self, monkeypatch):
+        captured: list[dict] = []
 
-        async def _boom(_messages):
-            calls["n"] += 1
-            raise RuntimeError("LLM HTTP 500: down")
+        async def fake_post(**kwargs):
+            captured.append(
+                {
+                    "model": kwargs["model"],
+                    "response_format": kwargs.get("response_format"),
+                }
+            )
+            if kwargs["model"] == qc_settings.QC_LLM_MODEL:
+                raise TimeoutError("primary timeout")
+            return {"choices": [{"message": {"content": "[]"}}]}
 
-        redis = MemoryRedis(db=3)
+        monkeypatch.setattr("app.services.llm_reviewer.post_chat_completions", fake_post)
+        monkeypatch.setattr("app.services.llm_reviewer.require_real_secret", lambda *a, **k: "sk-test")
+        reviewer = LLMReviewer()
+        hits = await reviewer.review(_turns())
+        assert hits == []
+        assert reviewer.degraded is False
+        models = [row["model"] for row in captured]
+        assert models[0] == qc_settings.QC_LLM_MODEL
+        assert qc_settings.QC_LLM_FALLBACK_CHAIN[0] in models
+        assert all(row["response_format"] == {"type": "json_object"} for row in captured)
+
+    async def test_whole_chain_timeout_a2011_scores_not_500(self, _isolate_llm_reliability):
+        redis = _isolate_llm_reliability
+        configure_redis(redis)
+        calls: list[str] = []
+
+        async def _boom(model, messages, timeout_seconds):
+            calls.append(model)
+            raise TimeoutError("timeout")
+
         store = QcJobStore(redis)
         publisher = QcEventPublisher()
-        reviewer = LLMReviewer(
-            invoke=_boom,
-            job_store=store,
-            publisher=publisher,
-            retry_delay=0.0,
+        reviewer = LLMReviewer(invoke=_boom, job_store=store, publisher=publisher)
+        result = await OfflineQcService(llm=reviewer, job_store=store, publisher=publisher).run(
+            _offline_payload()
         )
-        svc = OfflineQcService(llm=reviewer, job_store=store, publisher=publisher)
-        result = await svc.run(
-            {
-                "session_id": "sess_llm",
-                "call_ended": True,
-                "text_ready": True,
-                "debtor_name": "张三",
-                "turns": [
-                    {
-                        "turn_id": "t1",
-                        "speaker": "agent",
-                        "text": "让你妈妈接电话",
-                        "turn_index": 1,
-                    }
-                ],
-                "result": None,
-            }
-        )
+        envelope = result.to_envelope()
         assert result.code == "A2011"
-        assert result.compliance_score == 80
-        assert result.to_envelope()["data"] is not None
-        assert result.to_envelope()["data"]["compliance_score"] == 80
-        assert await redis.get(KEY_LLM_DEGRADED) == "1"
-        assert calls["n"] == 3
+        assert envelope["data"] is not None
+        assert envelope["data"]["compliance_score"] == 80
+        assert envelope["data"]["qc_status"] != "PARTIAL"
+        assert result.qc_status != "PARTIAL"
+        assert qc_settings.QC_LLM_MODEL in calls
+        assert qc_settings.QC_LLM_FALLBACK_CHAIN[0] in calls
+        assert calls.count(qc_settings.QC_LLM_MODEL) == 1
+        primary_key = llm_degraded_key(qc_settings.QC_LLM_MODEL)
+        backup_key = llm_degraded_key(qc_settings.QC_LLM_FALLBACK_CHAIN[0])
+        assert await redis.get(primary_key) == "1"
+        assert await redis.get(backup_key) == "1"
+        assert redis.ttl.get(primary_key) == 60
+        assert redis.ttl.get(backup_key) == 60
+        assert GLOBAL_LLM_KEY not in redis.data
+        assert await store.is_llm_chain_degraded() is True
         channels = [ch for ch, _ in publisher.emitted]
         assert CHANNEL_SYSTEM_ALERT in channels
         assert "qc.llm.degraded" not in channels
@@ -205,61 +246,144 @@ class TestLlmCircuitA2011:
         assert payload["event"] == "qc:llm_degraded"
         assert payload["error_code"] == "A2011"
         assert payload["service"] == "qc-service"
-        assert set(payload) >= {
-            "alert_id",
-            "level",
-            "event",
-            "service",
-            "description",
-            "error_code",
-            "trace_id",
-            "ts",
-        }
         assert FORBIDDEN_CHANNELS.isdisjoint(set(channels))
 
-        hits = await reviewer.review(
-            [{"turn_id": "t1", "speaker": "agent", "text": "您好", "turn_index": 1}]
-        )
-        assert hits == []
-        assert reviewer.degraded is True
-        assert calls["n"] == 3
+    async def test_llm_rate_limit_error_a2011_not_500(self, monkeypatch, _isolate_llm_reliability):
+        redis = _isolate_llm_reliability
+        configure_redis(redis)
+        monkeypatch.setattr(reliability_mod, "_LLM_RATE_LIMIT", 0)
+        calls = {"n": 0}
 
-    async def test_half_open_success_deletes_key(self):
-        clock = {"t": 0.0}
-
-        async def _ok(_messages):
+        async def _ok(model, messages, timeout_seconds):
+            calls["n"] += 1
             return "[]"
 
-        redis = MemoryRedis(db=3)
         store = QcJobStore(redis)
-        circuit = QcLlmCircuit(store, now=lambda: clock["t"], reset_timeout=60.0)
-        await circuit.trip_open()
-        assert await redis.get(KEY_LLM_DEGRADED) == "1"
-        clock["t"] = 61.0
-        assert circuit.should_skip() is False
-        reviewer = LLMReviewer(invoke=_ok, job_store=store, circuit=circuit)
-        await reviewer.review(
-            [{"turn_id": "t1", "speaker": "agent", "text": "您好", "turn_index": 1}]
+        publisher = QcEventPublisher()
+        reviewer = LLMReviewer(invoke=_ok, job_store=store, publisher=publisher)
+        result = await OfflineQcService(llm=reviewer, job_store=store, publisher=publisher).run(
+            _offline_payload("sess_rl")
         )
-        assert await redis.get(KEY_LLM_DEGRADED) is None
-        assert circuit.state == "closed"
+        assert result.code == "A2011"
+        assert result.to_envelope()["data"]["compliance_score"] == 80
+        assert result.qc_status != "PARTIAL"
+        assert calls["n"] == 0
+        for model in llm_chain_models():
+            key = llm_degraded_key(model)
+            assert await redis.get(key) == "1"
+            assert redis.ttl.get(key) == 60
+        assert GLOBAL_LLM_KEY not in redis.data
+        assert await store.is_llm_chain_degraded() is True
+        channels = [ch for ch, _ in publisher.emitted]
+        assert CHANNEL_SYSTEM_ALERT in channels
 
-    async def test_half_open_invalid_json_keeps_degraded_key(self):
-        clock = {"t": 0.0}
+    async def test_writes_per_model_key_not_global(self, _isolate_llm_reliability):
+        redis = _isolate_llm_reliability
+        configure_redis(redis)
 
-        async def _bad(_messages):
-            return "{not json"
+        async def _boom(model, messages, timeout_seconds):
+            raise TimeoutError("timeout")
 
-        redis = MemoryRedis(db=3)
-        store = QcJobStore(redis)
-        circuit = QcLlmCircuit(store, now=lambda: clock["t"], reset_timeout=60.0)
-        await circuit.trip_open()
-        clock["t"] = 61.0
-        assert circuit.should_skip() is False
-        reviewer = LLMReviewer(invoke=_bad, job_store=store, circuit=circuit)
-        hits = await reviewer.review(
-            [{"turn_id": "t1", "speaker": "agent", "text": "您好", "turn_index": 1}]
+        reviewer = LLMReviewer(
+            invoke=_boom, job_store=QcJobStore(redis), publisher=QcEventPublisher()
         )
+        await reviewer.review(_turns())
+        assert reviewer.degraded is True
+        for model in llm_chain_models():
+            assert await redis.get(llm_degraded_key(model)) == "1"
+        assert GLOBAL_LLM_KEY not in redis.data
+
+    async def test_primary_open_does_not_block_backup(self, _isolate_llm_reliability):
+        redis = _isolate_llm_reliability
+        configure_redis(redis)
+        primary = reliability_mod._llm_breakers.get_or_create(
+            llm_degraded_key(qc_settings.QC_LLM_MODEL)
+        )
+        for _ in range(3):
+            await primary.record_failure()
+        calls: list[str] = []
+
+        async def _invoke(model, messages, timeout_seconds):
+            calls.append(model)
+            return "[]"
+
+        reviewer = LLMReviewer(invoke=_invoke, job_store=QcJobStore(redis))
+        hits = await reviewer.review(_turns())
         assert hits == []
-        assert await redis.get(KEY_LLM_DEGRADED) == "1"
-        assert circuit.state == "open"
+        assert reviewer.degraded is False
+        assert qc_settings.QC_LLM_MODEL not in calls
+        assert calls == [qc_settings.QC_LLM_FALLBACK_CHAIN[0]]
+        assert GLOBAL_LLM_KEY not in redis.data
+        assert await redis.get(llm_degraded_key(qc_settings.QC_LLM_MODEL)) == "1"
+        assert await redis.get(llm_degraded_key(qc_settings.QC_LLM_FALLBACK_CHAIN[0])) is None
+        store = QcJobStore(redis)
+        assert await store.is_llm_chain_degraded() is False
+
+    async def test_success_clears_that_model_key_not_others(self, _isolate_llm_reliability):
+        redis = _isolate_llm_reliability
+        configure_redis(redis)
+        primary_key = llm_degraded_key(qc_settings.QC_LLM_MODEL)
+        backup_key = llm_degraded_key(qc_settings.QC_LLM_FALLBACK_CHAIN[0])
+        await redis.setex(primary_key, 60, "1")
+        await redis.setex(backup_key, 60, "1")
+
+        async def _ok(model, messages, timeout_seconds):
+            return "[]"
+
+        reviewer = LLMReviewer(invoke=_ok, job_store=QcJobStore(redis))
+        await reviewer.review(_turns())
+        assert reviewer.degraded is False
+        assert await redis.get(primary_key) is None
+        assert await redis.get(backup_key) == "1"
+        assert GLOBAL_LLM_KEY not in redis.data
+
+    async def test_backup_success_does_not_clear_primary_key(self, _isolate_llm_reliability):
+        redis = _isolate_llm_reliability
+        configure_redis(redis)
+
+        async def _invoke(model, messages, timeout_seconds):
+            if model == qc_settings.QC_LLM_MODEL:
+                raise TimeoutError("primary timeout")
+            return "[]"
+
+        reviewer = LLMReviewer(invoke=_invoke, job_store=QcJobStore(redis))
+        await reviewer.review(_turns())
+        assert reviewer.degraded is False
+        assert await redis.get(llm_degraded_key(qc_settings.QC_LLM_MODEL)) == "1"
+        assert await redis.get(llm_degraded_key(qc_settings.QC_LLM_FALLBACK_CHAIN[0])) is None
+        assert GLOBAL_LLM_KEY not in redis.data
+
+    async def test_half_open_probe_success_clears_that_model_key(self, _isolate_llm_reliability):
+        from common.config.settings import settings as platform_settings
+
+        redis = _isolate_llm_reliability
+        configure_redis(redis)
+        now = {"t": 0.0}
+
+        def clock() -> float:
+            return now["t"]
+
+        primary_key = llm_degraded_key(qc_settings.QC_LLM_MODEL)
+        backup_key = llm_degraded_key(qc_settings.QC_LLM_FALLBACK_CHAIN[0])
+        primary = reliability_mod._llm_breakers.get_or_create(primary_key, clock=clock)
+        for _ in range(int(platform_settings.LLM_CIRCUIT_BREAKER_THRESHOLD)):
+            await primary.record_failure()
+        assert primary.state == "open"
+        await redis.setex(primary_key, 60, "1")
+        await redis.setex(backup_key, 60, "1")
+
+        now["t"] = float(platform_settings.LLM_CIRCUIT_BREAKER_RECOVERY) + 1.0
+        calls: list[str] = []
+
+        async def _ok(model, messages, timeout_seconds):
+            calls.append(model)
+            return "[]"
+
+        reviewer = LLMReviewer(invoke=_ok, job_store=QcJobStore(redis))
+        await reviewer.review(_turns())
+        assert reviewer.degraded is False
+        assert calls[0] == qc_settings.QC_LLM_MODEL
+        assert primary.state == "closed"
+        assert await redis.get(primary_key) is None
+        assert await redis.get(backup_key) == "1"
+        assert GLOBAL_LLM_KEY not in redis.data

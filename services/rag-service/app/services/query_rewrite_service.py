@@ -1,10 +1,10 @@
 """Query 改写服务：HTTP 调用 DashScope 文本生成接口，含熔断逻辑。
 
-- 未配置 DASHSCOPE_API_KEY 或 Redis 熔断键存在时，直接降级返回原 query。
-- 3 次指数退避重试，连续 3 次失败写入 Redis `rag:rewrite:degraded`（TTL 60s）。
+- 未配置 DASHSCOPE_API_KEY 或熔断 open 时，直接降级返回原 query。
+- 3 次指数退避重试，连续 3 次失败打开进程内 `CircuitBreaker`
+  （key `rag:mcp_degraded:rewrite`）。
 - LLM 返回非严格 JSON 或 confidence < 0.6 时降级，rewritten_query 退回原 query。
 """
-import asyncio
 import json
 
 import httpx
@@ -13,13 +13,15 @@ from redis.asyncio import Redis
 
 from app.models.search import RewriteResult
 from app.settings import settings
+from common.llm.reliability import call_with_retry
 from common.llm.transport import post_json
+from common.resilience.breaker import CircuitBreaker, make_mcp_breaker_key
 
 logger = structlog.get_logger()
 
-_DEGRADED_KEY = "rag:rewrite:degraded"
+_BREAKER_KEY = make_mcp_breaker_key("rag", "rewrite")
 _FAILURE_THRESHOLD = 3
-_CIRCUIT_TTL = 60
+_CIRCUIT_RESET = 60
 _CONFIDENCE_THRESHOLD = 0.6
 
 _SYSTEM_PROMPT = (
@@ -34,42 +36,22 @@ _SYSTEM_PROMPT = (
 class RewriteService:
     """Query 改写服务，调用 DashScope 文本生成接口做纠错/术语归一/扩展。
 
-    包含 3 次指数退避重试与熔断逻辑（连续 3 次失败写入 Redis
-    `rag:rewrite:degraded`，TTL 60s）；任何降级路径均返回原 query，
+    包含 3 次指数退避重试与进程内熔断（连续 3 次失败打开
+    `rag:mcp_degraded:rewrite`）；任何降级路径均返回原 query，
     不向调用方抛异常。
     """
 
     def __init__(self, redis: Redis | None = None):
-        self._redis = redis
+        self._redis = redis  # 保留构造签名；进程内熔断，不写 rag:rewrite:degraded
         self._client: httpx.AsyncClient | None = None
-        self._failure_count = 0
+        self._breaker = CircuitBreaker(
+            _BREAKER_KEY, fail_max=_FAILURE_THRESHOLD, reset_timeout=_CIRCUIT_RESET
+        )
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient()
         return self._client
-
-    async def _is_degraded(self) -> bool:
-        if self._redis is None:
-            return False
-        return await self._redis.exists(_DEGRADED_KEY) > 0
-
-    async def _on_success(self) -> None:
-        self._failure_count = 0
-
-    async def _on_failure(self, error: Exception) -> None:
-        self._failure_count += 1
-        if self._failure_count >= _FAILURE_THRESHOLD:
-            await self._set_degraded()
-            logger.error(
-                "rewrite_circuit_break_open",
-                failures=self._failure_count,
-                error=str(error),
-            )
-
-    async def _set_degraded(self, ttl: int = _CIRCUIT_TTL) -> None:
-        if self._redis is not None:
-            await self._redis.setex(_DEGRADED_KEY, ttl, "1")
 
     def _build_user_content(self, query: str, history: list[str] | None) -> str:
         """构造 user 内容：原始 query + 可选最近 N 轮历史上下文摘要。"""
@@ -132,7 +114,7 @@ class RewriteService:
             return RewriteResult(rewritten_query=query, confidence=0.0, degraded=True)
 
         # 熔断短路 → 直接降级
-        if await self._is_degraded():
+        if not await self._breaker.before_call():
             logger.info("rewrite_circuit_break_short_circuit")
             return RewriteResult(rewritten_query=query, confidence=0.0, degraded=True)
 
@@ -146,54 +128,57 @@ class RewriteService:
             },
         }
 
-        client = await self._get_client()
-        for attempt in range(3):
-            try:
-                body = await post_json(
-                    url=settings.LLM_DASHSCOPE_ENDPOINT,
-                    api_key=settings.DASHSCOPE_API_KEY,
-                    payload=payload,
-                    timeout=float(settings.LLM_TIMEOUT),
-                    client=client,
-                    error_label="DashScopeRewrite",
-                )
-                await self._on_success()
-                text = body["output"]["text"]
-                parsed = self._parse_rewrite_json(text)
-                if parsed is None:
-                    # LLM 输出非严格 JSON → 降级返回原 query
-                    logger.warning("rewrite_parse_failed", output=text)
-                    return RewriteResult(
-                        rewritten_query=query, confidence=0.0, degraded=True
-                    )
-                confidence = parsed["confidence"]
-                # confidence 低于阈值 → 强制降级，退回原 query
-                if confidence < _CONFIDENCE_THRESHOLD:
-                    logger.info(
-                        "rewrite_low_confidence",
-                        confidence=confidence,
-                        rewritten=parsed["rewritten_query"],
-                    )
-                    return RewriteResult(
-                        rewritten_query=query,
-                        confidence=confidence,
-                        degraded=True,
-                    )
-                return RewriteResult(
-                    rewritten_query=parsed["rewritten_query"],
-                    confidence=confidence,
-                    degraded=False,
-                )
-            except (httpx.HTTPError, KeyError, ValueError, RuntimeError) as e:
-                if attempt < 2:
-                    await asyncio.sleep(1.0 * (2 ** attempt))
-                    continue
-                # 3 次重试耗尽 → 计入熔断并降级返回（不向调用方抛异常）
-                await self._on_failure(e)
-                logger.error("rewrite_call_failed", error=str(e))
-                return RewriteResult(
-                    rewritten_query=query, confidence=0.0, degraded=True
-                )
+        async def _once() -> str:
+            client = await self._get_client()
+            body = await post_json(
+                url=settings.LLM_DASHSCOPE_ENDPOINT,
+                api_key=settings.DASHSCOPE_API_KEY,
+                payload=payload,
+                timeout=float(settings.LLM_TIMEOUT),
+                client=client,
+                error_label="DashScopeRewrite",
+            )
+            return body["output"]["text"]
+
+        try:
+            text = await call_with_retry(
+                _once,
+                max_attempts=3,
+                delay=1.0,
+                backoff=2.0,
+                exceptions=(httpx.HTTPError, KeyError, ValueError, RuntimeError),
+            )
+            await self._breaker.record_success()
+        except (httpx.HTTPError, KeyError, ValueError, RuntimeError) as e:
+            await self._breaker.record_failure(e)
+            logger.error("rewrite_call_failed", error=str(e))
+            return RewriteResult(
+                rewritten_query=query, confidence=0.0, degraded=True
+            )
+
+        parsed = self._parse_rewrite_json(text)
+        if parsed is None:
+            logger.warning("rewrite_parse_failed", output=text)
+            return RewriteResult(
+                rewritten_query=query, confidence=0.0, degraded=True
+            )
+        confidence = parsed["confidence"]
+        if confidence < _CONFIDENCE_THRESHOLD:
+            logger.info(
+                "rewrite_low_confidence",
+                confidence=confidence,
+                rewritten=parsed["rewritten_query"],
+            )
+            return RewriteResult(
+                rewritten_query=query,
+                confidence=confidence,
+                degraded=True,
+            )
+        return RewriteResult(
+            rewritten_query=parsed["rewritten_query"],
+            confidence=confidence,
+            degraded=False,
+        )
 
     async def close(self) -> None:
         if self._client is not None and not self._client.is_closed:

@@ -28,6 +28,7 @@ from app.services.demo_trace import (
 )
 from app.services.alert_service import AlertService
 from app.services.dedup_ac import DedupACWindow
+from app.services.inflight import InflightGate, get_inflight_gate
 from app.services.llm_reviewer import LLMReviewer
 from app.services.merge_hits import MergeHits
 from app.services.r10 import PostMergeR10
@@ -180,6 +181,7 @@ class OfflineQcService:
         publisher: QcEventPublisher | None = None,
         rag: RagClient | None = None,
         trace_store: DemoTraceStore | None = None,
+        inflight_gate: InflightGate | None = None,
     ) -> None:
         self.ac = ac or get_shared_ac()
         self.window = window or DedupACWindow()
@@ -193,6 +195,7 @@ class OfflineQcService:
         self.alerter = alerter or AlertService()
         self.rag = rag
         self.trace_store = trace_store
+        self.inflight_gate = inflight_gate or get_inflight_gate()
 
     async def run(
         self,
@@ -237,11 +240,12 @@ class OfflineQcService:
                 case_id=qc.case_id,
                 call_id=qc.call_id,
             )
-        if self.job_store is not None:
-            await self.job_store.set_running(qc.session_id)
-        emit_check_started(session_id=qc.session_id, call_id=qc.call_id)
+        await self.inflight_gate.acquire_wait()
         started = time.perf_counter()
         try:
+            if self.job_store is not None:
+                await self.job_store.set_running(qc.session_id)
+            emit_check_started(session_id=qc.session_id, call_id=qc.call_id)
             result = await self._pipeline(qc)
         except Exception:
             return QcRunResult(
@@ -254,6 +258,8 @@ class OfflineQcService:
                 call_id=qc.call_id,
                 started_monotonic=started,
             )
+        finally:
+            await self.inflight_gate.release()
         result.started_monotonic = started
         return result
 

@@ -7,7 +7,6 @@
 - transcribe 逐片转写后按时间序拼接
 """
 import struct
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -78,8 +77,6 @@ class TestTranscribeConcat:
         """61s WAV → 2 分片，逐片转写后按时间序拼接完整。"""
         wav = _make_wav(61.0, sample_rate=1000)
         client = ASRClient(redis=None)
-        client._is_degraded = AsyncMock(return_value=False)
-
         class MockProvider:
             def __init__(self):
                 self.calls = 0

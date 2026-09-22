@@ -23,16 +23,53 @@ from common.trace.middleware import TraceMiddleware
 setup_logging()
 
 
+def wire_resilience_hooks() -> None:
+    """把 common.resilience.hooks 接到 QC 专用适配器（记录 qc.*，不进六频道 Redis）。
+
+    shutdown 必须 set_publisher(None)，避免测试间泄漏。
+    """
+    from app.events.resilience import on_resilience_event
+    from common.resilience import hooks
+
+    hooks.set_publisher(on_resilience_event)
+
+
+def _unwire_resilience_hooks() -> None:
+    from common.resilience import hooks
+
+    hooks.set_publisher(None)
+
+
+async def wire_resilience_redis() -> None:
+    """把 QC Redis（DB 3）注入 common 零件，供限流/后续 invoke_llm 共用。"""
+    from app.deps import get_redis as qc_get_redis
+    from common.resilience._redis import configure_redis
+
+    configure_redis(await qc_get_redis())
+
+
+def _unwire_resilience_redis() -> None:
+    from app.deps import reset_redis as reset_qc_redis
+    from common.resilience._redis import reset_redis
+
+    reset_redis()
+    reset_qc_redis()
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     # 链路追踪兜底：统一开关关闭时清除 LangSmith/LangChain SDK 环境变量，
     # 防止 SDK 读 os.environ 绕过闸门自动上报（与 rag-service 对齐）。
     from common.config.settings import settings as platform_settings
+    from common.llm.reliability import set_default_service
     from common.trace.langfuse_gate import configure_langfuse_env
     from common.trace.langsmith_gate import configure_langsmith_env
 
     configure_langsmith_env(platform_settings)
     configure_langfuse_env(platform_settings)
+    set_default_service("qc")
+    wire_resilience_hooks()
+    await wire_resilience_redis()
 
     tasks = await start_background_tasks()
     try:
@@ -45,6 +82,8 @@ async def lifespan(_app: FastAPI):
                 await task
             except Exception:
                 pass
+        _unwire_resilience_hooks()
+        _unwire_resilience_redis()
 
 
 app = FastAPI(title="QC Service", version="1.0.0", lifespan=lifespan)

@@ -16,8 +16,7 @@ from pydantic import BaseModel
 
 from app.config import settings
 from app.llm.router import ModelRouter
-from app.utils.redis_keys import LLM_DEGRADED_KEY, TTL_LLM_DEGRADED
-from common.llm.reliability import RedisDegradeTracker, call_with_retry, is_placeholder_secret
+from common.llm.reliability import call_with_retry, is_placeholder_secret
 from common.llm.transport import message_content_from_completions, post_chat_completions
 
 logger = structlog.get_logger()
@@ -28,9 +27,6 @@ _is_placeholder = is_placeholder_secret
 _SYSTEM_PROMPT_PATH = (
     Path(__file__).resolve().parent.parent / "prompt" / "templates" / "complaint_real_llm_system.yaml"
 )
-_FAILURE_THRESHOLD = 3
-# RedisDegradeTracker 需要正 TTL；永不过期键用较长窗口近似（与 breaker 永久 flag 并存）
-_DEGRADE_TTL = int(TTL_LLM_DEGRADED) if TTL_LLM_DEGRADED else 3600
 
 
 @lru_cache(maxsize=1)
@@ -46,22 +42,10 @@ def _load_system_prompt_base() -> str:
 class RealLLMTransport:
     """真实模型 transport，对齐 MockLLMProvider.invoke 签名。"""
 
-    def __init__(
-        self,
-        router: ModelRouter | None = None,
-        *,
-        redis: Any | None = None,
-        degrade: RedisDegradeTracker | None = None,
-    ):
+    def __init__(self, router: ModelRouter | None = None):
         self._router = router or ModelRouter()
         self.last_model: str | None = None
         self.last_provider: str | None = None
-        self._degrade = degrade or RedisDegradeTracker(
-            redis,
-            key=LLM_DEGRADED_KEY,
-            failure_threshold=_FAILURE_THRESHOLD,
-            ttl_seconds=_DEGRADE_TTL,
-        )
 
     def _resolve_role(self, agent_role: str, prompt: str, schema: Optional[Type[BaseModel]]) -> str:
         if agent_role:
@@ -188,10 +172,21 @@ class RealLLMTransport:
         trace_id: str = "",
         session_id: str = "",
         agent_role: str = "",
+        model: Optional[str] = None,
         **_: Any,
     ) -> dict:
         role = self._resolve_role(agent_role, prompt, schema)
-        model, provider, api_key, base_url = self._resolve_model_and_creds(role)
+        if model:
+            # fallback_chain 换模型透传（invoke_llm 编排指定目标模型），fail-closed 同主路径
+            provider, api_key, base_url = self._provider_for_model(model)
+            if is_placeholder_secret(api_key):
+                raise RuntimeError(
+                    f"real LLM key missing for provider={provider} model={model}; "
+                    f"set LLM_DEEPSEEK_API_KEY / LLM_DASHSCOPE_API_KEY (or LLM_API_KEY) via env, "
+                    f"keep USE_MOCK_LLM=true"
+                )
+        else:
+            model, provider, api_key, base_url = self._resolve_model_and_creds(role)
         self.last_model = model
         self.last_provider = provider
         system = self._build_system(role, schema)
@@ -262,11 +257,9 @@ class RealLLMTransport:
             provider_path="real",
         )
 
-        if await self._degrade.is_degraded():
-            raise RuntimeError(
-                f"LLM service is in circuit-break state key={self._degrade.key}"
-            )
-
+        # 熔断/降级判定统一由 common invoke_llm 的 per-model 熔断器承担
+        # （csmp:llm_degraded:{model}），transport 层不再设置任何全局降级门，
+        # 避免全局键短路整条 fallback_chain（见 llm-layer spec MODIFIED）。
         async def _once() -> dict:
             try:
                 body = await post_chat_completions(
@@ -307,10 +300,5 @@ class RealLLMTransport:
                 data = {"value": data}
             return data
 
-        try:
-            data = await call_with_retry(_once, max_attempts=3, delay=0.5, backoff=2.0)
-            await self._degrade.on_success()
-            return data
-        except Exception as e:
-            await self._degrade.on_failure(e)
-            raise
+        # 重试耗尽直接上抛，由 common invoke_llm 计 per-model 熔断失败并换 fallback
+        return await call_with_retry(_once, max_attempts=3, delay=0.5, backoff=2.0)

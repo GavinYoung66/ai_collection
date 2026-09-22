@@ -278,6 +278,8 @@ async def reindex_document(
     try:
         texts = [c["content"] for c in chunks]
         vectors = await embed.batch_embed(texts)
+        if texts and not vectors:
+            raise RuntimeError("Embedding service returned empty vectors")
     except Exception as e:
         await doc_repo.mark_failed(uid, "向量入库失败")
         await db.commit()

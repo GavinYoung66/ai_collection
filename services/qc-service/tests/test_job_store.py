@@ -7,14 +7,15 @@ from uuid import uuid4
 import pytest
 
 from app.models.qc import QcRecord
+from app.core.config import qc_settings
 from app.repositories.job_store import (
     FORBIDDEN_JOB_STATUS,
     JOB_TTL_SECONDS,
-    KEY_LLM_DEGRADED,
     KEY_RULES_ACTIVE,
     KEY_WORDS_VERSION,
     QcJobStore,
     job_key,
+    llm_degraded_key,
     replay_run_key,
 )
 from app.repositories.quality_repo import QualityRepo
@@ -29,9 +30,12 @@ class MemoryRedis:
         self.published: list[tuple[str, str]] = []
         self.xadd_log: list[tuple[str, dict]] = []
 
-    async def set(self, key: str, value: str, ex: int | None = None):
+    async def set(self, key: str, value: str, ex: int | None = None, nx: bool = False, **_kwargs):
+        if nx and key in self.data:
+            return None
         self.data[key] = value
         self.ttl[key] = ex
+        return True
 
     async def get(self, key: str):
         return self.data.get(key)
@@ -60,6 +64,12 @@ class MemoryRedis:
 
     async def expire(self, key: str, seconds: int) -> None:
         self.ttl[key] = seconds
+
+    async def exists(self, key: str) -> int:
+        return 1 if key in self.data else 0
+
+    async def setex(self, key: str, time: int, value: str):
+        return await self.set(key, value, ex=time)
 
     async def publish(self, channel: str, message: str) -> int:
         self.published.append((channel, message))
@@ -111,17 +121,31 @@ class TestQcJobStore:
         await store.set_words_version("w1")
         await store.set_rules_active("v1.0")
         await store.set_replay_run("sess-4", "run-1")
-        await store.set_llm_degraded("1")
         assert await store.get_words_version() == "w1"
         assert await store.get_rules_active() == "v1.0"
         assert await store.get_replay_run("sess-4") == "run-1"
-        assert await store.get_llm_degraded() == "1"
         assert redis.ttl[KEY_WORDS_VERSION] is None
         assert redis.ttl[KEY_RULES_ACTIVE] is None
         assert redis.ttl[replay_run_key("sess-4")] is None
-        assert redis.ttl[KEY_LLM_DEGRADED] is None
-        await store.clear_llm_degraded()
-        assert await store.get_llm_degraded() is None
+        assert "qc:llm_degraded" not in redis.data
+        assert not hasattr(store, "set_llm_degraded")
+        assert not hasattr(store, "get_llm_degraded")
+        assert not hasattr(store, "clear_llm_degraded")
+
+    async def test_llm_chain_degraded_requires_whole_chain(self):
+        from common.llm import reliability as reliability_mod
+
+        reliability_mod._llm_breakers.clear()
+        redis = MemoryRedis(db=3)
+        store = QcJobStore(redis)
+        primary = llm_degraded_key(qc_settings.QC_LLM_MODEL)
+        backup = llm_degraded_key(qc_settings.QC_LLM_FALLBACK_CHAIN[0])
+        assert await store.is_llm_chain_degraded() is False
+        redis.data[primary] = "1"
+        assert await store.is_llm_chain_degraded() is False
+        redis.data[backup] = "1"
+        assert await store.is_llm_chain_degraded() is True
+        assert "qc:llm_degraded" not in redis.data
 
     async def test_wait_text_does_not_insert_qc_records(self):
         class ExplodingSession:

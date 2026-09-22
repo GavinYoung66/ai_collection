@@ -1,46 +1,53 @@
-"""ASR 客户端熔断探测容错测试（rag-service-final-fix 5.5/5.6）。"""
+"""ASR 客户端：熔断已迁到 DashScope Provider，本层不再探测/写入废弃全局键。"""
 import pytest
-from redis.exceptions import RedisError
 
 from app.services.asr_client import ASRClient
 
 
-class TestDegradedProbeRedisError:
+class RecordingRedis:
+    def __init__(self):
+        self.ops: list[tuple] = []
+
+    async def exists(self, key):
+        self.ops.append(("exists", key))
+        return 0
+
+    async def setex(self, key, ttl, value):
+        self.ops.append(("setex", key))
+
+
+class TestAsrClientNoLegacyDegradedKey:
     @pytest.mark.asyncio
-    async def test_degraded_probe_redis_error_no_propagate(self):
-        """Redis 探测抛 RedisError → 不传播，按未熔断处理返回 False。"""
-        class BoomRedis:
-            async def exists(self, key):
-                raise RedisError("connection refused")
+    async def test_transcribe_does_not_touch_redis(self, monkeypatch):
+        """转写成功不探测、不 SET 废弃全局键。"""
+        redis = RecordingRedis()
+        client = ASRClient(redis=redis)
 
-        client = ASRClient(redis=BoomRedis())
-        assert await client._is_degraded() is False
+        class MockProvider:
+            async def transcribe(self, audio_bytes, fmt):
+                return "ok"
 
-    @pytest.mark.asyncio
-    async def test_degraded_probe_oserror_no_propagate(self):
-        """Redis 探测抛 OSError → 不传播，按未熔断处理返回 False。"""
-        class BoomRedis:
-            async def exists(self, key):
-                raise OSError("socket closed")
-
-        client = ASRClient(redis=BoomRedis())
-        assert await client._is_degraded() is False
-
-    @pytest.mark.asyncio
-    async def test_degraded_probe_normal_states(self):
-        """正常探测：key 存在 → True；不存在 → False。"""
-        class DegradedRedis:
-            async def exists(self, key):
-                return 1
-
-        class NormalRedis:
-            async def exists(self, key):
-                return 0
-
-        assert await ASRClient(redis=DegradedRedis())._is_degraded() is True
-        assert await ASRClient(redis=NormalRedis())._is_degraded() is False
+        monkeypatch.setattr(
+            "app.services.asr_client.ASRFactory.create", lambda: MockProvider()
+        )
+        result = await client.transcribe(b"fake-audio", "test.mp3")
+        assert result == "ok"
+        assert redis.ops == []
+        assert not hasattr(client, "_is_degraded")
 
     @pytest.mark.asyncio
-    async def test_degraded_probe_no_redis_false(self):
-        """未配置 Redis → 恒为未熔断。"""
-        assert await ASRClient(redis=None)._is_degraded() is False
+    async def test_provider_failure_does_not_setex(self, monkeypatch):
+        """Provider 失败向上抛，客户端不写 Redis。"""
+        redis = RecordingRedis()
+        client = ASRClient(redis=redis)
+
+        class BoomProvider:
+            async def transcribe(self, audio_bytes, fmt):
+                raise RuntimeError("ASR service is in circuit-break state")
+
+        monkeypatch.setattr(
+            "app.services.asr_client.ASRFactory.create", lambda: BoomProvider()
+        )
+        with pytest.raises(RuntimeError, match="circuit-break"):
+            await client.transcribe(b"fake", "test.mp3")
+        assert redis.ops == []

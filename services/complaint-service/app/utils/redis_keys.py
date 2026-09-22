@@ -18,9 +18,13 @@ TTL_HOTSPOTS = 21600           # 6h —— 统计热点
 TTL_GATHER_LOCK = 120          # 2min —— 取证幂等锁
 TTL_TASK_TIMEOUT = 1800        # 30min —— 任务超时标记
 TTL_COMPLAINT_LOCK = 1800      # 30min —— 工单接入幂等锁（对齐 step8 9.5）
+TTL_QUEUE_START = 600          # 10min —— 排队开始时间（排队 deadline）
+TTL_EXEC_START = 1800          # 30min —— graph 执行开始时间（执行 deadline）
 TTL_SESSION_FALLBACK = 259200  # 72h —— Redis 降级 checkpoint
-TTL_LLM_DEGRADED: int | None = None   # 永不过期 —— LLM 熔断标识
 TTL_MODE_ACTIVE: int | None = None    # 永不过期 —— 当前生效模式
+# 注：批次3 全局永不过期键 LLM_DEGRADED_KEY/TTL_LLM_DEGRADED 已随
+# complaint-resilience-wiring 废弃；LLM 降级标志改由 common 层按模型派生
+# csmp:llm_degraded:{model}（SETEX TTL 60s，见 common.llm.reliability）。
 
 
 # ── 1. LangGraph State 持久化缓存 ──
@@ -60,7 +64,9 @@ def gather_lock_key(complaint_id: str) -> str:
 
 
 # ── 7. LLM 熔断标识 ──
-LLM_DEGRADED_KEY = f"{PREFIX}llm_degraded"  # 永不过期
+# 已迁移至 common：csmp:llm_degraded:{model}（per-model，TTL 60s），
+# 由 common.llm.reliability.invoke_llm / make_llm_breaker_key 派生，
+# 本模块不再导出全局键 LLM_DEGRADED_KEY（complaint-resilience-wiring）。
 
 
 # ── 8. 全局任务超时标记 ──
@@ -88,10 +94,31 @@ def queue_pending_key() -> str:
     return f"{PREFIX}queue:pending"
 
 
+# ── 9.5 G5：两级工单 deadline（互相独立，不删对方的 key）──
+def queue_start_key(complaint_id: str) -> str:
+    """csmp:complaint:queue_start:{id} —— 入队时间，TTL 10min（排队 deadline）。"""
+    return f"{PREFIX}complaint:queue_start:{complaint_id}"
+
+
+def exec_start_key(complaint_id: str) -> str:
+    """csmp:complaint:exec_start:{id} —— graph 执行开始时间，TTL 30min（执行 deadline）。"""
+    return f"{PREFIX}complaint:exec_start:{complaint_id}"
+
+
 # ── 10. 工单接入幂等锁（批次8） ──
 def complaint_lock_key(complaint_id: str) -> str:
     """csmp:complaint:lock:{id} —— STRING(SET NX EX)，TTL 30min。"""
     return f"{PREFIX}complaint:lock:{complaint_id}"
+
+
+# ── 10b. 维5 研判幂等锁（complaint-resilience-wiring G4）──
+def judge_lock_key(complaint_id: str) -> str:
+    """csmp:complaint:judge_lock:{id} —— judge 接入 SETNX 锁，TTL 30min。
+
+    与批次8 建单锁 complaint_lock_key 用途不同、key 不同，互不影响：
+    建单锁保护 create_session；本锁保护 judge 接入（防同单并发重复研判）。
+    """
+    return f"{PREFIX}complaint:judge_lock:{complaint_id}"
 
 
 # ── 11. 回调死信队列（批次8） ──

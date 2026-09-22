@@ -185,6 +185,8 @@ class AssetService:
             start_index = await self.chunk_repo.next_chunk_index(doc_id)
 
         vectors = await self.embed.batch_embed(contents)
+        if contents and not vectors:
+            raise RuntimeError("Embedding service returned empty vectors")
         metadata = [
             {"chunk_id": str(cid), "doc_id": str(doc_id), "category": category}
             for cid in chunk_ids

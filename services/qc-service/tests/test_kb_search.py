@@ -117,3 +117,58 @@ class TestKbSearchPipeline:
         assert rag.last_search_payload is None
         assert any(hit.rule_id == "R14" for hit in result.hits)
         assert result.qc_status != "PARTIAL"
+
+    @pytest.mark.asyncio
+    async def test_empty_results_falls_back_keywords_not_partial(self, monkeypatch):
+        monkeypatch.setattr(qc_settings, "QC_R14_RAG_ENABLED", True)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"code": "0", "data": {"results": []}})
+
+        rag = _rag(handler)
+        result = await _offline(rag).run(_session())
+        assert any(method == "POST" and "/kb/search" in url for method, url in rag.recorded_requests())
+        assert result.qc_status != "PARTIAL"
+        assert result.qc_status in {"DONE", "PENDING_REVIEW"}
+        assert result.compliance_score is not None
+        assert result.code in {"0", ErrorCode.A2011.value}
+        assert any(hit.rule_id == "R14" for hit in result.hits)
+
+    @pytest.mark.asyncio
+    async def test_connection_error_falls_back_keywords_not_partial(self, monkeypatch):
+        monkeypatch.setattr(qc_settings, "QC_R14_RAG_ENABLED", True)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("rag kb down")
+
+        rag = _rag(handler)
+        result = await _offline(rag).run(_session())
+        assert any(method == "POST" and "/kb/search" in url for method, url in rag.recorded_requests())
+        assert result.qc_status != "PARTIAL"
+        assert result.qc_status in {"DONE", "PENDING_REVIEW"}
+        assert result.compliance_score is not None
+        assert result.code in {"0", ErrorCode.A2011.value}
+        assert any(hit.rule_id == "R14" for hit in result.hits)
+
+    @pytest.mark.asyncio
+    async def test_search_circuit_open_falls_back_keywords_not_partial(self, monkeypatch):
+        from app.integrations.rag_client import rag_search_breaker, reset_rag_search_breaker
+
+        monkeypatch.setattr(qc_settings, "QC_R14_RAG_ENABLED", True)
+        reset_rag_search_breaker()
+        breaker = rag_search_breaker()
+        for _ in range(3):
+            await breaker.record_failure()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("open breaker must not HTTP search")
+
+        rag = _rag(handler)
+        result = await _offline(rag).run(_session())
+        assert all("/kb/search" not in url for url in rag.recorded_urls())
+        assert result.qc_status != "PARTIAL"
+        assert result.qc_status in {"DONE", "PENDING_REVIEW"}
+        assert result.compliance_score is not None
+        assert result.code not in {ErrorCode.A2001.value, "500"}
+        assert any(hit.rule_id == "R14" for hit in result.hits)
+        reset_rag_search_breaker()

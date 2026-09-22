@@ -22,12 +22,22 @@ from app.services.offline_qc_service import CODE_OK, OfflineQcService
 from app.services.replay_service import ReplayService, run_result_to_http
 from common.errors.codes import ERROR_MESSAGES, ErrorCode
 from common.errors.exceptions import BizException
+from common.resilience._redis import configure_redis
+from common.resilience.rate_limit import allow as rate_limit_allow
+from common.trace.middleware import get_trace_id
 
 router = APIRouter(prefix="/api/v1/qc", tags=["qc-check"])
 
 ALLOWED_SPEAKERS = frozenset({"agent", "user", "ai", "human"})
 RAW_RATE_LIMIT = 10
 RAW_RATE_WINDOW = 1
+
+
+def _raw_rate_user(request: Request) -> str:
+    """用户维：X-User-Id → 客户端 IP → anon。"""
+    return request.headers.get("X-User-Id") or (
+        request.client.host if request.client else "anon"
+    )
 
 
 class ReplayPathBody(BaseModel):
@@ -93,7 +103,6 @@ async def get_replay_service(
     rag: RagClient = Depends(get_rag_client),
 ) -> ReplayService:
     llm.job_store = job_store
-    llm.circuit.job_store = job_store
     redis = getattr(job_store, "_redis", None)
     publisher = QcEventPublisher(redis)
     llm.publisher = publisher
@@ -115,21 +124,15 @@ async def get_replay_service(
 
 
 async def raw_rate_limit(request: Request, redis=Depends(get_redis)) -> None:
-    user = request.headers.get("X-User-Id") or (request.client.host if request.client else "anon")
-    key = f"qc:ratelimit:raw:{user}"
-    try:
-        incr = getattr(redis, "incr", None)
-        if incr is None:
-            raise BizException(ErrorCode.B0006)
-        count = int(await incr(key))
-        expire = getattr(redis, "expire", None)
-        if count == 1 and expire is not None:
-            await expire(key, RAW_RATE_WINDOW)
-        if count > RAW_RATE_LIMIT:
-            raise BizException(ErrorCode.B0006)
-    except BizException:
-        raise
-    except Exception:
+    user = _raw_rate_user(request)
+    configure_redis(redis)
+    allowed = await rate_limit_allow(
+        f"qc:ratelimit:raw:{user}",
+        limit=RAW_RATE_LIMIT,
+        window=RAW_RATE_WINDOW,
+        context={"trace_id": get_trace_id()},
+    )
+    if not allowed:
         raise BizException(ErrorCode.B0006)
 
 

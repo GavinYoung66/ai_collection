@@ -142,7 +142,16 @@ class TestHumanReview:
         asyncio.run(graph.ainvoke(self._state().model_dump(), cfg))
         final = asyncio.run(graph.ainvoke(Command(resume="reject_rejudge"), cfg))
         assert final["reject_count"] == 1
-        assert final["task_status"] == TaskStatus.evidence_gathering.value
+        # human_review 节点先落到 evidence_gathering，图会继续重取证/研判，
+        # 终态可能已越过取证；不得关单或直接 resolved。
+        assert final["task_status"] in (
+            TaskStatus.evidence_gathering.value,
+            TaskStatus.reflection_retry.value,
+            TaskStatus.judging.value,
+            TaskStatus.draft_generated.value,
+            TaskStatus.pending_review.value,
+        )
+        assert final["task_status"] != TaskStatus.resolved.value
 
     def test_unknown_action_defaults_approve(self):
         st = self._state()
@@ -217,7 +226,17 @@ class TestComplaintServiceRunGraph:
     def test_close(self):
         rec = complaint_service.create("关闭测试")
         cid = rec["complaint_id"]
-        complaint_service.judge(cid)
+        judged = complaint_service.judge(cid)
+        establishment = judged.get("verdict")
+        if establishment is None or establishment == VerdictType.pending:
+            establishment = VerdictType.compliant_but_poor_experience
+            reason = "测试关单：pending 改判体验差"
+        else:
+            reason = None
+        complaint_service.submit_disposition_verdict(
+            cid, establishment, reason=reason
+        )
+        complaint_service.submit_disposition_callback(cid)
         closed = complaint_service.close(cid)
         assert closed["task_status"] == TaskStatus.closed.value
 

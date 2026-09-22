@@ -1,9 +1,15 @@
-"""接口限流组件：固定窗口计数（Redis INCR + EXPIRE），路由层 Depends 拦截。
+"""接口限流组件：固定窗口计数（委托 common.resilience.rate_limit），路由层 Depends 拦截。
 
 - 按用户维度计数：优先读取 `X-User-Id` 请求头，缺失时回退客户端 IP；
 - 超过阈值抛 `RateLimitExceeded`，由 `register_rate_limit_handler` 统一转为
   HTTP 429 + 项目统一响应包 `{code, message, data, trace_id}`；
-- Redis 任何异常静默放行（限流降级，不阻断业务可用性）。
+- Redis 任何异常静默放行（限流降级，不阻断业务可用性）——降级方向由
+  common.resilience.rate_limit.allow 保证（Redis 挂时返回 True）。
+
+迁移说明（platform-resilience-primitives 5.1）：计数逻辑委托 common 零件
+（INCR + 首次 EXPIRE + Redis 故障静默放行），本文件保留 rag 独立连接池
+（RAG_REDIS_DB，与业务 Redis 隔离）并经 configure_redis 注入 common 共享客户端，
+键名 `rag:ratelimit:{bucket}:{user}`、阈值参数与 429/B0006 响应契约均不变。
 """
 from collections.abc import Callable
 
@@ -13,6 +19,8 @@ from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 
 from app.settings import settings
+from common.resilience.rate_limit import allow as _rate_limit_allow
+from common.resilience._redis import configure_redis as _configure_common_redis
 from common.trace.middleware import get_trace_id
 
 logger = structlog.get_logger()
@@ -22,6 +30,7 @@ _RATE_LIMIT_CODE = "B0006"
 _RATE_LIMIT_MESSAGE = "请求过于频繁，请稍后再试"
 
 _redis: Redis | None = None
+_injected: Redis | None = None
 
 
 class RateLimitExceeded(Exception):
@@ -47,6 +56,16 @@ def _client() -> Redis:
     return _redis
 
 
+def _ensure_common_client() -> Redis:
+    """把 rag 连接池（或测试 fake）注入 common 限流零件，实例变更时重注入。"""
+    global _injected
+    client = _client()
+    if _injected is not client:
+        _configure_common_redis(client)
+        _injected = client
+    return client
+
+
 def _user_key(request: Request) -> str:
     """按用户维度：X-User-Id 优先，缺失回退客户端 IP。"""
     user = request.headers.get("X-User-Id")
@@ -64,17 +83,13 @@ def rate_limiter(bucket: str, limit: int, window: int = 60) -> Callable:
     """
 
     async def check(request: Request) -> None:
+        _ensure_common_client()
         key = f"{_RATE_KEY_PREFIX}{bucket}:{_user_key(request)}"
-        try:
-            count = await _client().incr(key)
-            if count == 1:
-                await _client().expire(key, window)
-            if count > limit:
-                raise RateLimitExceeded()
-        except RateLimitExceeded:
-            raise
-        except Exception as e:  # Redis 故障静默放行，限流降级不阻断业务
-            logger.warning("rate_limit_check_failed", bucket=bucket, error=str(e))
+        allowed = await _rate_limit_allow(
+            key, limit, window, context={"trace_id": get_trace_id()}
+        )
+        if not allowed:
+            raise RateLimitExceeded()
 
     return check
 

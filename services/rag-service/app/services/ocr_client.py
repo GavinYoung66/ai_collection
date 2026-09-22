@@ -6,12 +6,12 @@ import structlog
 from redis.asyncio import Redis
 
 from app.settings import settings
+from common.resilience.breaker import CircuitBreaker, make_mcp_breaker_key
+from common.resilience.timeout import Timeout
 
 logger = structlog.get_logger()
 
-_DEGRADED_KEY = "rag:ocr:degraded"
-_FAILURE_THRESHOLD = 3
-_CIRCUIT_TTL = 60
+_BREAKER_KEY = make_mcp_breaker_key("rag", "ocr")
 
 
 class OCRClient:
@@ -21,64 +21,47 @@ class OCRClient:
         redis: Redis | None = None,
     ):
         self.endpoint = endpoint or settings.OCR_ENDPOINT
-        self._redis = redis
+        self._redis = redis  # 保留构造签名；进程内熔断，不写废弃全局键
         self._client: httpx.AsyncClient | None = None
-        self._failure_count = 0
+        self._breaker = CircuitBreaker(_BREAKER_KEY, fail_max=3, reset_timeout=60)
+        self._timeout = Timeout(total=float(settings.OCR_TIMEOUT))
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient()
         return self._client
 
-    async def _is_degraded(self) -> bool:
-        if self._redis is None:
-            return False
-        return await self._redis.exists(_DEGRADED_KEY) > 0
-
-    async def _on_success(self) -> None:
-        self._failure_count = 0
-
-    async def _on_failure(self, error: Exception) -> None:
-        self._failure_count += 1
-        if self._failure_count >= _FAILURE_THRESHOLD:
-            await self._set_degraded()
-            logger.error(
-                "ocr_circuit_break_open",
-                failures=self._failure_count,
-                error=str(error),
-            )
-
-    async def _set_degraded(self, ttl: int = _CIRCUIT_TTL) -> None:
-        if self._redis is not None:
-            await self._redis.setex(_DEGRADED_KEY, ttl, "1")
-
     async def recognize(self, file_bytes: bytes, filename: str) -> str:
-        """调用 OCR 服务识别图片文本，连续 3 次失败触发熔断。
+        """调用 OCR 服务识别图片文本。
 
-        使用 form-data 上传文件至 OCR_ENDPOINT，超时 settings.OCR_TIMEOUT，
-        失败按 1s/2s/4s 指数退避重试 3 次；3 连失败写入 Redis
-        `rag:ocr:degraded`（TTL 60s）实现熔断短路。
+        熔断 open 时短路 HTTP 并抛 RuntimeError（入库映射 A3001/占位），
+        MUST NOT 返回空串以免被当成空白图成功（A3002）。
+        成功识别的空文本（真空白图）仍返回 ""。
         """
-        if await self._is_degraded():
+        if not await self._breaker.before_call():
+            logger.warning("ocr_circuit_open_skip")
             raise RuntimeError("OCR service is in circuit-break state")
-        client = await self._get_client()
-        for attempt in range(3):
-            try:
-                resp = await client.post(
+        try:
+            client = await self._get_client()
+            resp = await asyncio.wait_for(
+                client.post(
                     self.endpoint,
                     files={"file": (filename, file_bytes)},
                     data={"lang": "ch"},
-                    timeout=settings.OCR_TIMEOUT,
-                )
-                resp.raise_for_status()
-                await self._on_success()
-                return resp.json()["text"]
-            except (httpx.HTTPError, KeyError) as e:
-                if attempt < 2:
-                    await asyncio.sleep(1.0 * (2 ** attempt))
-                else:
-                    await self._on_failure(e)
-                    raise
+                    timeout=self._timeout.total,
+                ),
+                timeout=self._timeout.total,
+            )
+            resp.raise_for_status()
+            text = resp.json()["text"]
+            if text is None:
+                raise RuntimeError("OCR service returned null text")
+            await self._breaker.record_success()
+            return text
+        except Exception as e:
+            await self._breaker.record_failure(e)
+            logger.warning("ocr_http_failed", error=str(e))
+            raise
 
     async def close(self) -> None:
         if self._client is not None and not self._client.is_closed:

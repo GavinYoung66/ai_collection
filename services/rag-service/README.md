@@ -8,8 +8,8 @@ RAG 混合检索服务（V4 多模态知识库，摘要元数据能力 + 开场�
 
 | Key                             | 用途                            | TTL   |
 | ------------------------------- | ------------------------------- | ----- |
-| `rag:embed:degraded`            | Embedding 熔断标识              | 60s   |
-| `rag:rerank:degraded`           | Rerank 熔断标识                 | 60s   |
+| `rag:mcp_degraded:embed`        | Embedding HTTP 熔断（进程内）   | 60s   |
+| `rag:mcp_degraded:rerank`       | Rerank HTTP 熔断（进程内）      | 60s   |
 | `rag:cache:query:{md5}`         | V1 查询缓存（自然过期，不读写） | 3600s |
 | `rag:cache:keys:{category}`     | 缓存 key 索引 Set               | -     |
 | `rag:ratelimit:{bucket}:{user}` | 限流计数                        | -     |
@@ -22,9 +22,9 @@ RAG 混合检索服务（V4 多模态知识库，摘要元数据能力 + 开场�
 | ------------------------------------- | ------------------------------- | ----- |
 | `rag:session:v2:{session_id}`         | 多轮会话上下文（LPUSH + LTRIM） | 1800s |
 | `rag:cache:query:v2:{md5_with_flags}` | V2 查询缓存（含开关 hash 隔离） | 3600s |
-| `rag:ocr:degraded`                    | OCR 熔断标识                    | 60s   |
-| `rag:asr:degraded`                    | ASR 熔断标识                    | 60s   |
-| `rag:rewrite:degraded`                | Query 改写 LLM 熔断标识         | 60s   |
+| `rag:mcp_degraded:ocr`                | OCR HTTP 熔断（进程内）         | 60s   |
+| `rag:mcp_degraded:asr`                | ASR HTTP 熔断（进程内，仅 DashScope） | 60s |
+| `rag:mcp_degraded:rewrite`            | Query 改写 LLM 熔断（进程内）   | 60s   |
 | `rag:sensitive_words:version`         | 敏感词版本号（INCR）            | -     |
 
 ## §B V2 冒烟测试手动运行指引

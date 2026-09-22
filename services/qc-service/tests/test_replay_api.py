@@ -3,11 +3,13 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import httpx
 from fastapi.testclient import TestClient
 
 from app.core.config import qc_settings
-from app.deps import get_redis
+from app.deps import get_rag_client, get_redis
 from app.integrations.qc_session import QCSession
+from app.integrations.rag_client import RagClient
 from app.main import app
 from app.models.qc import QcRecord
 from app.repositories.job_store import QcJobStore, wait_retry_key
@@ -133,7 +135,7 @@ def _qc_records(session: ApiFakeSession) -> list[QcRecord]:
     return [obj for obj in session.added if isinstance(obj, QcRecord)]
 
 
-def _client(session: ApiFakeSession, redis: MemoryRedis, dp: FakeDp, *, llm=None) -> TestClient:
+def _client(session: ApiFakeSession, redis: MemoryRedis, dp: FakeDp, *, llm=None, rag=None) -> TestClient:
     async def _session():
         yield session
 
@@ -151,11 +153,21 @@ def _client(session: ApiFakeSession, redis: MemoryRedis, dp: FakeDp, *, llm=None
     app.dependency_overrides[get_dp_client] = lambda: dp
     app.dependency_overrides[get_llm_reviewer] = _llm
     app.dependency_overrides[get_quality_repo] = _quality
+    if rag is not None:
+        app.dependency_overrides[get_rag_client] = lambda: rag
     return TestClient(app)
 
 
 def _cleanup():
+    from common.resilience import hooks
+    from common.resilience._redis import reset_redis
+
+    from app.events.resilience import clear_emitted
+
     app.dependency_overrides.clear()
+    reset_redis()
+    hooks.set_publisher(None)
+    clear_emitted()
 
 
 class TestReplayPath:
@@ -490,6 +502,97 @@ class TestReplayRaw:
         assert codes[10] == (429, "B0006")
         assert codes[11] == (429, "B0006")
 
+    def test_rate_limit_redis_down_allows_without_b0006(self):
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        class DownRedis(MemoryRedis):
+            async def set(self, key, value, ex=None, nx=False, **kwargs):
+                if nx:
+                    raise RedisConnectionError("redis down")
+                return await super().set(key, value, ex=ex, nx=False)
+
+        db = ApiFakeSession()
+        db.call_ids.add("sess_ok")
+        redis = DownRedis(db=3)
+        client = _client(db, redis, FakeDp({}))
+        resp = client.post(
+            "/api/v1/qc/replay/raw",
+            headers={"X-Idempotency-Key": "k-down", "X-User-Id": "u-down"},
+            json=_ready(),
+        )
+        body = resp.json()
+        _assert_envelope(body)
+        assert body["code"] != "B0006"
+        assert resp.status_code != 429
+
+    def test_rate_limit_hit_payload_includes_trace_id(self):
+        from app.events.resilience import clear_emitted, emitted
+        from app.main import wire_resilience_hooks
+
+        db = ApiFakeSession()
+        db.call_ids.add("sess_ok")
+        redis = MemoryRedis(db=3)
+        wire_resilience_hooks()
+        clear_emitted()
+        client = _client(db, redis, FakeDp({}))
+        for i in range(11):
+            resp = client.post(
+                "/api/v1/qc/replay/raw",
+                headers={
+                    "X-Idempotency-Key": f"k-trace-{i}",
+                    "X-User-Id": "u-rate-trace",
+                    "X-Trace-Id": "trace-raw-11",
+                },
+                json=_ready(),
+            )
+        body = resp.json()
+        _assert_envelope(body, code="B0006")
+        assert resp.status_code == 429
+        hits = [payload for name, payload in emitted if name == "qc.rate_limit.hit"]
+        assert hits
+        assert hits[0]["trace_id"] == "trace-raw-11"
+        assert hits[0]["key"] == "qc:ratelimit:raw:u-rate-trace"
+        assert hits[0]["reason"] == "rate_limited"
+        assert "qc.rate_limit.hit" not in {ch for ch, _ in redis.published}
+
+    def test_rate_limit_user_dimension_header_ip_anon(self):
+        from types import SimpleNamespace
+
+        from app.routers.check import _raw_rate_user
+
+        header = SimpleNamespace(headers={"X-User-Id": "alice"}, client=SimpleNamespace(host="9.9.9.9"))
+        assert _raw_rate_user(header) == "alice"
+        ip_only = SimpleNamespace(headers={}, client=SimpleNamespace(host="10.0.0.8"))
+        assert _raw_rate_user(ip_only) == "10.0.0.8"
+        anon = SimpleNamespace(headers={}, client=None)
+        assert _raw_rate_user(anon) == "anon"
+
+    def test_rate_limit_without_user_header_uses_client_ip_key(self):
+        from app.events.resilience import clear_emitted, emitted
+        from app.main import wire_resilience_hooks
+
+        db = ApiFakeSession()
+        db.call_ids.add("sess_ok")
+        redis = MemoryRedis(db=3)
+        wire_resilience_hooks()
+        clear_emitted()
+        client = _client(db, redis, FakeDp({}))
+        for i in range(11):
+            resp = client.post(
+                "/api/v1/qc/replay/raw",
+                headers={"X-Idempotency-Key": f"k-ip-{i}", "X-Trace-Id": "trace-ip"},
+                json=_ready(),
+            )
+        _assert_envelope(resp.json(), code="B0006")
+        hits = [payload for name, payload in emitted if name == "qc.rate_limit.hit"]
+        assert hits
+        key = hits[0]["key"]
+        assert key.startswith("qc:ratelimit:raw:")
+        assert key != "qc:ratelimit:raw:anon"
+        assert "u-rate" not in key
+        assert hits[0]["reason"] == "rate_limited"
+        assert hits[0]["trace_id"] == "trace-ip"
+
 
 class TestBatch:
     def teardown_method(self):
@@ -561,20 +664,28 @@ class TestA2011Envelope:
     def teardown_method(self):
         _cleanup()
 
-    def test_llm_open_still_returns_scores(self):
+    def test_llm_open_still_returns_scores(self, monkeypatch):
+        from common.llm import reliability as reliability_mod
+        from common.llm.reliability import set_default_service
+        from common.resilience._redis import configure_redis
+
         db = ApiFakeSession()
         db.call_ids.add("sess_ok")
         redis = MemoryRedis(db=3)
+        configure_redis(redis)
+        set_default_service("qc")
+        reliability_mod._llm_breakers.clear()
+        monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
         dp = FakeDp({"sess_ok": QCSession.model_validate(_ready())})
 
-        async def _boom(_messages):
-            raise RuntimeError("LLM HTTP 500: down")
+        async def _boom(model, messages, timeout_seconds):
+            raise TimeoutError("timeout")
 
         client = _client(
             db,
             redis,
             dp,
-            llm=LLMReviewer(invoke=_boom, job_store=None, retry_delay=0.0),
+            llm=LLMReviewer(invoke=_boom, job_store=QcJobStore(redis), retry_delay=0.0),
         )
         resp = client.post("/api/v1/qc/replay/sess_ok", json={})
         assert resp.status_code == 200
@@ -582,4 +693,47 @@ class TestA2011Envelope:
         _assert_envelope(body, code="A2011")
         assert body["data"] is not None
         assert body["data"]["compliance_score"] == 80
+        assert body["data"].get("qc_status") != "PARTIAL"
+        _assert_no_score_field(body["data"])
+
+
+class TestKbSearchHttpFallback:
+    def teardown_method(self):
+        _cleanup()
+
+    def test_search_failure_http_200_not_partial(self, monkeypatch):
+        monkeypatch.setattr(qc_settings, "QC_R14_RAG_ENABLED", True)
+        db = ApiFakeSession()
+        db.call_ids.add("sess_ok")
+        redis = MemoryRedis(db=3)
+        qc = QCSession.model_validate(
+            _ready(
+                turns=[
+                    {
+                        "turn_id": "t1",
+                        "speaker": "agent",
+                        "text": "再不还就起诉你，还要强制执行",
+                        "turn_index": 1,
+                    }
+                ]
+            )
+        )
+        dp = FakeDp({"sess_ok": qc})
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                raise httpx.ConnectError("rag kb down")
+            return httpx.Response(200, text="")
+
+        http = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=3.0)
+        rag = RagClient(base_url="http://rag-service:8000", retry_delay=0, client=http)
+        client = _client(db, redis, dp, rag=rag)
+        resp = client.post("/api/v1/qc/replay/sess_ok", json={})
+        assert resp.status_code == 200
+        body = resp.json()
+        _assert_envelope(body)
+        assert body["code"] in {"0", "A2011"}
+        assert body["data"] is not None
+        assert body["data"].get("qc_status") != "PARTIAL"
+        assert body["data"]["compliance_score"] is not None
         _assert_no_score_field(body["data"])
