@@ -11,5 +11,6 @@ RUN pip install --no-cache-dir -r requirements.lock -i https://mirrors.aliyun.co
 COPY common/ ./common/
 # 只拷 app 子目录到 /app/app/（原写法嵌套成 /app/app/app/，uvicorn app.main:app 找不到入口）
 COPY services/data-platform/app/ ./app/
+COPY services/data-platform/scripts/ ./scripts/
 ENV PYTHONPATH=/app
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

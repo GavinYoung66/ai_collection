@@ -20,6 +20,19 @@ from app.service.session_service import session_service
 
 logger = structlog.get_logger()
 
+# 进程级 MemorySaver：judge 的 checkpointer 按 complaint_id (thread_id=sid) 留在投诉进程内，
+# 禁止请求结束就丢弃。review approve 时对同一线程 Command(resume="approve") 恢复图。
+_graph_checkpointer = None
+
+
+def _get_graph_checkpointer():
+    """惰性初始化进程级 MemorySaver（避免 import 时加载 langgraph）。"""
+    global _graph_checkpointer
+    if _graph_checkpointer is None:
+        from langgraph.checkpoint.memory import MemorySaver
+        _graph_checkpointer = MemorySaver()
+    return _graph_checkpointer
+
 
 class ComplaintNotFound(Exception):
     pass
@@ -336,8 +349,11 @@ class ComplaintService:
                 )
 
     async def _judge_with_graph(self, rec: dict, complaint_id: str) -> dict:
-        """run_graph=True：编译并执行真图，回写 verdict 等字段，并落单 trace_events。"""
-        from langgraph.checkpoint.memory import MemorySaver
+        """run_graph=True：编译并执行真图，回写 verdict 等字段，并落单 trace_events。
+
+        使用进程级 MemorySaver（非请求级），使 checkpointer 按 complaint_id (thread_id=sid)
+        留在投诉进程内。review approve 时对同一线程 Command(resume="approve") 恢复图。
+        """
         from langgraph.errors import GraphInterrupt
 
         from app.api.deps import get_llm_provider, get_mcp_client
@@ -369,8 +385,8 @@ class ComplaintService:
             complaint_text=rec.get("complaint_text", ""),
             case_ids=case_ids,
         ).model_dump()
-        # MemorySaver：支持 human_review interrupt 挂起；API 侧本批不 resume，停在人审即可
-        graph = build_complaint_graph(checkpointer=MemorySaver())
+        # 进程级 checkpointer：judge 停在 human_review 后状态不丢弃，review approve 时可恢复
+        graph = build_complaint_graph(checkpointer=_get_graph_checkpointer())
         config = {"configurable": {"thread_id": sid}}
 
         mcp = get_mcp_client()
@@ -642,10 +658,50 @@ class ComplaintService:
                reviewer: str = "operator", comment: Optional[str] = None,
                reason: Optional[str] = None) -> dict:
         from app.service.review_service import review_service
-        return review_service.submit(
+        rec = review_service.submit(
             complaint_id, review_action, reviewer=reviewer, comment=comment,
             reason=reason,
         )
+        # 3.5: approve 时对同一线程 Command(resume="approve")，恢复图进入 sample_backflow → write_session
+        if review_action == ReviewAction.approve:
+            self._schedule_graph_resume(complaint_id, rec.get("session_id"))
+        return rec
+
+    def _schedule_graph_resume(self, complaint_id: str, session_id: str | None) -> None:
+        """调度图恢复为后台任务（非阻塞）。不阻塞 review 路由响应。"""
+        if not session_id:
+            return
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._resume_graph_thread(complaint_id, session_id))
+        except RuntimeError:
+            # 无事件循环（如同步单测）：跳过图恢复，不阻塞
+            logger.warning("no_event_loop_for_graph_resume", complaint_id=complaint_id)
+
+    async def _resume_graph_thread(self, complaint_id: str, session_id: str) -> None:
+        """review approve 后恢复图线程 → sample_backflow → write_session。
+
+        使用 judge 时同一进程级 MemorySaver 和 thread_id=sid。
+        不改图节点、不新做路由。
+        """
+        from langgraph.types import Command
+        from app.graph.builder import build_complaint_graph
+        try:
+            graph = build_complaint_graph(checkpointer=_get_graph_checkpointer())
+            config = {"configurable": {"thread_id": session_id}}
+            await graph.ainvoke(Command(resume="approve"), config=config)
+            logger.info(
+                "graph_resumed_after_approve",
+                complaint_id=complaint_id,
+                session_id=session_id,
+            )
+        except Exception:
+            logger.exception(
+                "graph_resume_failed",
+                complaint_id=complaint_id,
+                session_id=session_id,
+            )
 
     def submit_disposition_verdict(
         self,

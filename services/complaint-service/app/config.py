@@ -21,6 +21,12 @@ class ComplaintSettings(Settings):
     MCP_GATEWAY_URL: str = ""         # standalone 模式下的网关地址（非 rag_kb 工具转发）
     # 真路径 rag_kb bridge（D2）：USE_MOCK_MCP=false 时必填，如 http://rag-service:8000
     RAG_SERVICE_URL: str = ""
+    # 批次③ 进程内桥（mcp-real-path）：data-platform 快照/qc-source、qc-service 质检台账
+    DATA_PLATFORM_URL: str = "http://data-platform:8000"
+    QC_SERVICE_URL: str = "http://qc-service:8000"
+    # 进程内桥 HTTP 可靠性：沿用内部 HTTP 5s 超时 / 3 次重试（design D7）
+    BRIDGE_HTTP_TIMEOUT: float = 5.0
+    BRIDGE_HTTP_RETRY: int = 3
 
     # ── Mock 开关（dev 默认 Mock，prod 关闭）──
     USE_MOCK_MCP: bool = True

@@ -19,7 +19,7 @@ def _build_mcp_client() -> Any:
     """构建 MCP Client：始终返回 MCPClient（不再返回 MCPGateway）。
 
     - USE_MOCK_MCP=True：transport=MockMCPClient（覆盖全部 PRD 4.4 server/tool）
-    - USE_MOCK_MCP=False：RealMCPTransport（rag_kb → HTTP bridge；其它经 gateway URL）
+    - USE_MOCK_MCP=False：RealMCPTransport（rag_kb → HTTP bridge；business_ticket/call_qc/data_platform → 批次③进程内桥）
     """
     from app.mcp.gateway import MCPGateway
 

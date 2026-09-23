@@ -123,6 +123,8 @@ services:
       PG_PORT: "5432"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      # 最小闭环事件（etl.task.done/qc.check.completed）与 qc-service 同实例同库；禁止 0 号库
+      QC_REDIS_DB: "3"
     volumes:
       - ./services/data-platform/app:/app/app
       - ./common:/app/common
@@ -376,7 +378,12 @@ services:
       LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL_DOCKER:-http://host.docker.internal:3000}
       # Mock 默认：不设 RAG_SERVICE_URL；真路径需 USE_MOCK_MCP=false + RAG_SERVICE_URL=http://rag-service:8000
       # 并显式 depends_on rag-service（见 docker-compose.complaint.yml / external-deps README）。
-      USE_MOCK_MCP: "true"
+      USE_MOCK_MCP: ${USE_MOCK_MCP:-true}
+      # 闭环验收：USE_MOCK_MCP=false 时 rag_kb 桥走 rag-service（端口 8002→容器 8000）
+      RAG_SERVICE_URL: ${RAG_SERVICE_URL:-http://rag-service:8000}
+      # 批次③ 进程内桥：容器内走 compose alias；本机 uvicorn 直跑时在根 .env 覆盖为 localhost:8001/8003
+      DATA_PLATFORM_URL: ${DATA_PLATFORM_URL:-http://data-platform:8000}
+      QC_SERVICE_URL: ${QC_SERVICE_URL:-http://qc-service:8000}
     volumes:
       - ./services/complaint-service/app:/app/app
       - ./services/complaint-service/tests:/app/tests

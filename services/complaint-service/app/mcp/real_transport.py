@@ -1,7 +1,9 @@
-"""真路径 MCP transport（gateway standalone 等价物，design D2）。
+"""真路径 MCP transport（gateway standalone 等价物，design D2 / D5）。
 
 - ``rag_kb`` 支持工具：进程内 ``RagKbBridge`` → rag-service HTTP
-- 其它 server：若配置了 ``MCP_GATEWAY_URL``，转发 HTTP；否则明确依赖错误
+- ``business_ticket`` / ``call_qc`` / ``data_platform``：批次③ 进程内桥
+  （快照 / qc-source / 质检台账 / 内部回写口），不要求 MCP_GATEWAY_URL
+- 其它未知 server：若配置了 ``MCP_GATEWAY_URL``，转发 HTTP；否则明确依赖错误
 - 禁止对已支持工具抛 ``NotImplementedError``
 """
 from __future__ import annotations
@@ -12,6 +14,9 @@ import httpx
 import structlog
 
 from app.config import settings
+from app.mcp.business_ticket_bridge import BusinessTicketBridge
+from app.mcp.call_qc_bridge import CallQcBridge
+from app.mcp.data_platform_bridge import DataPlatformBridge
 from app.mcp.errors import MCPError, MCPTimeoutError
 from app.mcp.rag_kb_bridge import RagKbBridge
 from common.llm.reliability import is_placeholder_secret
@@ -31,6 +36,11 @@ class RealMCPTransport:
         gateway_url: str | None = None,
         rag_base_url: str | None = None,
         bridge: RagKbBridge | None = None,
+        data_platform_url: str | None = None,
+        qc_service_url: str | None = None,
+        business_bridge: BusinessTicketBridge | None = None,
+        call_qc_bridge: CallQcBridge | None = None,
+        data_platform_bridge: DataPlatformBridge | None = None,
     ):
         self._gateway_url = (
             gateway_url
@@ -42,7 +52,21 @@ class RealMCPTransport:
             if rag_base_url is not None
             else getattr(settings, "RAG_SERVICE_URL", "") or ""
         )
+        dp_url = (
+            data_platform_url
+            if data_platform_url is not None
+            else getattr(settings, "DATA_PLATFORM_URL", "") or ""
+        ).rstrip("/")
+        qc_url = (
+            qc_service_url
+            if qc_service_url is not None
+            else getattr(settings, "QC_SERVICE_URL", "") or ""
+        ).rstrip("/")
+
         self._bridge = bridge or RagKbBridge(rag_url)
+        self._business_bridge = business_bridge or BusinessTicketBridge(dp_url)
+        self._call_qc_bridge = call_qc_bridge or CallQcBridge(dp_url, qc_url)
+        self._data_platform_bridge = data_platform_bridge or DataPlatformBridge(dp_url)
 
     async def call(
         self,
@@ -60,6 +84,20 @@ class RealMCPTransport:
                 )
             raise MCPError("rag_kb", tool, f"unsupported rag_kb tool: {tool}")
 
+        if server == "business_ticket":
+            return await self._business_bridge.call_tool(
+                tool, params, trace_id=trace_id, session_id=session_id
+            )
+        if server == "call_qc":
+            return await self._call_qc_bridge.call_tool(
+                tool, params, trace_id=trace_id, session_id=session_id
+            )
+        if server == "data_platform":
+            return await self._data_platform_bridge.call_tool(
+                tool, params, trace_id=trace_id, session_id=session_id
+            )
+
+        # 未知 server 保留 gateway 转发防御分支
         return await self._forward_gateway(
             server, tool, params, trace_id=trace_id, session_id=session_id
         )

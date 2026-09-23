@@ -69,14 +69,14 @@ class MCPGateway:
             return dict(self._health)
 
         rag_url = (getattr(settings, "RAG_SERVICE_URL", "") or "").strip()
+        dp_url = (getattr(settings, "DATA_PLATFORM_URL", "") or "").strip()
+        qc_url = (getattr(settings, "QC_SERVICE_URL", "") or "").strip()
         from common.llm.reliability import is_placeholder_secret
 
         rag_ok = not is_placeholder_secret(rag_url)
-        for server in ALLOWED_SERVERS:
-            if server == "rag_kb":
-                self._health[server] = "healthy" if rag_ok else "unavailable"
-            else:
-                self._health[server] = (
-                    "healthy" if self._gateway_url else "degraded"
-                )
+        # 批次③：三 server 走进程内桥，就绪看各自下游 URL，与 MCP_GATEWAY_URL 无关
+        self._health["rag_kb"] = "healthy" if rag_ok else "unavailable"
+        self._health["business_ticket"] = "healthy" if dp_url else "unavailable"
+        self._health["data_platform"] = "healthy" if dp_url else "unavailable"
+        self._health["call_qc"] = "healthy" if dp_url and qc_url else "unavailable"
         return dict(self._health)
