@@ -58,6 +58,11 @@ ACCOUNT_STAGE = "M1"
 SESSION_ID = "min-loop-sess-001"
 DURATION_SECONDS = 120  # > 0 且 >=10，避免触发 R09 短通话
 
+# 批量字段（0014 新列）：给单案件种子补真实业务值，供快照同步写入。
+PRODUCT_TYPE = "信用贷"
+# 非空还款记录 JSONB（spec 验证要求非空列表）
+REPAYMENT_RECORDS = '[{"date":"2026-08-01","amount":1000.00}]'
+
 # speaker 只能 ai|user；第 5 轮 ai 话术含「我是法院」(R12 high/fake_identity)
 # 与「必须还」(R11 medium/threat)，保证后续真开检产生 high 告警。
 # 刻意不出现数字+元/天（避 R15）、不出现 R14 词表、用户不触发 R13。
@@ -74,20 +79,24 @@ _UPSERT_CASE = text(
     """
     INSERT INTO cases (
         id, case_number, customer_name, phone_encrypted, phone_hash,
-        overdue_amount, overdue_days, account_stage
+        overdue_amount, overdue_days, account_stage,
+        product_type, repayment_records
     ) VALUES (
         CAST(:id AS uuid), :case_number, :customer_name, :phone_encrypted, :phone_hash,
-        :overdue_amount, :overdue_days, :account_stage
+        :overdue_amount, :overdue_days, :account_stage,
+        :product_type, CAST(:repayment_records AS jsonb)
     )
     ON CONFLICT (id) DO UPDATE SET
-        case_number     = EXCLUDED.case_number,
-        customer_name   = EXCLUDED.customer_name,
-        phone_encrypted = EXCLUDED.phone_encrypted,
-        phone_hash      = EXCLUDED.phone_hash,
-        overdue_amount  = EXCLUDED.overdue_amount,
-        overdue_days    = EXCLUDED.overdue_days,
-        account_stage   = EXCLUDED.account_stage,
-        is_delete       = '0'
+        case_number       = EXCLUDED.case_number,
+        customer_name     = EXCLUDED.customer_name,
+        phone_encrypted   = EXCLUDED.phone_encrypted,
+        phone_hash        = EXCLUDED.phone_hash,
+        overdue_amount    = EXCLUDED.overdue_amount,
+        overdue_days      = EXCLUDED.overdue_days,
+        account_stage     = EXCLUDED.account_stage,
+        product_type      = EXCLUDED.product_type,
+        repayment_records = EXCLUDED.repayment_records,
+        is_delete         = '0'
     """
 )
 
@@ -120,20 +129,28 @@ _INSERT_TURN = text(
     """
 )
 
-# 快照空行：只写 6 列；冲突时只覆盖这 6 列，保留已回流的质检列/投诉列。
+# 快照行：写 6 列基础 + 3 新列（product_type/repayment_records/create_time 从 cases 同行读）。
+# 冲突时只覆盖这 9 列，保留已回流的质检列/投诉列。
 _UPSERT_SNAPSHOT = text(
     """
     INSERT INTO dw.ads_case_loop (
-        case_id, customer_name, overdue_amount, overdue_days, session_id, call_ended
-    ) VALUES (
-        :case_id, :customer_name, :overdue_amount, :overdue_days, :session_id, '1'
-    )
+        case_id, customer_name, overdue_amount, overdue_days, session_id, call_ended,
+        product_type, repayment_records, create_time
+    ) SELECT
+        c.id::text, c.customer_name, c.overdue_amount, c.overdue_days,
+        :session_id, '1',
+        c.product_type, c.repayment_records, c.create_time
+    FROM cases c
+    WHERE c.id = CAST(:case_id AS uuid)
     ON CONFLICT (case_id) DO UPDATE SET
-        customer_name  = EXCLUDED.customer_name,
-        overdue_amount = EXCLUDED.overdue_amount,
-        overdue_days   = EXCLUDED.overdue_days,
-        session_id     = EXCLUDED.session_id,
-        call_ended     = EXCLUDED.call_ended
+        customer_name     = EXCLUDED.customer_name,
+        overdue_amount     = EXCLUDED.overdue_amount,
+        overdue_days       = EXCLUDED.overdue_days,
+        session_id         = EXCLUDED.session_id,
+        call_ended         = EXCLUDED.call_ended,
+        product_type      = EXCLUDED.product_type,
+        repayment_records  = EXCLUDED.repayment_records,
+        create_time        = EXCLUDED.create_time
     """
 )
 
@@ -144,7 +161,10 @@ _VERIFY = text(
         (SELECT count(*) FROM call_records WHERE case_id = CAST(:case_id_uuid AS uuid)) AS calls_cnt,
         (SELECT count(*) FROM dialog_turns WHERE session_id = :session_id) AS turns_cnt,
         (SELECT count(*) FROM dw.ads_case_loop WHERE case_id = :case_id_str) AS snapshot_cnt,
-        (SELECT call_ended FROM dw.ads_case_loop WHERE case_id = :case_id_str) AS call_ended
+        (SELECT call_ended FROM dw.ads_case_loop WHERE case_id = :case_id_str) AS call_ended,
+        (SELECT product_type FROM dw.ads_case_loop WHERE case_id = :case_id_str) AS snap_product_type,
+        (SELECT repayment_records::text FROM dw.ads_case_loop WHERE case_id = :case_id_str) AS snap_repayment,
+        (SELECT create_time IS NOT NULL FROM dw.ads_case_loop WHERE case_id = :case_id_str) AS snap_has_create_time
     """
 )
 
@@ -167,7 +187,10 @@ async def seed() -> None:
                     "phone_hash": PHONE_HASH,
                     "overdue_amount": OVERDUE_AMOUNT,
                     "overdue_days": OVERDUE_DAYS,
-                    "account_stage": ACCOUNT_STAGE},
+                    "account_stage": ACCOUNT_STAGE,
+                    "product_type": PRODUCT_TYPE,
+                    "repayment_records": REPAYMENT_RECORDS,
+                },
             )
             await conn.execute(
                 _UPSERT_CALL,
@@ -190,9 +213,6 @@ async def seed() -> None:
                 _UPSERT_SNAPSHOT,
                 {
                     "case_id": CASE_ID,
-                    "customer_name": CUSTOMER_NAME,
-                    "overdue_amount": OVERDUE_AMOUNT,
-                    "overdue_days": OVERDUE_DAYS,
                     "session_id": SESSION_ID,
                 },
             )
@@ -212,14 +232,24 @@ async def seed() -> None:
         f"dialog_turns={row['turns_cnt']} ads_case_loop={row['snapshot_cnt']} "
         f"call_ended={row['call_ended']!r}"
     )
+    print(
+        "  snapshot new cols -> "
+        f"product_type={row['snap_product_type']!r} "
+        f"repayment_records={row['snap_repayment']!r} "
+        f"has_create_time={row['snap_has_create_time']}"
+    )
     if not (
         row["cases_cnt"] == 1
         and row["calls_cnt"] == 1
         and row["turns_cnt"] == len(_DIALOG_TURNS)
         and row["snapshot_cnt"] == 1
         and row["call_ended"] == "1"
+        # 0014 新列自检：三列均应有业务值（非空串/空列表/NULL）
+        and row["snap_product_type"] not in (None, "")
+        and row["snap_repayment"] not in (None, "[]", "null")
+        and row["snap_has_create_time"] is True
     ):
-        raise SystemExit("种子自检失败：四张表计数或 call_ended 不符合预期，请检查数据。")
+        raise SystemExit("种子自检失败：四张表计数、call_ended 或快照新三列不符合预期，请检查数据。")
 
 
 if __name__ == "__main__":

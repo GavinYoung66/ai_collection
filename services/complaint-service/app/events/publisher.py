@@ -10,6 +10,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+import structlog
+
+logger = structlog.get_logger()
+
 # 业务频道目录（仅文档性枚举，publish 不做强制校验）：
 # 4 主频道 + 扩展 topic。韧性事件（csmp.rate_limit.hit / csmp.circuit_breaker.open /
 # csmp.degrade.triggered 等，命名见 common.resilience.hooks）不经此清单，
@@ -44,6 +48,12 @@ class EventPublisher:
             payload = {**payload, "trace_id": str(uuid.uuid4())}
         with self._lock:
             self._events.append(EventRecord(topic=topic, payload=payload))
+        # 落 stdout 日志，使韧性事件（csmp.rate_limit.hit / csmp.circuit_breaker.open 等）
+        # 在 docker logs 可检索可告警；日志失败绝不影响内存断言主流程
+        try:
+            logger.info(topic, **payload)
+        except Exception:  # noqa: BLE001
+            pass
 
     def list_events(self, topic: str | None = None) -> list[EventRecord]:
         with self._lock:

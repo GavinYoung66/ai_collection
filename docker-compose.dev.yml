@@ -125,6 +125,8 @@ services:
       REDIS_PORT: "6379"
       # 最小闭环事件（etl.task.done/qc.check.completed）与 qc-service 同实例同库；禁止 0 号库
       QC_REDIS_DB: "3"
+      # Docker 网络内用 service name + 内部端口（8000），不用 localhost:8006（宿主机映射）
+      COMPLAINT_SERVICE_URL: "http://complaint-service:8000/api/v1"
     volumes:
       - ./services/data-platform/app:/app/app
       - ./common:/app/common

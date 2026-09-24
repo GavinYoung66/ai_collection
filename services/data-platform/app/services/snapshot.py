@@ -1,4 +1,4 @@
-"""dw.ads_case_loop 快照读写：一行一 case_id，恰好 14 列。
+"""dw.ads_case_loop 快照读写：一行一 case_id，恰好 17 列。
 
 - GET：只读返回整行，供投诉进程内桥反查 session_id。
 - PUT：内部回写口只更新投诉三列（complaint_id/verdict/task_status），
@@ -17,7 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 
-# 快照表固定 14 列（英文列名），顺序即对外 data 的键顺序。
+# 快照表固定 17 列（英文列名），顺序即对外 data 的键顺序。
+# 0014 新增 product_type/repayment_records/create_time 供 business_ticket 桥读取。
 SNAPSHOT_COLUMNS: tuple[str, ...] = (
     "case_id",
     "customer_name",
@@ -33,13 +34,17 @@ SNAPSHOT_COLUMNS: tuple[str, ...] = (
     "verdict",
     "task_status",
     "backflow_at",
+    "product_type",
+    "repayment_records",
+    "create_time",
 )
 
 _SQL_GET = text(
     """
     SELECT case_id, customer_name, overdue_amount, overdue_days, session_id, call_ended,
            qc_record_id, compliance_score, risk_level, has_high_alert,
-           complaint_id, verdict, task_status, backflow_at
+           complaint_id, verdict, task_status, backflow_at,
+           product_type, repayment_records, create_time
     FROM dw.ads_case_loop
     WHERE case_id = :case_id
     """

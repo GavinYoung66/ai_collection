@@ -16,8 +16,18 @@ from pydantic import BaseModel
 
 from app.config import settings
 from app.llm.router import ModelRouter
-from common.llm.reliability import call_with_retry, is_placeholder_secret
+from common.llm.reliability import (
+    LLMRateLimitError,
+    call_with_retry,
+    is_placeholder_secret,
+    resolve_service_name,
+)
 from common.llm.transport import message_content_from_completions, post_chat_completions
+from common.resilience.rate_limit import allow as rate_limit_allow
+
+# LLM 模型维限流参数：与 common.llm.reliability.invoke_llm 口径一致（60 次/60s/模型）
+_LLM_RATE_LIMIT = 60
+_LLM_RATE_WINDOW = 60
 
 logger = structlog.get_logger()
 
@@ -260,6 +270,24 @@ class RealLLMTransport:
         # 熔断/降级判定统一由 common invoke_llm 的 per-model 熔断器承担
         # （csmp:llm_degraded:{model}），transport 层不再设置任何全局降级门，
         # 避免全局键短路整条 fallback_chain（见 llm-layer spec MODIFIED）。
+
+        # LLM 模型维限流：本 transport 直调 call_with_retry、不经 invoke_llm 编排，
+        # 此前 {svc}:llm_ratelimit:{model}（60/60s）在真路径缺失，此处按同 key 口径补齐。
+        # Redis 故障或服务名未配置时静默放行（与零件降级语义一致），不阻断业务。
+        try:
+            _svc = resolve_service_name()
+        except Exception:  # noqa: BLE001
+            _svc = "csmp"
+        if not await rate_limit_allow(
+            f"{_svc}:llm_ratelimit:{model}",
+            limit=_LLM_RATE_LIMIT,
+            window=_LLM_RATE_WINDOW,
+            context={"trace_id": trace_id, "node": agent_role or "llm"},
+        ):
+            raise LLMRateLimitError(
+                f"LLM rate limit exceeded: {_svc}:llm_ratelimit:{model}"
+            )
+
         async def _once() -> dict:
             try:
                 body = await post_chat_completions(

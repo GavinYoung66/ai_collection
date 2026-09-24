@@ -32,14 +32,16 @@ _SUPPORTED_TOOLS = frozenset(
     {"query_case_info", "query_history_tickets", "query_history_complaints"}
 )
 
-# 快照 404 时的兜底：cases 表无 product_type 列，不伪造；只取真实存在的列。
+# 快照 404 时的兜底：cases 表 0014 后有 product_type/repayment_records/create_time 列。
 _SQL_CASE_FALLBACK = text(
     """
     SELECT id::text AS case_id,
            customer_name,
            overdue_amount,
            overdue_days,
-           create_time
+           create_time,
+           product_type,
+           repayment_records
     FROM cases
     WHERE id = CAST(:case_id AS uuid)
       AND is_delete = '0'
@@ -102,9 +104,11 @@ class BusinessTicketBridge:
 
 
 def _map_snapshot_to_fixture(case_id: str, snap: Any) -> dict[str, Any]:
-    """快照 14 列 → fixture 形状。
+    """快照 17 列 → fixture 形状。
 
-    快照表无 product_type/create_time 列：给空串/None，禁止编造。
+    0014 后快照表含 product_type/repayment_records/create_time 三列，
+    从快照读实际业务值，不再固定填空串/空列表。
+    仅当快照行对应列确为 NULL 时才返回空值（spec mcp-real-path）。
     customer_name 在快照中已是脱敏值，直接使用。
     """
     snap = snap if isinstance(snap, dict) else {}
@@ -112,9 +116,9 @@ def _map_snapshot_to_fixture(case_id: str, snap: Any) -> dict[str, Any]:
         "case_id": str(snap.get("case_id") or case_id),
         "overdue_amount": _num(snap.get("overdue_amount")),
         "overdue_days": _int(snap.get("overdue_days")),
-        "repayment_records": [],
+        "repayment_records": snap.get("repayment_records") or [],
         "customer_name": str(snap.get("customer_name") or ""),
-        "product_type": "",
+        "product_type": str(snap.get("product_type") or ""),
         "create_time": snap.get("create_time"),
     }
 
@@ -161,11 +165,11 @@ async def _fallback_read_cases(case_id: str, *, trace_id: str) -> dict[str, Any]
         "case_id": str(row["case_id"]),
         "overdue_amount": _num(row["overdue_amount"]),
         "overdue_days": _int(row["overdue_days"]),
-        "repayment_records": [],
+        "repayment_records": row.get("repayment_records") or [],
         # cases.customer_name 为明文，出桥前必须脱敏
         "customer_name": mask_name(str(row["customer_name"] or "")),
-        # public.cases 无 product_type 列
-        "product_type": "",
+        # 0014 后 cases 表有 product_type 列
+        "product_type": str(row.get("product_type") or ""),
         "create_time": _iso_shanghai(row["create_time"]),
     }
 
