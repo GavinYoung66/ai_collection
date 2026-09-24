@@ -3,7 +3,10 @@
 图节点仍只调 ``mcp.call("business_ticket", tool, …)``；本桥：
 - query_case_info：data-platform 快照 → fixture 形状；快照 404 fallback 读 public.cases
 - query_history_tickets / query_history_complaints：本闭环无历史表，恒返 []
-查无/异常不返 500（传输错抛 MCPError 由图节点既有 except 兜底）。
+
+容错（spec mcp-real-path 4.2）：查不到或下游故障（404/5xx/超时/DB 错）
+一律返默认 fixture（零值字段，不伪造数据）并记可查日志，图继续执行、不裸返 500；
+仅对编程错误（不支持的 tool、缺 case_id）抛 MCPError 快速失败。
 """
 from __future__ import annotations
 
@@ -18,7 +21,7 @@ from sqlalchemy import text
 
 from common.security.mask import mask_name
 from app.mcp.bridge_http import BridgeHttpClient, BridgeNotFound
-from app.mcp.errors import MCPError
+from app.mcp.errors import MCPError, MCPTimeoutError
 
 logger = structlog.get_logger()
 
@@ -87,6 +90,15 @@ class BusinessTicketBridge:
                 "case_snapshot_miss_fallback_cases", case_id=case_id, trace_id=trace_id
             )
             return await _fallback_read_cases(case_id, trace_id=trace_id)
+        except (MCPTimeoutError, MCPError) as e:
+            # 4.2：data-platform 故障（5xx/超时）→ 默认 fixture（零值，不伪造），图继续执行
+            logger.warning(
+                "case_snapshot_error_default_fixture",
+                case_id=case_id,
+                error=str(e),
+                trace_id=trace_id,
+            )
+            return _default_case_fixture(case_id)
 
 
 def _map_snapshot_to_fixture(case_id: str, snap: Any) -> dict[str, Any]:
@@ -107,20 +119,43 @@ def _map_snapshot_to_fixture(case_id: str, snap: Any) -> dict[str, Any]:
     }
 
 
+def _default_case_fixture(case_id: str) -> dict[str, Any]:
+    """4.2 容错默认值：零值字段、空串/空列表/None，禁止伪造业务数据。"""
+    return {
+        "case_id": case_id,
+        "overdue_amount": 0.0,
+        "overdue_days": 0,
+        "repayment_records": [],
+        "customer_name": "",
+        "product_type": "",
+        "create_time": None,
+    }
+
+
 async def _fallback_read_cases(case_id: str, *, trace_id: str) -> dict[str, Any]:
-    """快照查不到：fallback 读 public.cases 同一行；仍查不到抛 MCPError（节点兜底，非 500）。"""
+    """快照查不到：fallback 读 public.cases 同一行。
+
+    DB 故障或 cases 表同样查无 → 返默认 fixture（不抛 500，spec 4.2），
+    由日志保留可审计痕迹；后续研判节点按证据缺失处理。
+    """
     from common.db.session import async_session_factory
 
     try:
         async with async_session_factory() as db:
             result = await db.execute(_SQL_CASE_FALLBACK, {"case_id": case_id})
             row = result.mappings().first()
-    except Exception as e:  # DB 不可达属服务故障，交给节点既有 except
-        raise MCPError(_SERVER, "query_case_info", f"fallback cases query failed: {e}") from e
+    except Exception as e:
+        logger.warning(
+            "case_fallback_db_error_default_fixture",
+            case_id=case_id,
+            error=str(e),
+            trace_id=trace_id,
+        )
+        return _default_case_fixture(case_id)
 
     if row is None:
         logger.warning("case_not_found_in_snapshot_or_cases", case_id=case_id, trace_id=trace_id)
-        raise MCPError(_SERVER, "query_case_info", f"case not found: {case_id}")
+        return _default_case_fixture(case_id)
 
     return {
         "case_id": str(row["case_id"]),

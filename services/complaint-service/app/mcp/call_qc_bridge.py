@@ -4,7 +4,10 @@
 质检服务不实现 call_qc 工具；本桥在投诉进程内：
 - query_call_asr：快照反查 session_id → data-platform qc-source → fixture 列表
 - query_qc_violations：快照反查 session_id → qc-service 台账明细 → fixture 列表
-任何一环查不到返空列表，不返 500。
+
+容错（spec mcp-real-path 4.2）：任何查不到或下游故障（404/5xx/超时/传输错）
+一律返空列表并记可查日志，图继续执行、不裸返 500；仅对编程错误
+（不支持的 tool、缺 case_id）抛 MCPError 快速失败。
 """
 from __future__ import annotations
 
@@ -14,7 +17,7 @@ import httpx
 import structlog
 
 from app.mcp.bridge_http import BridgeHttpClient, BridgeNotFound
-from app.mcp.errors import MCPError
+from app.mcp.errors import MCPError, MCPTimeoutError
 
 logger = structlog.get_logger()
 
@@ -67,6 +70,12 @@ class CallQcBridge:
         except BridgeNotFound:
             logger.info("call_qc_snapshot_miss", case_id=case_id, trace_id=trace_id)
             return None
+        except (MCPTimeoutError, MCPError) as e:
+            # 4.2：data-platform 故障（5xx/超时）→ 无 session 可反查，返空不崩图
+            logger.warning(
+                "call_qc_snapshot_error", case_id=case_id, error=str(e), trace_id=trace_id
+            )
+            return None
         if not isinstance(snap, dict):
             return None
         sid = str(snap.get("session_id") or "")
@@ -81,6 +90,12 @@ class CallQcBridge:
             )
         except BridgeNotFound:
             logger.info("call_asr_qc_source_miss", session_id=session_id, trace_id=trace_id)
+            return []
+        except (MCPTimeoutError, MCPError) as e:
+            # 4.2：下游故障返空列表（默认值），图继续执行，不裸返 500
+            logger.warning(
+                "call_asr_qc_source_error", session_id=session_id, error=str(e), trace_id=trace_id
+            )
             return []
 
         return map_qc_source_to_asr_fixture(source)
@@ -97,8 +112,26 @@ class CallQcBridge:
         except BridgeNotFound:
             logger.info("qc_violations_record_miss", session_id=session_id, trace_id=trace_id)
             return []
+        except (MCPTimeoutError, MCPError) as e:
+            # 4.2：qc-service 故障返空列表（默认值），图继续执行，不裸返 500
+            logger.warning(
+                "qc_violations_record_error", session_id=session_id, error=str(e), trace_id=trace_id
+            )
+            return []
 
         return map_qc_record_to_violations_fixture(detail)
+
+
+def normalize_speaker(raw: Any) -> str:
+    """speaker 归一为 fixture 枚举：ai/human/agent → agent，user → user。
+
+    data-platform map_speaker 已做一次归一；桥层再兜底，防止任何上游漏网
+    的 ai/human 原值进入证据包（fixture 只认 agent/user）。
+    """
+    value = str(raw or "").strip().lower()
+    if value == "user":
+        return "user"
+    return "agent"
 
 
 def map_qc_source_to_asr_fixture(source: Any) -> list[dict[str, Any]]:
@@ -106,7 +139,7 @@ def map_qc_source_to_asr_fixture(source: Any) -> list[dict[str, Any]]:
 
     - duration_seconds 缺失或 ≤0 不组装（fixture 要求 call_duration>0）
     - turns 无逐句时间戳：ts 给空串，禁止编造
-    - speaker 已由 data-platform map_speaker 归一（ai/human→agent），此处保持
+    - speaker 桥层归一：ai/human→agent（不依赖上游一定已归一）
     """
     if not isinstance(source, dict):
         return []
@@ -126,7 +159,7 @@ def map_qc_source_to_asr_fixture(source: Any) -> list[dict[str, Any]]:
         asr_items.append(
             {
                 "ts": "",
-                "speaker": str(turn.get("speaker") or "agent"),
+                "speaker": normalize_speaker(turn.get("speaker")),
                 "text": str(turn.get("text") or ""),
             }
         )

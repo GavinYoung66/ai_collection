@@ -435,3 +435,142 @@ async def test_fail_shutdown_guards_terminal_and_existing_review():
         assert session_service.transition(sid3, nxt) is True
     assert await complaint_service.fail_shutdown(cid3) is False
     assert complaint_service.get(cid3)["task_status"] == "resolved"
+
+
+# ── N4：_resume_locks per-complaint 锁回收，避免 dict 随工单量无界增长 ──
+
+
+@pytest.mark.asyncio
+async def test_n4_resume_lock_released_after_single_holder():
+    """单路 resume：持锁末尾无等待者 → 释放前回收登记。"""
+    from app.service import complaint_service as cs
+
+    cid = "n4-lock-single-001"
+    cs._resume_locks.pop(cid, None)
+    lock = cs._resume_lock(cid)
+    assert cid in cs._resume_locks
+    async with lock:
+        cs._release_resume_lock(cid, lock)
+    assert cid not in cs._resume_locks
+
+
+@pytest.mark.asyncio
+async def test_n4_resume_lock_dual_drive_serialized_and_cleaned():
+    """双路 resume 同一工单：严格串行；第一路结束时第二路在排队故保留，
+    第二路结束无等待者才回收。"""
+    from app.service import complaint_service as cs
+
+    cid = "n4-lock-dual-001"
+    cs._resume_locks.pop(cid, None)
+    order = []
+
+    async def worker(tag: str) -> None:
+        lock = cs._resume_lock(cid)
+        async with lock:
+            try:
+                order.append(f"{tag}-enter")
+                await asyncio.sleep(0.05)
+                order.append(f"{tag}-exit")
+            finally:
+                cs._release_resume_lock(cid, lock)
+
+    t1 = asyncio.create_task(worker("a"))
+    await asyncio.sleep(0.01)  # a 已持锁
+    t2 = asyncio.create_task(worker("b"))
+    await asyncio.sleep(0.01)  # b 已在 _waiters 排队
+    assert cid in cs._resume_locks  # 有等待者，登记必须保留
+
+    await asyncio.gather(t1, t2)
+    assert order == ["a-enter", "a-exit", "b-enter", "b-exit"]  # 从不并发
+    assert cid not in cs._resume_locks
+
+
+@pytest.mark.asyncio
+async def test_n4_resume_lock_many_complaints_no_registry_growth():
+    """大量不同工单各 resume 一次后，注册表归零。"""
+    from app.service import complaint_service as cs
+
+    async def one(cid: str) -> None:
+        lock = cs._resume_lock(cid)
+        async with lock:
+            await asyncio.sleep(0)
+            cs._release_resume_lock(cid, lock)
+
+    await asyncio.gather(*(one(f"n4-lock-many-{i:03d}") for i in range(50)))
+    assert not [k for k in cs._resume_locks if k.startswith("n4-lock-many-")]
+
+
+# ── N6：双驱动落败路 resume 即时返回，不空轮询 120s ──
+
+
+@pytest.mark.asyncio
+async def test_n6_duplicate_resume_returns_immediately(monkeypatch):
+    """第二路 resume 拿到锁时断点已被消费（next 空 + human_review 有 review_action）
+    → 不调 Command(resume)、秒级返回，而非轮询满 120s 刷 warning。"""
+    import time
+
+    import app.graph.builder as builder
+    from app.service import complaint_service as cs
+
+    cid = "n6-dup-resume-001"
+    cs._graph_inflight.discard(cid)
+    cs._resume_locks.pop(cid, None)
+
+    class _FakeSnapshot:
+        def __init__(self, next_, values):
+            self.next = next_
+            self.values = values
+
+    class _FakeGraph:
+        def __init__(self):
+            self.ainvoke_calls = 0
+
+        async def aget_state(self, config):
+            return _FakeSnapshot((), {"human_review": {"review_action": "approve"}})
+
+        async def ainvoke(self, command, config=None):
+            self.ainvoke_calls += 1
+
+    fake = _FakeGraph()
+    monkeypatch.setattr(builder, "build_complaint_graph", lambda checkpointer=None: fake)
+
+    t0 = time.monotonic()
+    await cs.complaint_service._resume_graph_thread(cid, "sess-n6")
+    elapsed = time.monotonic() - t0
+
+    assert fake.ainvoke_calls == 0  # 不重复 resume
+    assert elapsed < 5.0  # 远小于 120s
+    assert cid not in cs._resume_locks  # 锁登记同步回收
+
+
+@pytest.mark.asyncio
+async def test_n6_pending_interrupt_still_resumes(monkeypatch):
+    """反例：断点仍挂起（next 含 human_review）时正常 Command(resume)，不误跳过。"""
+    import app.graph.builder as builder
+    from app.service import complaint_service as cs
+
+    cid = "n6-pending-resume-001"
+    cs._graph_inflight.discard(cid)
+    cs._resume_locks.pop(cid, None)
+
+    class _FakeSnapshot:
+        def __init__(self, next_, values):
+            self.next = next_
+            self.values = values
+
+    class _FakeGraph:
+        def __init__(self):
+            self.ainvoke_calls = 0
+
+        async def aget_state(self, config):
+            return _FakeSnapshot(("human_review",), {})
+
+        async def ainvoke(self, command, config=None):
+            self.ainvoke_calls += 1
+
+    fake = _FakeGraph()
+    monkeypatch.setattr(builder, "build_complaint_graph", lambda checkpointer=None: fake)
+
+    await cs.complaint_service._resume_graph_thread(cid, "sess-n6-ok")
+    assert fake.ainvoke_calls == 1
+    assert cid not in cs._resume_locks

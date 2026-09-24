@@ -113,14 +113,28 @@ class TestSampleBackflow:
         out = asyncio.run(sample_backflow_node(_state()))
         assert out == {}
 
-    def test_retry_does_not_block(self):
+    def test_payload_task_status_uses_enum_bare_value(self):
+        """4.3：回写快照的 task_status 必须是裸值 resolved，禁止 TaskStatus.resolved repr。"""
+        s = _state(task_status=TaskStatus.resolved)
+        with patch("app.graph.nodes.sample_backflow.get_mcp_client") as gm:
+            gm.return_value.call = AsyncMock(return_value={"success": True})
+            asyncio.run(sample_backflow_node(s))
+        for c in gm.return_value.call.await_args_list:
+            payload = c.args[2]
+            assert payload["task_status"] == "resolved"
+
+    def test_failure_does_not_block_and_no_node_level_retry_n5(self):
+        """N5：重试只有桥内单层（3 次 + 入队）。桥外传输每失败一次，
+        节点对每 tool 只调一次（两个 tool 共 2 次），不重试、不抛异常。"""
         async def _boom(*a, **k):
-            raise MCPError("data_platform", "write_session", "boom")
+            raise MCPError("data_platform", a[1] if len(a) > 1 else "write_session", "boom")
 
         with patch("app.graph.nodes.sample_backflow.get_mcp_client") as gm:
             gm.return_value.call = AsyncMock(side_effect=_boom)
             out = asyncio.run(sample_backflow_node(_state()))
         assert out == {}
+        called_tools = [c.args[1] for c in gm.return_value.call.await_args_list]
+        assert called_tools == ["write_session", "write_human_review_truth"]
 
 
 class TestJudgmentFanout:

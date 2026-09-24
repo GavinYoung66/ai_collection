@@ -12,6 +12,7 @@ from typing import Optional
 
 import structlog
 
+from app.config import settings
 from app.events.publisher import publisher
 from app.models.state import ReviewAction, TaskStatus, VerdictType
 from app.service.rate_limiter import rate_limiter
@@ -20,9 +21,56 @@ from app.service.session_service import session_service
 
 logger = structlog.get_logger()
 
-# 进程级 MemorySaver：judge 的 checkpointer 按 complaint_id (thread_id=sid) 留在投诉进程内，
+
+class ComplaintPersistError(Exception):
+    """投诉工单落 PostgreSQL 失败（路由须返回明确错误，禁止静默成功）。"""
+
+# 进程级 MemorySaver：judge 的 checkpointer 按 thread_id=complaint_id 留在投诉进程内，
 # 禁止请求结束就丢弃。review approve 时对同一线程 Command(resume="approve") 恢复图。
 _graph_checkpointer = None
+
+# G2 幂等守卫：resume 前等图进入 human_review 断点的轮询参数。
+# judge 真图含多轮真实 LLM 调用（reflection/verdict/generate_package 等），
+# 正常 ~40s 内入断点；给 120s 上限覆盖慢模型/重试，间隔 1s 不密集打 checkpoint。
+_RESUME_WAIT_TIMEOUT_S = 120.0
+_RESUME_WAIT_INTERVAL_S = 1.0
+
+# G1b 图执行在途登记：同一 complaint_id 同一时刻只允许一张图在跑。
+# data-platform 订阅者与验收脚本双重驱动 + judge 内部 HTTP 5s 超时重试，
+# 会在真图（~40s）结束前重复 POST /judge；若并发跑第二遍，同一 thread_id 的
+# checkpoint 会被两路 astream 交替覆写（分叉），随后 review 的 Command(resume)
+# 恢复不到 human_review 断点，sample_backflow/write_session 永不执行。
+_graph_inflight: set[str] = set()
+
+# resume 互斥：同工单可能被多处 review approve 调度（订阅者 + 验收脚本），
+# 并发 resume 会双跑 human_review→sample_backflow；按 complaint_id 串行化。
+_resume_locks: dict[str, asyncio.Lock] = {}
+
+# _release_resume_lock 探测 asyncio.Lock._waiters 时的"无此属性"哨兵
+_RESUME_LOCK_ATTR_MISSING = object()
+
+
+def _resume_lock(complaint_id: str) -> asyncio.Lock:
+    lock = _resume_locks.get(complaint_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _resume_locks[complaint_id] = lock
+    return lock
+
+
+def _release_resume_lock(complaint_id: str, lock: asyncio.Lock) -> None:
+    """无排队等待者时回收 per-complaint 锁，避免 dict 随工单量无界增长。
+
+    调用时机硬约束：必须在仍持有该锁、且调用后到锁实际释放之间无 await。
+    协程一旦从 ``_resume_lock`` 取到本实例，下一句即 ``async with`` 排队，
+    中间无 await，故此刻不在 ``_waiters`` 里的协例不可能持有本实例，
+    删除登记不会导致后来者另建新锁而绕过互斥。
+    运行时无 ``_waiters`` 属性时不回收（退化为旧行为，仅缓慢占内存）。
+    CPython 3.11 中 ``_waiters`` 空闲为 None、有等待者时为非空 deque。
+    """
+    waiters = getattr(lock, "_waiters", _RESUME_LOCK_ATTR_MISSING)
+    if waiters is not _RESUME_LOCK_ATTR_MISSING and not waiters:
+        _resume_locks.pop(complaint_id, None)
 
 
 def _get_graph_checkpointer():
@@ -32,6 +80,11 @@ def _get_graph_checkpointer():
         from langgraph.checkpoint.memory import MemorySaver
         _graph_checkpointer = MemorySaver()
     return _graph_checkpointer
+
+
+def is_graph_inflight(complaint_id: str) -> bool:
+    """同工单真图是否正在执行（路由层幂等 no-op 判定）。"""
+    return complaint_id in _graph_inflight
 
 
 class ComplaintNotFound(Exception):
@@ -92,6 +145,85 @@ class ComplaintService:
         rec["case_id"] = case_id
         rec["channel"] = channel
         return rec
+
+    async def create_async(self, complaint_text: str, session_id: Optional[str] = None,
+                           case_id: Optional[str] = None, channel: str = "phone") -> dict:
+        """创建入口（FastAPI 路由使用）：内存会话 + 真路径 PostgreSQL 持久化。
+
+        - USE_MOCK_MCP=true：仅内存（mock 主路径，测试不依赖 PG）；
+        - USE_MOCK_MCP=false：同事务 SELECT 幂等 + INSERT complaints，
+          成功 commit、失败 rollback 并抛 ComplaintPersistError（明确错误，不静默）。
+        """
+        rec = self.create(
+            complaint_text, session_id=session_id, case_id=case_id, channel=channel
+        )
+        if not getattr(settings, "USE_MOCK_MCP", True):
+            await self._persist_complaint_row(rec, complaint_text)
+        return rec
+
+    async def _persist_complaint_row(self, rec: dict, complaint_text: str) -> None:
+        """将工单写入 public.complaints（ORM 映射，见 app.models.complaint.Complaint）。
+
+        - complaint_id 现有行为等于 case_id，complaints.id 显式取 case_id，
+          与 GET /api/v1/complaints/{complaint_id}、快照回写 complaint_id 对齐；
+        - 幂等：同 case_id 且 is_delete='0' 已有行则跳过，不产生第二张工单；
+        - session_id 不落库（闭环创建不传通话 session_id，避免 FK 指向随机 uuid）。
+        """
+        import uuid as _uuid
+
+        from sqlalchemy import select
+
+        from app.models.complaint import Complaint
+        from common.db.session import async_session_factory
+
+        cid = str(rec["complaint_id"])
+        case_id = str(rec.get("case_id") or cid)
+        try:
+            case_uuid = _uuid.UUID(case_id)
+        except ValueError as e:
+            raise ComplaintPersistError(f"case_id 非法 UUID: {case_id}") from e
+
+        db = async_session_factory()
+        try:
+            async with db:
+                existing = await db.execute(
+                    select(Complaint)
+                    .where(Complaint.case_id == case_uuid)
+                    .limit(1)
+                )
+                row = existing.scalar_one_or_none()
+                if row is not None:
+                    if row.is_delete == "0":
+                        # 幂等 no-op，不插第二行
+                        logger.info("complaint_persist_idempotent_hit", case_id=case_id)
+                        return
+                    # 软删行存在：恢复为活跃行（软删后重建同 id 工单）
+                    row.is_delete = "0"
+                    row.complaint_text = complaint_text
+                    row.status = "pending"
+                    await db.commit()
+                    logger.info("complaint_persist_restored", case_id=case_id)
+                    return
+                db.add(
+                    Complaint(
+                        id=case_uuid,
+                        case_id=case_uuid,
+                        complaint_text=complaint_text,
+                        status="pending",
+                    )
+                )
+                await db.commit()
+                logger.info("complaint_persisted", complaint_id=cid, case_id=case_id)
+        except ComplaintPersistError:
+            raise
+        except Exception as e:
+            # 连接失败/约束违反等：显式回滚未提交事务，禁止留半截行
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            logger.exception("complaint_persist_failed", case_id=case_id, error=str(e))
+            raise ComplaintPersistError(f"投诉工单落库失败: {e}") from e
 
     def seed_demo(self) -> list[dict]:
         """Create V2-scenario complaints（含 pending 样例，供 V4 验收⑤）。"""
@@ -190,10 +322,19 @@ class ComplaintService:
         """异步研判入口（FastAPI 路由使用）。"""
         if run_graph:
             rec = self.get_or_raise(complaint_id)
+            # G1b 在途守卫：同线程已有真图在跑（HTTP 5s 超时重试/订阅者与脚本双驱动）
+            # → 直接返回当前态，不并发跑第二遍图（避免 checkpoint 分叉导致 resume 失效）
+            if complaint_id in _graph_inflight:
+                logger.info("judge_skip_graph_inflight", complaint_id=complaint_id)
+                return self._sync_from_session(rec)
             # G5 排队 deadline：入队超 10min（queue_start 已失效）→ A5010 转人审，不进图
             if not await rate_limiter.check_queue_deadline(complaint_id):
                 return self._handle_queue_timeout(rec)
-            return await self._judge_with_graph(rec, complaint_id)
+            _graph_inflight.add(complaint_id)
+            try:
+                return await self._judge_with_graph(rec, complaint_id)
+            finally:
+                _graph_inflight.discard(complaint_id)
         return self._judge_stub(complaint_id)
 
     def _handle_queue_timeout(self, rec: dict, node: str = "judge_async") -> dict:
@@ -351,7 +492,7 @@ class ComplaintService:
     async def _judge_with_graph(self, rec: dict, complaint_id: str) -> dict:
         """run_graph=True：编译并执行真图，回写 verdict 等字段，并落单 trace_events。
 
-        使用进程级 MemorySaver（非请求级），使 checkpointer 按 complaint_id (thread_id=sid)
+        使用进程级 MemorySaver（非请求级），使 checkpointer 按 thread_id=complaint_id
         留在投诉进程内。review approve 时对同一线程 Command(resume="approve") 恢复图。
         """
         from langgraph.errors import GraphInterrupt
@@ -385,9 +526,10 @@ class ComplaintService:
             complaint_text=rec.get("complaint_text", ""),
             case_ids=case_ids,
         ).model_dump()
-        # 进程级 checkpointer：judge 停在 human_review 后状态不丢弃，review approve 时可恢复
+        # 进程级 checkpointer：thread_id=complaint_id，judge 停在 human_review 后状态不丢弃，
+        # review approve 时用同一线程 Command(resume="approve") 恢复图进 sample_backflow
         graph = build_complaint_graph(checkpointer=_get_graph_checkpointer())
-        config = {"configurable": {"thread_id": sid}}
+        config = {"configurable": {"thread_id": complaint_id}}
 
         mcp = get_mcp_client()
         llm = get_llm_provider()
@@ -537,9 +679,28 @@ class ComplaintService:
         lf_run.end(outputs=run_outputs, error=run_error)
 
         # 推进 session 状态
-        ok = session_service.transition(sid, TaskStatus.pending_review)
-        if not ok:
-            raise RuntimeError(f"cannot advance session {sid} to pending_review")
+        # G3 幂等守卫：双驱动下 review approve 可能已把 session 推进到 resolved，
+        # 此处（多为重入/超时重试的 judge 完成）再推进 pending_review 属非法迁移，
+        # 幂等跳过而非抛 500——resolved 已是人审确认终态，不回退。
+        _cur_status = session_service.get_status(sid)
+        if _cur_status in (
+            TaskStatus.pending_review.value,
+            TaskStatus.resolved.value,
+            TaskStatus.closed.value,
+            TaskStatus.archived.value,
+        ):
+            logger.info(
+                "judge_advance_skip_already_reviewed",
+                complaint_id=complaint_id,
+                current_status=_cur_status,
+            )
+        else:
+            ok = session_service.transition(sid, TaskStatus.pending_review)
+            if not ok:
+                raise RuntimeError(f"cannot advance session {sid} to pending_review")
+        # spec：judge 返回 SHALL 含 thread_id（= complaint_id），
+        # 供 review approve 用同一线程 Command(resume="approve") 恢复图
+        rec["thread_id"] = complaint_id
         rec = self._sync_from_session(rec)
 
         # 从 graph 终态回写：优先 judgment_package 答辩稿，其次 verdict_draft
@@ -682,19 +843,94 @@ class ComplaintService:
     async def _resume_graph_thread(self, complaint_id: str, session_id: str) -> None:
         """review approve 后恢复图线程 → sample_backflow → write_session。
 
-        使用 judge 时同一进程级 MemorySaver 和 thread_id=sid。
-        不改图节点、不新做路由。
+        使用 judge 时同一进程级 MemorySaver 和 thread_id=complaint_id。
+        不改图节点、不新做路由。session_id 仅用于日志上下文。
+
+        G2 幂等守卫：data-platform 订阅者与验收脚本双重驱动时，review approve
+        可能早于 judge 图跑到 human_review 断点，此时 checkpoint 尚无挂起态，
+        直接 Command(resume) 会空转导致 sample_backflow/write_session 永不执行。
+        故 resume 前先等本工单的 judge 图执行结束，再等 checkpoint 停在
+        human_review 断点（最多轮询 _RESUME_WAIT_TIMEOUT_S）；未入断点则不发
+        resume，避免污染 checkpoint。
         """
         from langgraph.types import Command
-        from app.graph.builder import build_complaint_graph
+        from app.graph.builder import HUMAN_REVIEW, build_complaint_graph
         try:
             graph = build_complaint_graph(checkpointer=_get_graph_checkpointer())
-            config = {"configurable": {"thread_id": session_id}}
-            await graph.ainvoke(Command(resume="approve"), config=config)
+            config = {"configurable": {"thread_id": complaint_id}}
+
+            # G2a：先等 judge 图执行结束（judge 优先，resume 不抢执行权）
+            inflight_waited = 0.0
+            while complaint_id in _graph_inflight and inflight_waited < _RESUME_WAIT_TIMEOUT_S:
+                await asyncio.sleep(0.2)
+                inflight_waited += 0.2
+            if complaint_id in _graph_inflight:
+                logger.warning(
+                    "graph_resume_inflight_timeout",
+                    complaint_id=complaint_id,
+                    session_id=session_id,
+                    waited_s=round(inflight_waited, 3),
+                )
+
+            # G2b：等图真正停在 human_review 断点（next 含 human_review 才是可恢复态）。
+            # 整段 poll+resume 持 resume 锁，避免订阅者与脚本各调度一次时并发双跑。
+            resume_lock = _resume_lock(complaint_id)
+            async with resume_lock:
+                try:
+                    # N6：双驱动（订阅者 + HTTP）争同一把锁，落败路拿到锁时
+                    # 先到的一路已消费 human_review 断点：next 不再含 human_review，
+                    # 且 human_review 结果已写入 state。立即返回，不空轮询 120s 刷 warning。
+                    first_snap = await graph.aget_state(config)
+                    first_next = tuple(getattr(first_snap, "next", None) or ())
+                    first_values = getattr(first_snap, "values", None) or {}
+                    hr_value = first_values.get("human_review")
+                    hr_action = (
+                        hr_value.get("review_action")
+                        if isinstance(hr_value, dict)
+                        else getattr(hr_value, "review_action", None)
+                    )
+                    already_reviewed = bool(
+                        HUMAN_REVIEW not in first_next and hr_action
+                    )
+                    if already_reviewed:
+                        logger.info(
+                            "graph_resume_skip_already_resumed",
+                            complaint_id=complaint_id,
+                            session_id=session_id,
+                            inflight_waited_s=round(inflight_waited, 3),
+                        )
+                        return
+
+                    waited = 0.0
+                    entered = False
+                    while waited < _RESUME_WAIT_TIMEOUT_S:
+                        snap = await graph.aget_state(config)
+                        nxt = tuple(getattr(snap, "next", None) or ())
+                        if HUMAN_REVIEW in nxt:
+                            entered = True
+                            break
+                        await asyncio.sleep(_RESUME_WAIT_INTERVAL_S)
+                        waited += _RESUME_WAIT_INTERVAL_S
+                    if not entered:
+                        logger.warning(
+                            "graph_resume_no_interrupt_after_wait",
+                            complaint_id=complaint_id,
+                            session_id=session_id,
+                            waited_s=waited,
+                        )
+                        return
+
+                    await graph.ainvoke(Command(resume="approve"), config=config)
+                finally:
+                    # N4：持锁末尾回收（其后仅锁释放、无 await，见函数 docstring 约束）
+                    _release_resume_lock(complaint_id, resume_lock)
             logger.info(
                 "graph_resumed_after_approve",
                 complaint_id=complaint_id,
                 session_id=session_id,
+                inflight_waited_s=round(inflight_waited, 3),
+                waited_s=round(waited, 3),
+                entered_interrupt=entered,
             )
         except Exception:
             logger.exception(

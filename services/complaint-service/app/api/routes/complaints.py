@@ -34,8 +34,13 @@ from app.api.schemas.complaint import (
     TraceResponse,
     VerdictResponse,
 )
-from app.service.complaint_service import ComplaintNotFound, complaint_service
+from app.service.complaint_service import (
+    ComplaintNotFound,
+    ComplaintPersistError,
+    complaint_service,
+)
 from app.service.guardrails_postcheck import postcheck
+from app.service.session_service import session_service
 from common.errors.codes import ErrorCode
 
 router = APIRouter(prefix="/complaints", tags=["complaints"])
@@ -43,12 +48,16 @@ router = APIRouter(prefix="/complaints", tags=["complaints"])
 
 @router.post("")
 async def create_complaint(req: ComplaintCreateRequest, request: Request):
-    rec = complaint_service.create(
-        complaint_text=req.complaint_text,
-        session_id=req.session_id,
-        case_id=req.case_id,
-        channel=req.channel,
-    )
+    try:
+        rec = await complaint_service.create_async(
+            complaint_text=req.complaint_text,
+            session_id=req.session_id,
+            case_id=req.case_id,
+            channel=req.channel,
+        )
+    except ComplaintPersistError as e:
+        # 落库失败：明确错误码 + 信息，禁止 200 静默成功但 DB 无行
+        return fail(ErrorCode.B0007, str(e), request=request)
     data = ComplaintCreateResponse(
         complaint_id=rec["complaint_id"],
         task_status=rec["task_status"],
@@ -178,6 +187,32 @@ async def judge_complaint(complaint_id: str, request: Request, req: JudgeRequest
         return fail(
             ErrorCode.B0006, "请求过于频繁，请稍后再试", request=request
         )
+    # G1 幂等守卫：judge HTTP 5s 超时重试/订阅者与脚本双重驱动时，
+    # session 已进入研判流水线（evidence_gathering/judging/draft_generated/
+    # pending_review）说明已有在途或已完成的研判 → 200 no-op 返回当前态，
+    # 不重入跑第二遍图（避免重复 LLM 调用与状态迁移冲突）。
+    if run_graph:
+        from app.models.state import TaskStatus as _TS
+        from app.service.complaint_service import is_graph_inflight
+
+        _cur = complaint_service.get_or_raise(complaint_id)
+        _sid = _cur["session_id"]
+        _in_pipeline = session_service.get_status(_sid) in (
+            _TS.evidence_gathering.value,
+            _TS.judging.value,
+            _TS.draft_generated.value,
+            _TS.pending_review.value,
+        )
+        if _in_pipeline or is_graph_inflight(complaint_id):
+            data = JudgeResponse(
+                complaint_id=complaint_id,
+                task_status=_cur["task_status"],
+                verdict=_cur.get("verdict"),
+                thread_id=complaint_id,
+                message="judge already in progress or done (idempotent no-op)",
+            )
+            return success(data=data.model_dump(mode="json"), request=request)
+
     outcome = await rate_limiter.acquire_complaint(complaint_id)
     try:
         if outcome == OUTCOME_FULL:
@@ -208,6 +243,7 @@ async def judge_complaint(complaint_id: str, request: Request, req: JudgeRequest
         complaint_id=rec["complaint_id"],
         task_status=rec["task_status"],
         verdict=rec["verdict"],
+        thread_id=rec.get("thread_id"),
         message="judge accepted (graph)" if run_graph else "judge accepted (stub)",
     )
     return success(data=data.model_dump(mode="json"), request=request)

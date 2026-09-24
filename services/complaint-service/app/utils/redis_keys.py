@@ -131,9 +131,12 @@ def callback_dlq_key() -> str:
 
 
 # ── 12. 样本回流失败重试队列（批次8，零丢失） ──
+# 投诉服务内部工作队列：生产方与消费方（backflow_service）都在 complaint-service 内，
+# 故走本服务 REDIS_DB（common.resilience get_redis，配置驱动），
+# 不是跨服务事件总线（etl.task.done / qc.check.completed 才固定 Redis 3 号库）。
 BACKFLOW_RETRY_KEY = f"{PREFIX}backflow:retry"  # LIST，人工介入前不丢
 
 
 def backflow_retry_key() -> str:
-    """csmp:backflow:retry —— LIST，零丢失暂存。"""
+    """csmp:backflow:retry —— LIST，零丢失暂存（投诉服务内部队列，非 3 号库事件总线）。"""
     return BACKFLOW_RETRY_KEY

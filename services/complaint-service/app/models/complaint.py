@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from sqlalchemy import Boolean, CheckConstraint, Column, Float, ForeignKey, String, Text
+from sqlalchemy import Boolean, CheckConstraint, Column, Float, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from common.db.base import Base, PublicFieldsMixin
@@ -28,15 +28,11 @@ class Complaint(Base, PublicFieldsMixin):
 
     __tablename__ = "complaints"
 
-    case_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("cases.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    session_id = Column(
-        String(100),
-        ForeignKey("call_records.session_id", ondelete="CASCADE"),
-    )
+    # 注意：cases / call_records 仅有 0001 raw SQL 建表、无同 metadata ORM 模型，
+    # 此处不能声明 ForeignKey("cases.id")，否则 mapper configure 找不到目标表。
+    # 外键约束以数据库 0001 迁移为准（cases.id ON DELETE CASCADE 等），ORM 只做列映射。
+    case_id = Column(UUID(as_uuid=True), nullable=False)
+    session_id = Column(String(100))
     complaint_text = Column(Text, nullable=False)
     verdict = Column(String(30))
     evidence = Column(JSONB)

@@ -87,6 +87,7 @@ class JudgeResponse(BaseModel):
     complaint_id: str
     task_status: TaskStatus
     verdict: Optional[VerdictType] = None
+    thread_id: Optional[str] = None
     message: str = "judge accepted (stub)"
 
 

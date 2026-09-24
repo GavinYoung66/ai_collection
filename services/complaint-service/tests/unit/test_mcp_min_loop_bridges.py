@@ -22,6 +22,7 @@ from app.mcp.call_qc_bridge import (
     map_qc_source_to_asr_fixture,
 )
 from app.mcp.data_platform_bridge import DataPlatformBridge
+from app.mcp.errors import MCPError
 from app.mcp.real_transport import RealMCPTransport
 from app.utils.redis_keys import backflow_retry_key
 
@@ -175,6 +176,24 @@ def test_map_qc_source_to_asr_fixture():
     assert seg["asr_text_with_timestamp"][0]["ts"] == ""
 
 
+def test_map_qc_source_speaker_normalized_bridge_defense():
+    """2.2：即使上游漏网 ai/human 原值，桥层也归一为 agent（fixture 只认 agent/user）。"""
+    source = {
+        "session_id": _SESSION_ID,
+        "duration_seconds": 60,
+        "turns": [
+            {"turn_id": "t1", "speaker": "ai", "text": "ai 坐席"},
+            {"turn_id": "t2", "speaker": "human", "text": "human 坐席"},
+            {"turn_id": "t3", "speaker": "user", "text": "客户"},
+            {"turn_id": "t4", "speaker": "", "text": "空 speaker 兜底"},
+        ],
+    }
+    speakers = [s["speaker"] for s in map_qc_source_to_asr_fixture(source)[0][
+        "asr_text_with_timestamp"
+    ]]
+    assert speakers == ["agent", "agent", "user", "agent"]
+
+
 def test_map_qc_source_zero_duration_returns_empty():
     assert map_qc_source_to_asr_fixture({"session_id": "s", "duration_seconds": 0}) == []
     assert map_qc_source_to_asr_fixture({"session_id": "s"}) == []
@@ -249,6 +268,39 @@ async def test_call_qc_violations_record_miss_returns_empty():
     out = await bridge.call_tool("query_qc_violations", {"case_id": _CASE_ID})
     await client.aclose()
     assert out == []
+
+
+@pytest.mark.asyncio
+async def test_call_qc_transport_5xx_returns_empty_list_never_raises():
+    """4.2：下游 500 传输错返空列表（默认值），不抛异常、不裸返 500，图继续执行。"""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    bridge = CallQcBridge("http://dp.test", "http://qc.test", client=client)
+    assert await bridge.call_tool("query_call_asr", {"case_id": _CASE_ID}) == []
+    assert await bridge.call_tool("query_qc_violations", {"case_id": _CASE_ID}) == []
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_business_case_info_5xx_returns_default_fixture_never_raises():
+    """4.2：快照 5xx → 默认零值 fixture（不伪造数据），不抛异常、不裸返 500。"""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    bridge = BusinessTicketBridge("http://dp.test", client=client)
+    out = await bridge.call_tool("query_case_info", {"case_id": _CASE_ID})
+    await client.aclose()
+
+    assert out["case_id"] == _CASE_ID
+    assert out["overdue_amount"] == 0.0
+    assert out["overdue_days"] == 0
+    assert out["repayment_records"] == []
+    assert out["customer_name"] == ""
+    assert out["product_type"] == ""
+    assert out["create_time"] is None
 
 
 # ── data_platform 回写 ──
