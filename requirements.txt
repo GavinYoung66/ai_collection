@@ -56,6 +56,17 @@ pybreaker==1.0.2
 # === 配置与日志 ===
 structlog==23.3.0
 
+# === Event Bus（RocketMQ 5.x gRPC 客户端；arm64 spike go）===
+# 验收：pin + `pip install 'rocketmq-python-client==5.1.1'` + `import rocketmq`
+# 注意：
+# 1) 传递依赖 grpcio 可能与 pymilvus==2.4.0 的 grpcio<=1.60 冲突；
+#    全量 `pip install -r requirements.txt` 失败时以定向安装本包为准（tasks 3.3）。
+# 2) 与 langfuse 对 otlp-proto-http 小版本冲突（rocketmq 常拉 otlp==1.33.0，
+#    langfuse 要求 >=1.33.1）——全量 `pip install -r requirements.lock` 可能失败。
+# Docker（qc/data-platform）：先装排除本行的 lock，再装本包 +
+#   opentelemetry-exporter-otlp>=1.33.1（见各服务 Dockerfile）。
+rocketmq-python-client==5.1.1
+
 # === 安全 ===
 cryptography==41.0.7
 pyahocorasick==2.0.0

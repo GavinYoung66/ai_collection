@@ -105,6 +105,87 @@ services:
       retries: 3
       start_period: 60s
 
+  # ===== RocketMQ 5.x（event bus；端口避让 19876/18080/18081；见 design Decision 8）=====
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.3.2
+    ports: ["19876:9876"]
+    command: sh mqnamesrv
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/9876'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  rocketmq-broker:
+    image: apache/rocketmq:5.3.2
+    ports:
+      - "10909:10909"
+      - "10911:10911"
+      - "10912:10912"
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+    volumes:
+      # Config only; store stays in-container (named volume mounts break rocketmq UID perms).
+      - ./deploy/rocketmq/broker.conf:/home/rocketmq/rocketmq-5.3.2/conf/broker.conf:ro
+    depends_on:
+      rocketmq-namesrv:
+        condition: service_healthy
+    command: sh mqbroker -n rocketmq-namesrv:9876 -c /home/rocketmq/rocketmq-5.3.2/conf/broker.conf
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/10911'"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 40s
+
+  rocketmq-proxy:
+    image: apache/rocketmq:5.3.2
+    ports:
+      - "18080:8080"
+      - "18081:8081"
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+    volumes:
+      - ./deploy/rocketmq/rmq-proxy.json:/home/rocketmq/rocketmq-5.3.2/conf/rmq-proxy.json
+    depends_on:
+      rocketmq-broker:
+        condition: service_healthy
+      rocketmq-namesrv:
+        condition: service_healthy
+    restart: on-failure
+    command: sh mqproxy -pc /home/rocketmq/rocketmq-5.3.2/conf/rmq-proxy.json
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/8081'"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+
+  # 冷启动创建业务 Topic，避免 Proxy 路由缺失导致首条 publish/consume 失败
+  rocketmq-init-topics:
+    image: apache/rocketmq:5.3.2
+    depends_on:
+      rocketmq-broker:
+        condition: service_healthy
+      rocketmq-namesrv:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        set -e
+        cd /home/rocketmq/rocketmq-5.3.2
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          if sh bin/mqadmin updateTopic -n rocketmq-namesrv:9876 -t csmp_business_events -c DefaultCluster -a +message.type=NORMAL; then
+            echo "rocketmq-init: topic csmp_business_events ready (NORMAL)"
+            exit 0
+          fi
+          sleep 3
+        done
+        echo "rocketmq-init: failed to create csmp_business_events" >&2
+        exit 1
+
   # ===== V5 新增：Gradio 浏览器前端（独立进程，仅内部网络，见 services/rag-service/README.md §E）=====
   gradio:
     build:

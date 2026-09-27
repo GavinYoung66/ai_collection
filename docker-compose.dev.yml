@@ -125,8 +125,12 @@ services:
       REDIS_PORT: "6379"
       # 最小闭环事件（etl.task.done/qc.check.completed）与 qc-service 同实例同库；禁止 0 号库
       QC_REDIS_DB: "3"
+      EVENT_BUS: ${EVENT_BUS:-redis}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
       # Docker 网络内用 service name + 内部端口（8000），不用 localhost:8006（宿主机映射）
       COMPLAINT_SERVICE_URL: "http://complaint-service:8000/api/v1"
+      QC_SERVICE_URL: "http://qc-service:8000/api/v1"
     volumes:
       - ./services/data-platform/app:/app/app
       - ./common:/app/common
@@ -267,6 +271,9 @@ services:
       QC_DEFAULT_ACTIVE_RULES_VERSION: v1.0
       QC_R14_RAG_ENABLED: "true"
       QC_REDIS_DB: "3"
+      EVENT_BUS: ${EVENT_BUS:-redis}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
     volumes:
       - ./services/qc-service/app:/app/app
       - ./common:/app/common
@@ -386,6 +393,9 @@ services:
       # 批次③ 进程内桥：容器内走 compose alias；本机 uvicorn 直跑时在根 .env 覆盖为 localhost:8001/8003
       DATA_PLATFORM_URL: ${DATA_PLATFORM_URL:-http://data-platform:8000}
       QC_SERVICE_URL: ${QC_SERVICE_URL:-http://qc-service:8000}
+      EVENT_BUS: ${EVENT_BUS:-redis}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
     volumes:
       - ./services/complaint-service/app:/app/app
       - ./services/complaint-service/tests:/app/tests

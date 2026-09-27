@@ -1,7 +1,16 @@
-"""质检事件发布。允许 6 频道；禁止 qc.escalate.human 与 qc.llm.degraded。"""
+"""质检事件发布。允许 6 频道；禁止 qc.escalate.human 与 qc.llm.degraded。
+
+本 change **QC 链路三事件** 上总线范围：
+- 入站（由 DP 发）：``call.session.ended``、``etl.task.done``
+- 出站（本文件）：仅 ``qc.check.completed`` → ``_BUS_CHANNELS``（信封 data 仅白名单）
+
+其余五出站频道仍走 Redis PUBLISH，**故意保留**（投诉链/告警等留给后续 change）；
+不是遗漏迁移。``emitted`` 仍保留完整业务 payload 供进程内观测。
+"""
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any
 from uuid import UUID, uuid4
@@ -17,6 +26,8 @@ CHANNEL_COMPLAINT_SUSPECTED = "qc.complaint.suspected"
 CHANNEL_STOP_CALL = "qc.stop_call.detected"
 CHANNEL_REVIEW_DONE = "qc.review.done"
 ALERT_STREAM = "alert:stream"
+# Bus-migrated channels (envelope on wire; full payload kept in ``emitted``).
+_BUS_CHANNELS = frozenset({CHANNEL_CHECK_COMPLETED})
 
 ALLOWED_CHANNELS = frozenset(
     {
@@ -74,12 +85,45 @@ class QcEventPublisher:
             "ts": int(ts if ts is not None else time.time()),
         }
 
+    async def _publish_via_bus(self, channel: str, payload: dict[str, Any]) -> None:
+        """Publish whitelist ``data`` via EventBus; reuse injected redis in redis mode."""
+        from common.eventbus.factory import get_event_bus
+        from common.eventbus.redis_pubsub import RedisPubSubEventBus
+        from common.eventbus.util import whitelist_data
+
+        if not (os.getenv("EVENT_BUS") or "").strip():
+            os.environ["EVENT_BUS"] = "redis"
+        if not (os.getenv("EVENT_BUS_SVC") or "").strip():
+            os.environ["EVENT_BUS_SVC"] = "qc"
+
+        data = whitelist_data(payload)
+        key = (
+            str(payload["session_id"])
+            if payload.get("session_id")
+            else (str(payload["case_id"]) if payload.get("case_id") else None)
+        )
+        trace_id = str(payload.get("trace_id") or "") or None
+        mode = (os.getenv("EVENT_BUS") or "redis").strip().lower()
+        # Prefer injected redis for redis/grayscale (and pytest MemoryRedis).
+        # Only skip when explicitly on rocketmq / redis_streams.
+        if self._redis is not None and mode not in ("rocketmq", "redis_streams"):
+            bus = RedisPubSubEventBus(redis=self._redis)
+            await bus.publish(channel, data, key=key, trace_id=trace_id)
+            return
+        # Reuse process-wide singleton; factory handles lifecycle + shutdown.
+        bus = get_event_bus()
+        await bus.publish(channel, data, key=key, trace_id=trace_id)
+
     async def _publish(self, channel: str, payload: dict[str, Any]) -> dict[str, Any]:
         if channel in FORBIDDEN_CHANNELS:
             raise ValueError(f"forbidden channel: {channel}")
         if channel not in ALLOWED_CHANNELS:
             raise ValueError(f"channel not in M1 allow-list: {channel}")
+        # Business payload list unchanged (score/risk/grade still visible to callers).
         self.emitted.append((channel, payload))
+        if channel in _BUS_CHANNELS:
+            await self._publish_via_bus(channel, payload)
+            return payload
         if self._redis is not None:
             await self._redis.publish(channel, json.dumps(payload, ensure_ascii=False))
         return payload

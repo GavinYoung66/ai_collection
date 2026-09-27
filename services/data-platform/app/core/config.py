@@ -21,6 +21,11 @@ class DataPlatformSettings(BaseSettings):
     COMPLAINT_HTTP_TIMEOUT: float = 5.0
     COMPLAINT_HTTP_RETRY: int = 3
 
+    # 质检服务内部 HTTP（信封瘦身后反拉 records 详情）。
+    QC_SERVICE_URL: str = "http://localhost:8003/api/v1"
+    QC_HTTP_TIMEOUT: float = 5.0
+    QC_HTTP_RETRY: int = 3
+
     # 种子入库后等待 qc.check.completed 的超时告警阈值（分钟）。
     QC_TIMEOUT_MINUTES: int = 10
 

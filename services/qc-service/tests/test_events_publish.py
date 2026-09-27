@@ -96,8 +96,13 @@ class TestCompletedPayload:
         assert "compliance_score" not in payload
         assert "risk_level" not in payload
         assert "ts" in payload and "trace_id" in payload
+        # Wire format is EventEnvelope; score stays in emitted business payload only.
         raw = json.loads(redis.published[-1][1])
-        assert raw["score"] == 80
+        assert raw["event_name"] == CHANNEL_CHECK_COMPLETED
+        assert "event_id" in raw and "data" in raw
+        assert raw["data"].get("session_id") == "sess_ok"
+        assert "score" not in raw["data"]
+        assert payload["score"] == 80
 
     async def test_completed_call_id_is_uuid_not_session(self):
         replay, pub, _redis, _db = _svc()

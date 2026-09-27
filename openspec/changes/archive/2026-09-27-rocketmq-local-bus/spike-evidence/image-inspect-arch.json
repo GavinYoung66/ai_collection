@@ -1,0 +1,8 @@
+{
+  "Architecture": "arm64",
+  "Os": "linux",
+  "RepoDigests": [
+    "apache/rocketmq@sha256:4a80ff5cd4b0a3d3ef6dc338ce2028a85bd995648cb3aa5c3e753746d2dbc587"
+  ],
+  "Id": "sha256:4a80ff5cd4b0a3d3ef6dc338ce2028a85bd995648cb3aa5c3e753746d2dbc587"
+}

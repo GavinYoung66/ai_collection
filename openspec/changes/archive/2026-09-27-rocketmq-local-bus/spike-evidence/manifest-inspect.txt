@@ -1,0 +1,6 @@
+# Command: docker manifest inspect apache/rocketmq:5.3.2
+# Result (2026-09-27, this host): FAILED — registry-1.docker.io timeout
+# failed to configure transport: error pinging v2 registry: Get "https://registry-1.docker.io/v2/": Client.Timeout exceeded while awaiting headers
+#
+# Equivalent multi-arch evidence: see hub-tag-5.3.2-platforms.json (includes linux/arm64)
+# Local pull evidence: see image-inspect-arch.json (Architecture=arm64; RepoDigest matches Hub index digest)

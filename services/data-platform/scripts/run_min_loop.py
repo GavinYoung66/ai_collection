@@ -83,46 +83,117 @@ def _engine():
 # 6.1 闭环流程
 # ──────────────────────────────────────────────────────────────
 
-async def _subscribe_qc_event(future: asyncio.Future, timeout: float) -> None:
-    """后台订阅 qc.check.completed，收到匹配 case_id 的事件后 set_result。"""
-    redis = build_redis()
-    pubsub = redis.pubsub()
-    await pubsub.subscribe(CHANNEL_QC)
+def _unwrap_event_payload(raw: Any) -> dict[str, Any]:
+    """兼容 EventEnvelope 与旧 flat JSON；定位字段优先取 data。"""
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    if "event_id" in raw and isinstance(raw.get("data"), dict):
+        payload = dict(raw["data"])
+        if raw.get("trace_id") and "trace_id" not in payload:
+            payload["trace_id"] = raw["trace_id"]
+        return payload
+    return raw
+
+
+async def _subscribe_qc_event(
+    future: asyncio.Future,
+    ready: asyncio.Event,
+    accepting: asyncio.Event,
+) -> None:
+    """后台订阅 qc.check.completed（经 EventBus），收到匹配 case_id 后 set_result。
+
+    ``ready`` 在 subscribe 启动后 set，供发布方避免 RocketMQ 冷订阅丢首条。
+    ``accepting`` 在 etl 发布成功后 set，避免消费组积压的旧 qc.check.completed 抢答。
+    RocketMQ 路径使用独立 consumer bus，不与 publisher 共用 Producer 客户端。
+    """
+    from common.eventbus.envelope import EventEnvelope
+    from common.eventbus.factory import reset_event_bus
+    from common.eventbus.redis_pubsub import RedisPubSubEventBus
+    from common.eventbus.rocketmq import RocketMQEventBus
+
+    if not (os.getenv("EVENT_BUS") or "").strip():
+        os.environ["EVENT_BUS"] = "redis"
+    if not (os.getenv("EVENT_BUS_SVC") or "").strip():
+        os.environ["EVENT_BUS_SVC"] = "dp"
+
+    mode = (os.getenv("EVENT_BUS") or "redis").strip().lower()
+    # Keep factory clear so publish_etl_task_done gets its own Producer.
+    reset_event_bus()
+    if mode == "redis":
+        bus = RedisPubSubEventBus(redis=build_redis())
+    else:
+        # Host → mapped Proxy (container services use rocketmq-proxy:8081).
+        os.environ.setdefault("ROCKETMQ_PROXY", "localhost:18081")
+        bus = RocketMQEventBus(endpoints=os.environ["ROCKETMQ_PROXY"])
+
+    async def _handler(envelope: EventEnvelope) -> None:
+        if not accepting.is_set():
+            return
+        payload = _unwrap_event_payload(envelope.model_dump(mode="json"))
+        if str(payload.get("case_id") or "") != CASE_ID:
+            return
+        if not future.done():
+            future.set_result(payload)
+
     try:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            msg = await pubsub.get_message(
-                ignore_subscribe_messages=True, timeout=2.0,
-            )
-            if not msg or msg.get("type") != "message":
-                continue
-            raw = msg.get("data")
-            if isinstance(raw, str):
-                try:
-                    payload = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-            elif isinstance(raw, dict):
-                payload = raw
-            else:
-                continue
-            if str(payload.get("case_id") or "") == CASE_ID:
-                if not future.done():
-                    future.set_result(payload)
-                return
-        if not future.done():
-            future.set_result(None)
+        await bus.subscribe(CHANNEL_QC, "dp_min_loop", _handler)
+        # RocketMQ SimpleConsumer.startup 在后台线程；多等一会再发，并排空积压。
+        await asyncio.sleep(3.0 if mode == "rocketmq" else 0.3)
+        ready.set()
+        while not future.done():
+            await asyncio.sleep(0.1)
+    except asyncio.CancelledError:
+        raise
     except Exception:
+        logger.exception("subscribe qc.check.completed failed")
         if not future.done():
             future.set_result(None)
+        ready.set()
     finally:
-        await pubsub.unsubscribe(CHANNEL_QC)
-        await pubsub.aclose()
-        await redis.aclose()
+        close = getattr(bus, "aclose", None)
+        if close is not None:
+            try:
+                await close()
+            except Exception:
+                pass
+
+
+async def _enrich_score_risk(payload: dict[str, Any]) -> dict[str, Any]:
+    """信封瘦身后从 qc HTTP 或库补全 score/risk。"""
+    if payload.get("score") is not None and payload.get("risk") is not None:
+        return payload
+    session_id = str(payload.get("session_id") or "")
+    if not session_id:
+        return payload
+    try:
+        from app.integrations.qc_client import QcClient
+
+        detail = await QcClient().get_record(session_id)
+        if detail:
+            out = dict(payload)
+            if out.get("qc_record_id") in (None, "") and detail.get("qc_record_id"):
+                out["qc_record_id"] = detail["qc_record_id"]
+            score = detail.get("compliance_score", detail.get("score"))
+            if out.get("score") is None and score is not None:
+                out["score"] = score
+            if out.get("risk") is None and detail.get("risk") is not None:
+                out["risk"] = detail["risk"]
+            return out
+    except Exception:
+        logger.exception("enrich score/risk via QcClient failed")
+    return payload
 
 
 async def _update_qc_cols(engine, payload: dict[str, Any]) -> None:
     """收到 qc.check.completed 后直接更新快照质检列（不依赖 subscriber 的 session_factory）。"""
+    payload = await _enrich_score_risk(payload)
     session_id = str(payload.get("session_id") or "")
     qc_record_id = payload.get("qc_record_id")
     score = payload.get("score")
@@ -241,26 +312,45 @@ async def run_flow() -> bool:
                   f"跳过事件等待与质检列更新")
         else:
             _idempotent_rerun = False
-            # 先订阅 qc.check.completed（发布前订阅，确保不漏消息）
+            # 先订阅 qc.check.completed（ready 后再发布；accepting 在发布后打开）
             loop = asyncio.get_running_loop()
             qc_future: asyncio.Future = loop.create_future()
+            sub_ready = asyncio.Event()
+            sub_accepting = asyncio.Event()
             sub_task = asyncio.create_task(
-                _subscribe_qc_event(qc_future, dp_settings.QC_TIMEOUT_MINUTES * 60)
+                _subscribe_qc_event(qc_future, sub_ready, sub_accepting)
             )
+            try:
+                await asyncio.wait_for(sub_ready.wait(), timeout=45.0)
+            except TimeoutError:
+                sub_task.cancel()
+                _record("6.1", "闭环流程", False, "订阅 qc.check.completed 未就绪")
+                return False
 
-            # 3. 发布 etl.task.done
+            # 3. 发布 etl.task.done（独立 Producer；勿与订阅端共用 RocketMQ 客户端）
             print("  [3/7] 发布 etl.task.done...")
             global _publish_time
             _publish_time = datetime.now(_SHANGHAI)
+            from common.eventbus.factory import reset_event_bus
+
+            reset_event_bus()
+            if (os.getenv("EVENT_BUS") or "").strip().lower() == "rocketmq":
+                os.environ.setdefault("ROCKETMQ_PROXY", "localhost:18081")
             published = await publish_etl_task_done(case_id=CASE_ID, session_id=SESSION_ID)
             if not published:
                 sub_task.cancel()
                 _record("6.1", "闭环流程", False, "etl.task.done 发布失败")
                 return False
+            sub_accepting.set()
 
             # 4. 等 qc.check.completed
             print(f"  [4/7] 等待 qc.check.completed（超时 {dp_settings.QC_TIMEOUT_MINUTES}min）...")
-            payload = await qc_future
+            try:
+                payload = await asyncio.wait_for(
+                    qc_future, timeout=dp_settings.QC_TIMEOUT_MINUTES * 60
+                )
+            except TimeoutError:
+                payload = None
             sub_task.cancel()
             try:
                 await sub_task
@@ -568,7 +658,7 @@ async def verify_6_7() -> None:
              "-x", "-q"],
             cwd=str(cs_root),
             capture_output=True, text=True, timeout=120,
-            env={**os.environ, "USE_MOCK_MCP": "true"},
+            env={**os.environ, "USE_MOCK_MCP": "true", "EVENT_BUS": "redis"},
         )
         proc_ok = proc.returncode == 0
         proc_tail = (proc.stdout.strip().split("\n")[-1]
@@ -637,7 +727,8 @@ async def verify_6_9() -> None:
                  "--tb=line"],
                 cwd=str(test_dir),
                 capture_output=True, text=True, timeout=300,
-                env={**os.environ, "USE_MOCK_MCP": "true"},
+                # Unit suites assume redis transport; do not inherit rocketmq host env.
+                env={**os.environ, "USE_MOCK_MCP": "true", "EVENT_BUS": "redis"},
             )
             ok = proc.returncode == 0
             if not ok:

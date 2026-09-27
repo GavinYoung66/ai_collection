@@ -90,3 +90,10 @@ mypy==1.8.0
 
 # === 依赖锁定 ===
 pip-tools==7.3.0
+# EventBus RocketMQ SDK（与 requirements.txt 同 pin）。
+# 注意：与 langfuse 的 opentelemetry-exporter-otlp-proto-http 小版本冲突——
+# 全量 `pip install -r requirements.lock` 可能 ResolutionImpossible。
+# Docker（qc/data-platform）：Dockerfile 先装「排除本行」的 lock，再装
+#   rocketmq-python-client==5.1.1 + opentelemetry-exporter-otlp>=1.33.1。
+# 宿主机 conda：可 `pip install 'rocketmq-python-client==5.1.1'` 定向安装（tasks 3.3）。
+rocketmq-python-client==5.1.1

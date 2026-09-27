@@ -1,0 +1,4 @@
+{
+  "rocketMQClusterName": "DefaultCluster",
+  "useEndpointPortFromRequest": true
+}

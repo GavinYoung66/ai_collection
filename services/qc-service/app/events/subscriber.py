@@ -1,9 +1,20 @@
-"""质检 Redis 订阅。可注入 handler；listen 循环仅进程后台使用，单测直接调 handler。"""
+"""质检事件订阅（经统一 EventBus）。
+
+本 change 经 EventBus 订阅的 QC 入站事件：``call.session.ended``、``etl.task.done``
+（以及既有 ``kb.sensitive_updated`` / ``strategy.updated``）。
+出站 ``qc.check.completed`` 由 publisher 上总线；其余 M1 出站频道仍 Redis PUBLISH，
+属明确范围外（见 publisher ``_BUS_CHANNELS``），勿误判为漏迁。
+
+handler 接收 ``EventEnvelope``，从 ``data`` 提取字段后接入现有处理逻辑。
+listen 循环仅进程后台使用，单测直接调 handler / handle_envelope。
+信封暴露 ``event_id``，订阅方应对至少一次投递做幂等（见 event-bus spec）。
+"""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -20,6 +31,7 @@ from app.services.offline_qc_service import CODE_OK, OfflineQcService, QcRunResu
 from app.services.replay_service import ReplayService
 from app.services.word_loader import WordLoader
 from common.db.session import async_session_factory
+from common.eventbus.envelope import EventEnvelope
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +70,13 @@ def parse_event_payload(raw: Any) -> dict[str, Any]:
     return {}
 
 
+def _payload_from_envelope(envelope: EventEnvelope) -> dict[str, Any]:
+    payload = dict(envelope.data)
+    if envelope.trace_id and "trace_id" not in payload:
+        payload["trace_id"] = envelope.trace_id
+    return payload
+
+
 async def default_replay_session(qc: QCSession) -> QcRunResult:
     redis = await get_redis()
     job_store = QcJobStore(redis)
@@ -76,7 +95,7 @@ async def default_replay_session(qc: QCSession) -> QcRunResult:
 
 
 class QcEventSubscriber:
-    """订阅四个频道。不消费 qc.escalate.human；不提供 DP 回调 HTTP。"""
+    """订阅四个逻辑事件。不消费 qc.escalate.human；不提供 DP 回调 HTTP。"""
 
     def __init__(
         self,
@@ -103,12 +122,46 @@ class QcEventSubscriber:
             return await self.replay.replay_session(qc)
         return await default_replay_session(qc)
 
+    async def handle_envelope(self, envelope: EventEnvelope) -> Any:
+        """EventBus handler entry: dispatch by ``event_name`` using envelope ``data``."""
+        name = envelope.event_name
+        if name in FORBIDDEN_CHANNELS:
+            logger.warning("refusing to consume forbidden channel %s", name)
+            return {"status": "ignored", "channel": name}
+        payload = _payload_from_envelope(envelope)
+        try:
+            if name == CHANNEL_SESSION_ENDED:
+                return await self.handle_session_ended(payload)
+            if name == CHANNEL_ETL_DONE:
+                return await self.handle_etl_done(payload)
+            if name == CHANNEL_KB_UPDATED:
+                return await self.handle_kb_updated(payload)
+            if name == CHANNEL_STRATEGY_UPDATED:
+                return await self.handle_strategy_updated(payload)
+            logger.info("unsubscribed channel ignored: %s", name)
+            return {"status": "ignored", "channel": name}
+        except Exception:
+            logger.exception("subscribe handler failed channel=%s", name)
+            raise
+
     async def handle_message(self, channel: str, raw: Any) -> Any:
+        """Backward-compatible entry for unit tests (channel + raw payload)."""
         name = channel.decode("utf-8") if isinstance(channel, (bytes, bytearray)) else str(channel)
         if name in FORBIDDEN_CHANNELS:
             logger.warning("refusing to consume forbidden channel %s", name)
             return {"status": "ignored", "channel": name}
         payload = parse_event_payload(raw)
+        # Envelope on the wire: unwrap data for existing handlers.
+        if isinstance(payload, dict) and "event_id" in payload and "data" in payload:
+            try:
+                from common.eventbus.envelope import parse_envelope
+
+                return await self.handle_envelope(
+                    parse_envelope(payload, fallback_event_name=name)
+                )
+            except Exception:
+                logger.exception("envelope parse failed channel=%s", name)
+                return {"status": "error", "channel": name}
         try:
             if name == CHANNEL_SESSION_ENDED:
                 return await self.handle_session_ended(payload)
@@ -216,28 +269,60 @@ class QcEventSubscriber:
             await self.job_store.set_rules_active(key)
         return {"status": "ok", "version": key, "strategy_type": payload.get("strategy_type")}
 
-    async def listen(self, redis: Any) -> None:
-        pubsub = redis.pubsub()
-        await pubsub.subscribe(*SUBSCRIBE_CHANNELS)
-        try:
-            async for message in pubsub.listen():
-                if not message or message.get("type") != "message":
-                    continue
-                try:
-                    await self.handle_message(message.get("channel"), message.get("data"))
-                except Exception:
-                    logger.exception("subscribe dispatch failed")
-        finally:
-            close = getattr(pubsub, "aclose", None) or getattr(pubsub, "close", None)
-            if close is not None:
-                try:
-                    result = close()
-                    if asyncio.iscoroutine(result):
-                        await result
-                except Exception:
-                    logger.exception("pubsub close failed")
+    async def listen(self, redis: Any | None = None) -> None:
+        """Subscribe via EventBus (group short-code ``qc`` → gid_qc_*).
 
-    async def listen_forever(self, redis: Any) -> None:
+        Channels ``kb.sensitive_updated`` / ``strategy.updated`` are published
+        only on Redis (rag-service / ops scripts), so they always use the
+        RedisPubSubEventBus regardless of ``EVENT_BUS`` mode. The QC-chain
+        channels (``call.session.ended`` / ``etl.task.done``) follow the
+        configured EventBus adapter.
+        """
+        from common.eventbus.factory import get_event_bus
+        from common.eventbus.redis_pubsub import RedisPubSubEventBus
+
+        if not (os.getenv("EVENT_BUS") or "").strip():
+            os.environ["EVENT_BUS"] = "redis"
+        if not (os.getenv("EVENT_BUS_SVC") or "").strip():
+            os.environ["EVENT_BUS_SVC"] = "qc"
+
+        mode = (os.getenv("EVENT_BUS") or "redis").strip().lower()
+        if mode == "redis" and redis is not None:
+            bus = RedisPubSubEventBus(redis=redis)
+        else:
+            bus = get_event_bus()
+
+        # kb/strategy channels stay on Redis in all modes (their publishers
+        # are not migrated to RocketMQ in this change).
+        redis_bus = RedisPubSubEventBus(redis=redis) if redis is not None else RedisPubSubEventBus()
+
+        async def _make_handler(name: str):
+            async def _handler(envelope: EventEnvelope) -> None:
+                if envelope.event_name != name:
+                    envelope = envelope.model_copy(update={"event_name": name})
+                await self.handle_envelope(envelope)
+            return _handler
+
+        for channel in SUBSCRIBE_CHANNELS:
+            if channel in (CHANNEL_KB_UPDATED, CHANNEL_STRATEGY_UPDATED):
+                await redis_bus.subscribe(channel, "qc", await _make_handler(channel))
+            else:
+                await bus.subscribe(channel, "qc", await _make_handler(channel))
+
+        # Keep the listen task alive while bus background tasks run.
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            close = getattr(bus, "aclose", None)
+            if close is not None:
+                await close()
+            redis_close = getattr(redis_bus, "aclose", None)
+            if redis_close is not None:
+                await redis_close()
+            raise
+
+    async def listen_forever(self, redis: Any | None = None) -> None:
         while True:
             try:
                 await self.listen(redis)
@@ -250,11 +335,11 @@ class QcEventSubscriber:
 
 
 def skip_background_tasks() -> bool:
-    import os
+    import os as _os
 
-    if os.environ.get("QC_SKIP_BACKGROUND") == "1":
+    if _os.environ.get("QC_SKIP_BACKGROUND") == "1":
         return True
-    return bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    return bool(_os.environ.get("PYTEST_CURRENT_TEST"))
 
 
 async def start_background_tasks() -> list[asyncio.Task[Any]]:

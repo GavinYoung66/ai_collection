@@ -1,0 +1,75 @@
+# Spike-only: NameServer + Broker + Proxy (apache/rocketmq:5.3.2)
+# Host ports per design: 19876→9876, 18080→8080, 18081→8081
+# §3 handoff (design Decision 8): keep useEndpointPortFromRequest +
+# proxy restart:on-failure + broker autoCreateTopicEnable when promoting
+# this stack into the root docker-compose.yml.
+services:
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.3.2
+    container_name: rmqnamesrv-spike
+    ports:
+      - "19876:9876"
+    networks:
+      - rocketmq-spike
+    command: sh mqnamesrv
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/9876'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  rocketmq-broker:
+    image: apache/rocketmq:5.3.2
+    container_name: rmqbroker-spike
+    ports:
+      - "10909:10909"
+      - "10911:10911"
+      - "10912:10912"
+    environment:
+      - NAMESRV_ADDR=rocketmq-namesrv:9876
+    volumes:
+      - ./spike-broker.conf:/home/rocketmq/rocketmq-5.3.2/conf/broker.conf
+    depends_on:
+      rocketmq-namesrv:
+        condition: service_healthy
+    networks:
+      - rocketmq-spike
+    command: sh mqbroker -n rocketmq-namesrv:9876 -c /home/rocketmq/rocketmq-5.3.2/conf/broker.conf
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/10911'"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 40s
+
+  rocketmq-proxy:
+    image: apache/rocketmq:5.3.2
+    container_name: rmqproxy-spike
+    ports:
+      - "18080:8080"
+      - "18081:8081"
+    environment:
+      - NAMESRV_ADDR=rocketmq-namesrv:9876
+    volumes:
+      # Host maps 18081→8081; Proxy must echo request port back to SDK
+      - ./spike-rmq-proxy.json:/home/rocketmq/rocketmq-5.3.2/conf/rmq-proxy.json
+    depends_on:
+      rocketmq-broker:
+        condition: service_healthy
+      rocketmq-namesrv:
+        condition: service_healthy
+    networks:
+      - rocketmq-spike
+    restart: on-failure
+    command: sh mqproxy -pc /home/rocketmq/rocketmq-5.3.2/conf/rmq-proxy.json
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/8081'"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+
+networks:
+  rocketmq-spike:
+    driver: bridge

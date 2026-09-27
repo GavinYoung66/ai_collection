@@ -1,0 +1,77 @@
+[
+    {
+        "Id": "sha256:4a80ff5cd4b0a3d3ef6dc338ce2028a85bd995648cb3aa5c3e753746d2dbc587",
+        "RepoTags": [
+            "apache/rocketmq:5.3.2"
+        ],
+        "RepoDigests": [
+            "apache/rocketmq@sha256:4a80ff5cd4b0a3d3ef6dc338ce2028a85bd995648cb3aa5c3e753746d2dbc587"
+        ],
+        "Comment": "buildkit.dockerfile.v0",
+        "Created": "2025-03-14T02:54:47.233238756Z",
+        "Config": {
+            "User": "rocketmq",
+            "ExposedPorts": {
+                "10909/tcp": {},
+                "10911/tcp": {},
+                "10912/tcp": {},
+                "9876/tcp": {}
+            },
+            "Env": [
+                "PATH=/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "JAVA_HOME=/opt/java/openjdk",
+                "LANG=en_US.UTF-8",
+                "LANGUAGE=en_US:en",
+                "LC_ALL=en_US.UTF-8",
+                "JAVA_VERSION=jdk8u442-b06",
+                "ROCKETMQ_VERSION=5.3.2",
+                "ROCKETMQ_HOME=/home/rocketmq/rocketmq-5.3.2"
+            ],
+            "Entrypoint": [
+                "./docker-entrypoint.sh"
+            ],
+            "Cmd": [
+                "dummy"
+            ],
+            "WorkingDir": "/home/rocketmq/rocketmq-5.3.2/bin",
+            "Labels": {
+                "org.opencontainers.image.ref.name": "ubuntu",
+                "org.opencontainers.image.version": "24.04"
+            },
+            "ArgsEscaped": true
+        },
+        "Architecture": "arm64",
+        "Os": "linux",
+        "Size": 193509756,
+        "RootFS": {
+            "Type": "layers",
+            "Layers": [
+                "sha256:375990b2a90a8d8f332d9b9422d948f7068a3313bf5a1c9fbb91ff2d29046130",
+                "sha256:389f051fe1875ac2f431118008aa94d9e994ab14e9adf24cc599bc653024a098",
+                "sha256:b00241db873cb0a7e5964c033e2224845a7001d130d3cc22f26b9a8eb99958e4",
+                "sha256:807fbdf92d3ca66c9c7906a0eaa26bf4df5a4c35d67852608a910035994941e7",
+                "sha256:9d1366488d0b3777d73e65fcc01177bc870c55091cbae5aa3b26ee9a6c70c766",
+                "sha256:de0cc434fa34e7581e9f8d3b3a7e231c7033087a82ad0fa7abd4f55e1022188c",
+                "sha256:2e0ce2eda8f26f0642b18a15bacc5d1be7b92ba4a2e32afdb5b920b5e9dfd71f",
+                "sha256:9cd231dad5586bc2ce9cc625b0ba857f691a68466b93ea438fe25751607c7474",
+                "sha256:a3f12b0b63917933b6b11a266aa1d71cdce01448741b720035ebc4d9b1c95cd1",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"
+            ]
+        },
+        "Metadata": {
+            "LastTagTime": "2026-09-27T08:38:33.339119886Z"
+        },
+        "Descriptor": {
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "digest": "sha256:4a80ff5cd4b0a3d3ef6dc338ce2028a85bd995648cb3aa5c3e753746d2dbc587",
+            "size": 1609
+        },
+        "Identity": {
+            "Pull": [
+                {
+                    "Repository": "docker.io/apache/rocketmq"
+                }
+            ]
+        }
+    }
+]

@@ -912,6 +912,25 @@ async def run(count: int, seed: int) -> None:
     finally:
         await engine.dispose()
 
+    # 5b. 逐条发布 call.session.ended（min-loop：不合并批发；每条仅 session_id）
+    dp_app = _REPO_ROOT / "services" / "data-platform"
+    if str(dp_app) not in sys.path:
+        sys.path.insert(0, str(dp_app))
+    from app.events.publisher import publish_call_session_ended  # noqa: E402
+
+    ended_ok = 0
+    ended_fail = 0
+    for c in calls:
+        ok = await publish_call_session_ended(session_id=c["session_id"])
+        if ok:
+            ended_ok += 1
+        else:
+            ended_fail += 1
+    print(
+        f"call.session.ended published: ok={ended_ok} fail={ended_fail} "
+        f"(total={len(calls)}; via EventBus)"
+    )
+
     # 6. 输出日志
     n_compliant = sum(1 for c in calls if c["scenario"] == SCN_COMPLIANT)
     n_anomaly = sum(1 for c in calls if c["scenario"] == SCN_ANOMALY)

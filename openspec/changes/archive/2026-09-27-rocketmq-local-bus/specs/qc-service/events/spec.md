@@ -1,0 +1,80 @@
+## MODIFIED Requirements
+
+### Requirement: 恰好发布六个频道
+
+qc-service SHALL 发布下列逻辑事件，且不发布 `qc.escalate.human`、不发布 `qc.llm.degraded` 逻辑事件。每条 payload SHALL 含 Unix `ts` 与 `trace_id`。`call_id` SHALL 为 `QCSession.call_id` UUID 字符串或 JSON null；MUST NOT 复制 `session_id` 或 replay 路径参数。仅 `qc.check.completed` 经统一事件总线（物理 Topic `csmp_business_events`，逻辑事件名放 Tag，信封 `data` 仅白名单字段）；其余五频道仍走既有 Redis PUBLISH，属本 change 刻意收窄的范围外保留（见 design Decision 7）。
+
+| 逻辑事件名 | Payload 键 |
+| :--- | :--- |
+| `qc.alert.raised` | `{alert_id,session_id,call_id,level,evidence,trace_id,ts}` 并 XADD `alert:stream` |
+| `qc.check.completed` | `{qc_record_id,session_id,call_id,case_id,score,risk,grade,trace_id,ts}` |
+| `qc.complaint.suspected` | `{qc_record_id,session_id,case_id,redline_tags[],trace_id,ts}` |
+| `qc.stop_call.detected` | `{session_id,case_id,evidence,trace_id,ts}` |
+| `qc.review.done` | `{qc_record_id,action,revised_score,redline_tags,evidence_masked,sample_type,trace_id,ts}`，`sample_type∈{positive,negative,corrected}` |
+| `system.alert.raised` | `{alert_id,level,event,service,description,error_code,trace_id,ts}`，LLM 熔断时 `event=qc:llm_degraded` |
+
+`qc.check.completed.score` SHALL 由库 `compliance_score` 映射。`risk` SHALL 由库 `risk_level` 映射。JSON MUST 使用键 `score`/`risk`，不是列名。`qc_result`/`qc_status` MUST NOT 出现在 completed payload。`qc.check.completed.call_id` SHALL 存在，且为 `call_records.id` / `QCSession.call_id` 的 UUID 字符串或 JSON `null`；MUST NOT 复制 `session_id` 或 replay 路径参数。
+
+`qc.alert.raised` SHALL 仅在 MergeHits 终态 `speaker=agent` 且 `severity=high` 时发布（与 `qc_alerts` 同门槛）。LLM 熔断的 `system.alert.raised` SHALL 设 `event=qc:llm_degraded` 且 `error_code=A2011`。服务 MUST NOT 发布 `qc.llm.degraded`。
+
+#### Scenario: completed 使用 score 与 risk 键
+
+- **WHEN** 质检跑完
+- **THEN** 发布前构造的业务 payload 含由 `compliance_score`/`risk_level` 映射的 `score` 与 `risk`，且 `call_id` 为 UUID 字符串或 JSON null（绝不是 replay 的 `session_id`）；上总线时仅将白名单定位字段写入信封 `data`（score/risk 不上总线，由消费方 HTTP 反拉）
+
+#### Scenario: 信封强校验生效
+
+- **WHEN** 发布 `qc.check.completed` 时信封 `data` 含非白名单字段（如 `score`）
+- **THEN** 事件总线拒绝发布并记录 `event_id`、`trace_id`、`rejected_field`
+
+#### Scenario: 永不发布 escalate
+
+- **WHEN** 任意 M1 质检路径完成（含坐席高危）
+- **THEN** 订阅 `qc.escalate.human` 收不到消息
+
+#### Scenario: LLM 降级走 system.alert.raised
+
+- **WHEN** LLM 熔断打开
+- **THEN** 发布 `system.alert.raised` 且 `event=qc:llm_degraded`、`error_code=A2011`，且不使用逻辑事件 `qc.llm.degraded`
+
+### Requirement: 订阅四个频道
+
+qc-service SHALL 通过统一事件总线订阅以下逻辑事件。订阅 handler SHALL 从信封中提取 `data`，根据 `event_name` 分发到现有处理逻辑。
+
+| 逻辑事件名 | Handler 行为 |
+| :--- | :--- |
+| `call.session.ended` | 从 `data.session_id` 获取，GET qc-source；未齐 → Redis WAIT_TEXT，不插表 |
+| `etl.task.done` | 从 `data.backfill_date` 获取，GET pending-qc，逐条 qc-source 补检 |
+| `kb.sensitive_updated` | 加载敏感词快照到内存 |
+| `strategy.updated` | 刷新策略配置缓存 |
+
+缺 `call.session.ended` 时服务 SHALL 仍能从 `etl.task.done` 或 HTTP replay 开工（M1）。data-platform MUST NOT HTTP 调用 qc。
+
+#### Scenario: ended 但全文未齐则等待
+
+- **WHEN** 收到 `call.session.ended` 且 qc-source 全文未齐
+- **THEN** 写 Redis WAIT_TEXT，不插 `qc_records`
+
+#### Scenario: 收到 call.session.ended 反拉数据
+
+- **WHEN** qc-service 订阅器收到 `call.session.ended`
+- **THEN** 从信封 `data.session_id` 获取，调用 `GET /api/v1/data/sessions/{session_id}/qc-source`，执行离线质检
+
+### Requirement: 韧性 hooks 事件带 qc 前缀且不进六频道白名单
+
+qc-service 启动 lifespan SHALL 调用 `hooks.set_publisher` 注入本服务适配器。shutdown MUST 调用 `hooks.set_publisher(None)`，避免测试间泄漏。韧性事件名 SHALL 为 `qc.rate_limit.hit`、`qc.circuit_breaker.open`、`qc.degrade.triggered`（及零件发出的同前缀变体，如 `qc.rate_limit.degraded`）。有请求上下文时 payload SHALL 携带 `trace_id`（限流路径经 `allow(..., context=)` 透传），并含 `reason` / `key` 等零件字段。适配器 MUST NOT 将这些事件 PUBLISH 到 M1 六个逻辑事件白名单，MUST NOT 发布 `qc.llm.degraded`。LLM 熔断业务告警 SHALL 仍走既有 `system.alert.raised`（`event=qc:llm_degraded`，`error_code=A2011`）。适配器或下游失败 MUST NOT 抛异常阻断质检主流程。
+
+#### Scenario: 限流命中发出 qc.rate_limit.hit
+
+- **WHEN** raw 限流超限
+- **THEN** 钩子发出 `qc.rate_limit.hit`，且事件总线中该事件不进六频道白名单
+
+#### Scenario: LLM 熔断仍走 system.alert.raised
+
+- **WHEN** LLM 熔断打开
+- **THEN** 仍发布 `system.alert.raised` 且 `event=qc:llm_degraded`、`error_code=A2011`；同时可发出 `qc.circuit_breaker.open` 或 `qc.degrade.triggered` 作为韧性观测，但不使用逻辑事件 `qc.llm.degraded`
+
+#### Scenario: shutdown 注销 hooks publisher
+
+- **WHEN** 服务进程关闭或测试 teardown 调用 shutdown
+- **THEN** hooks publisher 被置为 None，后续事件回退 structlog，不阻断、不泄漏到下一用例

@@ -1,0 +1,22 @@
+{
+  "source": "https://hub.docker.com/v2/repositories/apache/rocketmq/tags/5.3.2",
+  "fetched_at": "2026-09-27T17:12:00+08:00",
+  "name": "5.3.2",
+  "digest": "sha256:4a80ff5cd4b0a3d3ef6dc338ce2028a85bd995648cb3aa5c3e753746d2dbc587",
+  "media_type": "application/vnd.oci.image.index.v1+json",
+  "images": [
+    {
+      "os": "linux",
+      "architecture": "amd64",
+      "digest": "sha256:06d64e9af63f9023fb8498984cfea2bd6d549a826e3a66667638fab7169c2cd2",
+      "size": 195440548
+    },
+    {
+      "os": "linux",
+      "architecture": "arm64",
+      "digest": "sha256:d923ab25ddbbf539eaf64268d250d5c41cd6d58f1be4d220f800e09aa9d6bae2",
+      "size": 193496400
+    }
+  ],
+  "note": "docker manifest inspect against registry-1.docker.io timed out on this host; Hub Registry API tag payload is equivalent multi-arch evidence. Index digest matches local pull RepoDigest."
+}

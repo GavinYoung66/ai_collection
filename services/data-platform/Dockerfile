@@ -6,8 +6,16 @@ RUN sed -i 's|deb.debian.org/debian-security|mirrors.aliyun.com/debian-security|
     && apt-get install -y --no-install-recommends curl gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.lock ./
-# pip 走阿里云镜像（官方 PyPI 在本机网络下过慢/易抖动）
-RUN pip install --no-cache-dir -r requirements.lock -i https://mirrors.aliyun.com/pypi/simple/
+# pip 走阿里云镜像。rocketmq-python-client 与 langfuse 对 otlp 小版本冲突：
+# 先装 lock（排除 rocketmq），再单独装 rocketmq + otlp>=1.33.1 对齐 langfuse。
+RUN grep -vE '^rocketmq-python-client' requirements.lock > /tmp/requirements.base.lock \
+    && pip install --no-cache-dir -r /tmp/requirements.base.lock \
+        -i https://mirrors.aliyun.com/pypi/simple/ \
+    && pip install --no-cache-dir \
+        'rocketmq-python-client==5.1.1' \
+        'opentelemetry-exporter-otlp>=1.33.1' \
+        -i https://mirrors.aliyun.com/pypi/simple/ \
+    && python -c "import rocketmq; print('rocketmq ok')"
 COPY common/ ./common/
 # 只拷 app 子目录到 /app/app/（原写法嵌套成 /app/app/app/，uvicorn app.main:app 找不到入口）
 COPY services/data-platform/app/ ./app/

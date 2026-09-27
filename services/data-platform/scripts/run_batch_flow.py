@@ -38,7 +38,6 @@ for _p in (_REPO_ROOT, _DP_ROOT, _SCRIPT_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-import redis.asyncio as aioredis  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
 from sqlalchemy.pool import NullPool  # noqa: E402
@@ -51,7 +50,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 QC_REDIS_DB = dp_settings.QC_REDIS_DB
-CHANNEL_ETL = "etl.task.done"
 CHANNEL_QC = "qc.check.completed"
 
 # 验收结果
@@ -85,35 +83,27 @@ async def _read_batch_cases(engine) -> list[dict[str, str]]:
 
 
 async def _publish_etl_done(cases: list[dict[str, str]]) -> int:
-    """发布 etl.task.done 到 Redis 3 号库。
+    """经 EventBus 发布 etl.task.done（默认 EVENT_BUS=redis → QC_REDIS_DB）。
 
-    qc-service 收到 etl.task.done 后按 backfill_date 查 pending-qc 接口，
-    返回该日期所有待补检 session 并逐个开检。故只需按不同 call_date 各发一条。
-    但为满足"推送 200 条"口径，仍对每条 case 发一条事件（backfill_date 取实际通话日期）。
+    qc-service 收到后按 backfill_date 查 pending-qc 并逐个开检。
+    为满足"推送 200 条"口径，对每条 case 发一条事件。
     """
-    rc = aioredis.Redis(
-        host=platform_settings.REDIS_HOST,
-        port=platform_settings.REDIS_PORT,
-        db=QC_REDIS_DB,
-        decode_responses=True,
-    )
+    from datetime import datetime as _dt
+
+    from app.events.publisher import publish_etl_task_done
+
     published = 0
     published_dates: set[str] = set()
-    try:
-        for c in cases:
-            backfill_date = c.get("call_date") or datetime.now(_SHANGHAI).strftime("%Y-%m-%d")
-            payload = json.dumps({
-                "case_id": c["case_id"],
-                "session_id": c["session_id"],
-                "backfill_date": backfill_date,
-                "trace_id": f"etl-{c['case_id']}",
-                "ts": int(time.time()),
-            }, ensure_ascii=False)
-            await rc.publish(CHANNEL_ETL, payload)
+    for c in cases:
+        backfill_date = c.get("call_date") or datetime.now(_SHANGHAI).strftime("%Y-%m-%d")
+        ok = await publish_etl_task_done(
+            case_id=c["case_id"],
+            session_id=c["session_id"],
+            backfill_date=_dt.strptime(backfill_date, "%Y-%m-%d").replace(tzinfo=_SHANGHAI),
+        )
+        if ok:
             published += 1
             published_dates.add(backfill_date)
-    finally:
-        await rc.aclose()
     print(f"  distinct backfill_dates: {sorted(published_dates)}")
     return published
 
@@ -257,33 +247,37 @@ async def _read_qc_records_for_republish(engine) -> list[dict[str, Any]]:
 
 
 async def _republish_qc_completed(qc_records: list[dict[str, Any]]) -> int:
-    """从 DB 读取的 qc_records 重发 qc.check.completed 事件到 Redis 3 号库。"""
-    rc = aioredis.Redis(
-        host=platform_settings.REDIS_HOST,
-        port=platform_settings.REDIS_PORT,
-        db=QC_REDIS_DB,
-        decode_responses=True,
-    )
+    """从 DB 读取的 qc_records 经 EventBus 重发 qc.check.completed（信封白名单 data）。"""
+    import os
+
+    from common.eventbus.factory import get_event_bus, reset_event_bus
+    from common.eventbus.util import whitelist_data
+
+    if not (os.getenv("EVENT_BUS") or "").strip():
+        os.environ["EVENT_BUS"] = "redis"
+    if not (os.getenv("EVENT_BUS_SVC") or "").strip():
+        os.environ["EVENT_BUS_SVC"] = "dp"
+    reset_event_bus()
+    bus = get_event_bus(force_new=True)
     published = 0
-    try:
-        for rec in qc_records:
-            payload = json.dumps({
-                "trace_id": f"republish-{rec['case_id']}",
-                "session_id": rec["session_id"],
-                "call_id": rec.get("call_id", ""),
-                "case_id": rec["case_id"],
-                "qc_record_id": rec["qc_record_id"],
-                "score": rec.get("score"),
-                "risk": rec.get("risk"),
-                "grade": rec.get("grade"),
-                "event": "qc.check.completed",
-                "level": "info",
-                "timestamp": datetime.now(_SHANGHAI).isoformat(),
-            }, ensure_ascii=False)
-            await rc.publish(CHANNEL_QC, payload)
-            published += 1
-    finally:
-        await rc.aclose()
+    for rec in qc_records:
+        payload = {
+            "trace_id": f"republish-{rec['case_id']}",
+            "session_id": rec["session_id"],
+            "case_id": rec["case_id"],
+            "qc_record_id": rec["qc_record_id"],
+            # score/risk 不上总线；消费方 HTTP 反拉
+            "score": rec.get("score"),
+            "risk": rec.get("risk"),
+            "grade": rec.get("grade"),
+        }
+        await bus.publish(
+            CHANNEL_QC,
+            whitelist_data(payload),
+            key=str(rec["session_id"]),
+            trace_id=str(payload["trace_id"]),
+        )
+        published += 1
     return published
 
 
