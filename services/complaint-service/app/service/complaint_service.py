@@ -330,12 +330,43 @@ class ComplaintService:
             # G5 排队 deadline：入队超 10min（queue_start 已失效）→ A5010 转人审，不进图
             if not await rate_limiter.check_queue_deadline(complaint_id):
                 return self._handle_queue_timeout(rec)
+            out = rec
             _graph_inflight.add(complaint_id)
             try:
-                return await self._judge_with_graph(rec, complaint_id)
+                out = await self._judge_with_graph(rec, complaint_id)
             finally:
                 _graph_inflight.discard(complaint_id)
+            # 5.4：judge 返回后同栈检查；仅 next 含 human_review 且开关开才 resume
+            await self._maybe_sim_auto_review(complaint_id)
+            return self.get(complaint_id) or out
         return self._judge_stub(complaint_id)
+
+    async def _maybe_sim_auto_review(self, complaint_id: str) -> None:
+        """SIM_AUTO_REVIEW：同栈、无轮询；仅 next 含 human_review 才 Command(resume)。"""
+        from app.config import settings as _settings
+
+        if not getattr(_settings, "SIM_AUTO_REVIEW", False):
+            return
+        from langgraph.types import Command
+
+        from app.graph.builder import HUMAN_REVIEW, build_complaint_graph
+
+        try:
+            graph = build_complaint_graph(checkpointer=_get_graph_checkpointer())
+            config = {"configurable": {"thread_id": complaint_id}}
+            snap = await graph.aget_state(config)
+            nxt = tuple(getattr(snap, "next", None) or ())
+            if HUMAN_REVIEW not in nxt:
+                logger.info(
+                    "sim_auto_review_skip_no_breakpoint",
+                    complaint_id=complaint_id,
+                    next=list(nxt),
+                )
+                return
+            logger.info("sim_auto_review_resume", complaint_id=complaint_id)
+            await graph.ainvoke(Command(resume="approve"), config=config)
+        except Exception:  # noqa: BLE001
+            logger.exception("sim_auto_review_failed", complaint_id=complaint_id)
 
     def _handle_queue_timeout(self, rec: dict, node: str = "judge_async") -> dict:
         """排队超 10min：A5010 + pending_review（HTTP 仍 200，前端按状态展示）。"""

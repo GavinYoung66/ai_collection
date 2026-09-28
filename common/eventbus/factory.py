@@ -2,14 +2,11 @@
 from __future__ import annotations
 
 import os
-from typing import Any
 
 from common.eventbus.base import EventBus
-from common.eventbus.redis_pubsub import RedisPubSubEventBus
-from common.eventbus.redis_streams import RedisStreamsEventBus
 from common.eventbus.rocketmq import RocketMQEventBus
 
-_VALID = frozenset({"redis", "rocketmq", "redis_streams"})
+_VALID = frozenset({"rocketmq"})
 _instance: EventBus | None = None
 _instance_mode: str | None = None
 
@@ -18,7 +15,7 @@ def get_event_bus(*, force_new: bool = False) -> EventBus:
     """Return process-wide EventBus singleton for ``EVENT_BUS``.
 
     Raises:
-        ValueError: when ``EVENT_BUS`` is missing/illegal.
+        ValueError: when ``EVENT_BUS`` is missing/illegal (only ``rocketmq``).
     """
     global _instance, _instance_mode
     mode = (os.getenv("EVENT_BUS") or "").strip().lower()
@@ -44,11 +41,7 @@ def reset_event_bus() -> None:
     _instance_mode = None
 
 
-def _build(mode: str) -> Any:
-    if mode == "redis":
-        return RedisPubSubEventBus()
+def _build(mode: str) -> EventBus:
     if mode == "rocketmq":
         return RocketMQEventBus()
-    if mode == "redis_streams":
-        return RedisStreamsEventBus()
     raise ValueError(f"EVENT_BUS must be one of {sorted(_VALID)}, got {mode!r}")

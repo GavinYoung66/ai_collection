@@ -4,13 +4,10 @@
 ``call.session.ended``、``etl.task.done``（经统一 EventBus）。
 ``qc.check.completed`` 由 qc-service 发布（见 qc publisher ``_BUS_CHANNELS``）。
 
-经统一 EventBus 发布；``EVENT_BUS=redis`` 时落 QC_REDIS_DB（默认 3）。
+经统一 EventBus（RocketMQ）发布。
 业务 payload 字段构造保持不变；上总线时仅将白名单定位字段写入信封 ``data``。
 禁止 HTTP POST 调用 qc-service。
 禁止发布到 0 号库。
-
-范围说明：投诉链事件（``complaint.created`` 等）与 qc 其余 M1 频道
-不在本 change；勿误判为「漏迁」。
 """
 from __future__ import annotations
 
@@ -27,13 +24,14 @@ logger = logging.getLogger(__name__)
 
 CHANNEL_ETL_TASK_DONE = "etl.task.done"
 CHANNEL_SESSION_ENDED = "call.session.ended"
+CHANNEL_COMPLAINT_CREATED = "complaint.created"
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def _ensure_event_bus_env() -> None:
-    """Default grayscale transport when unset (local tests / scripts)."""
+    """Default RocketMQ transport when unset (local tests / scripts)."""
     if not (os.getenv("EVENT_BUS") or "").strip():
-        os.environ["EVENT_BUS"] = "redis"
+        os.environ["EVENT_BUS"] = "rocketmq"
     if not (os.getenv("EVENT_BUS_SVC") or "").strip():
         os.environ["EVENT_BUS_SVC"] = "dp"
 
@@ -99,7 +97,7 @@ async def publish_etl_task_done(
                 "publish_time": publish_time,
                 "channel": CHANNEL_ETL_TASK_DONE,
                 "redis_db": dp_settings.QC_REDIS_DB,
-                "event_bus": os.getenv("EVENT_BUS", "redis"),
+                "event_bus": os.getenv("EVENT_BUS", "rocketmq"),
             },
         )
         return True
@@ -136,7 +134,7 @@ async def publish_call_session_ended(*, session_id: str) -> bool:
                 "session_id": session_id,
                 "publish_time": publish_time,
                 "channel": CHANNEL_SESSION_ENDED,
-                "event_bus": os.getenv("EVENT_BUS", "redis"),
+                "event_bus": os.getenv("EVENT_BUS", "rocketmq"),
             },
         )
         return True
@@ -146,6 +144,61 @@ async def publish_call_session_ended(*, session_id: str) -> bool:
             extra={
                 "event": "call.session.ended.publish_failed",
                 "session_id": session_id,
+                "publish_time": publish_time,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            },
+            exc_info=True,
+        )
+        return False
+
+
+async def publish_complaint_created(
+    *,
+    case_id: str,
+    event_id: str | None = None,
+    trace_id: str | None = None,
+) -> bool:
+    """发布 complaint.created（经 EventBus）；data 仅白名单 case_id。
+
+    投诉正文由 complaint-service 消费后反查组装（Decision 3）。
+    """
+    publish_time = datetime.now(_SHANGHAI).isoformat()
+    payload: dict[str, Any] = {
+        "case_id": case_id,
+        "trace_id": trace_id or f"complaint-created-{case_id}",
+    }
+    try:
+        from common.eventbus.factory import get_event_bus
+        from common.eventbus.util import whitelist_data
+
+        _ensure_event_bus_env()
+        bus = get_event_bus()
+        await bus.publish(
+            CHANNEL_COMPLAINT_CREATED,
+            whitelist_data(payload),
+            key=case_id,
+            event_id=event_id,
+            trace_id=str(payload.get("trace_id") or "") or None,
+        )
+        logger.info(
+            "complaint.created published",
+            extra={
+                "event": "complaint.created.published",
+                "case_id": case_id,
+                "event_id": event_id,
+                "publish_time": publish_time,
+                "channel": CHANNEL_COMPLAINT_CREATED,
+                "event_bus": os.getenv("EVENT_BUS", "rocketmq"),
+            },
+        )
+        return True
+    except Exception as exc:
+        logger.error(
+            "complaint.created publish FAILED",
+            extra={
+                "event": "complaint.created.publish_failed",
+                "case_id": case_id,
                 "publish_time": publish_time,
                 "error": str(exc),
                 "error_type": type(exc).__name__,

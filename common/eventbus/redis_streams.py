@@ -1,9 +1,7 @@
-"""Redis Streams EventBus adapter (spike no-go / optional EVENT_BUS value).
+"""Redis Streams EventBus adapter (historical spike / reference only).
 
-Go path (arm64 spike) uses ``rocketmq.py``; this module exists so factory can
-return a correct adapter when ``EVENT_BUS=redis_streams``. Implements
-consumer-group + XADD/XREADGROUP. Full PEL/XCLAIM/DLQ stream hardening is
-for the no-go production path.
+Not loaded by ``factory.get_event_bus`` (runtime accepts only ``rocketmq``).
+Implements consumer-group + XADD/XREADGROUP for contrast/reference.
 """
 from __future__ import annotations
 

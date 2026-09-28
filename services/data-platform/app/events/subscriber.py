@@ -1,9 +1,11 @@
-"""qc.check.completed 订阅器（data-platform；质检列回流）。
+"""qc.check.completed + complaint.result.ready 订阅器（data-platform）。
 
 收到 qc.check.completed（经统一 EventBus）后：
 1. 确认 qc_records 已落库（真开检）
 2. HTTP GET /api/v1/qc/records/{session_id} 反拉 score/risk/grade
 3. 更新快照质检列
+
+收到 complaint.result.ready：确认日志（可选反拉校验）；SHALL NOT 代写投诉列。
 
 质检链路与投诉链路独立：SHALL NOT 自动创建投诉工单（min-loop delta）。
 不订阅 qc.complaint.suspected 建单。
@@ -30,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 CHANNEL_QC_CHECK_COMPLETED = "qc.check.completed"
 CHANNEL_QC_COMPLAINT_SUSPECTED = "qc.complaint.suspected"  # 不订阅此频道建单
+CHANNEL_COMPLAINT_RESULT_READY = "complaint.result.ready"
 
 _WATCHDOG_INTERVAL_SECONDS = 30.0
 
@@ -198,20 +201,36 @@ async def handle_qc_check_completed(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def handle_complaint_result_ready(payload: dict[str, Any]) -> dict[str, Any]:
+    """确认 complaint.result.ready：记日志；不替代 write_session 写投诉列。"""
+    case_id = str(payload.get("case_id") or payload.get("complaint_no") or "")
+    logger.info(
+        "complaint.result.ready confirmed",
+        extra={
+            "event": "complaint.result.ready.confirmed",
+            "case_id": case_id or None,
+            "complaint_no": payload.get("complaint_no"),
+            "trace_id": payload.get("trace_id"),
+        },
+    )
+    return {"status": "ok", "case_id": case_id, "confirmed": True}
+
+
 class QcCheckSubscriber:
-    """订阅 qc.check.completed（经 EventBus）。
+    """订阅 qc.check.completed + complaint.result.ready（经 EventBus）。
 
     不订阅 qc.complaint.suspected；不自动建投诉；不轮询等待。
-    本 change 仅消费三事件中的回流腿；投诉链事件化不在范围。
     """
 
     def __init__(
         self,
         *,
         handler=None,
+        result_ready_handler=None,
         settings=dp_settings,
     ) -> None:
         self._handler = handler or handle_qc_check_completed
+        self._result_ready_handler = result_ready_handler or handle_complaint_result_ready
         self._settings = settings
         self._seed_times: dict[str, float] = {}
 
@@ -255,13 +274,22 @@ class QcCheckSubscriber:
         if name == CHANNEL_QC_COMPLAINT_SUSPECTED:
             logger.info("qc.complaint.suspected ignored (not for auto-create)")
             return {"status": "ignored", "channel": name}
-        if name != CHANNEL_QC_CHECK_COMPLETED:
-            logger.info("unsubscribed channel ignored: %s", name)
-            return {"status": "ignored", "channel": name}
 
         payload = dict(envelope.data)
         if envelope.trace_id and "trace_id" not in payload:
             payload["trace_id"] = envelope.trace_id
+
+        if name == CHANNEL_COMPLAINT_RESULT_READY:
+            try:
+                return await self._result_ready_handler(payload)
+            except Exception:
+                logger.exception("complaint.result.ready handler failed")
+                raise
+
+        if name != CHANNEL_QC_CHECK_COMPLETED:
+            logger.info("unsubscribed channel ignored: %s", name)
+            return {"status": "ignored", "channel": name}
+
         case_id = str(payload.get("case_id") or "")
         if case_id:
             self._clear_tracked(case_id)
@@ -306,28 +334,33 @@ class QcCheckSubscriber:
             return {"status": "error", "case_id": case_id}
 
     async def listen(self, redis: Any | None = None) -> None:
-        """订阅 qc.check.completed（经 EventBus）。"""
+        """订阅 qc.check.completed + complaint.result.ready（经 EventBus）。"""
         import os
 
         from common.eventbus.factory import get_event_bus
-        from common.eventbus.redis_pubsub import RedisPubSubEventBus
 
         if not (os.getenv("EVENT_BUS") or "").strip():
-            os.environ["EVENT_BUS"] = "redis"
+            os.environ["EVENT_BUS"] = "rocketmq"
         if not (os.getenv("EVENT_BUS_SVC") or "").strip():
             os.environ["EVENT_BUS_SVC"] = "dp"
 
-        mode = (os.getenv("EVENT_BUS") or "redis").strip().lower()
-        if mode == "redis" and redis is not None:
-            bus = RedisPubSubEventBus(redis=redis)
-        else:
-            bus = get_event_bus()
+        # ``redis`` arg kept for API compatibility; bus transport is RocketMQ only.
+        bus = get_event_bus()
 
-        async def _handler(envelope: EventEnvelope) -> None:
+        async def _qc_handler(envelope: EventEnvelope) -> None:
             await self.handle_envelope(envelope)
             self.check_timeouts()
 
-        await bus.subscribe(CHANNEL_QC_CHECK_COMPLETED, "dp", _handler)
+        async def _result_ready_handler(envelope: EventEnvelope) -> None:
+            if envelope.event_name != CHANNEL_COMPLAINT_RESULT_READY:
+                envelope = envelope.model_copy(
+                    update={"event_name": CHANNEL_COMPLAINT_RESULT_READY}
+                )
+            await self.handle_envelope(envelope)
+
+        await bus.subscribe(CHANNEL_QC_CHECK_COMPLETED, "dp", _qc_handler)
+        # 消费组短名 dp → gid_dp_complaint_result_ready
+        await bus.subscribe(CHANNEL_COMPLAINT_RESULT_READY, "dp", _result_ready_handler)
         try:
             while True:
                 await asyncio.sleep(3600)

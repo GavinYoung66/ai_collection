@@ -184,6 +184,12 @@ async def lifespan(app: FastAPI):
     consumer_task = asyncio.create_task(_queue_consumer_loop())
     app.state.queue_consumer = consumer_task
 
+    # 4.4：EventBus 业务订阅（含 complaint.created 占位 handler）；失败不阻断启动
+    from app.events.subscriber import start_eventbus_subscriber
+
+    eventbus_task = await start_eventbus_subscriber()
+    app.state.eventbus_subscriber = eventbus_task
+
     app.state.pg_degraded = False
     app.state.redis_degraded = False
     app.state.mcp_degraded = False
@@ -218,6 +224,17 @@ async def lifespan(app: FastAPI):
     consumer_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await consumer_task
+    if eventbus_task is not None:
+        eventbus_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await eventbus_task
+        # 与 subscriber 内 complaint_eventbus_subscriber_stopped 互补（lifespan 侧可观测）
+        import structlog
+
+        structlog.get_logger().info(
+            "complaint_eventbus_subscriber_shutdown",
+            cancelled=eventbus_task.cancelled() or eventbus_task.done(),
+        )
     # 取消在途排队研判任务：其 finally 仍会释放并发槽与幂等锁
     for task in list(_running_queued):
         task.cancel()

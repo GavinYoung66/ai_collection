@@ -56,6 +56,9 @@ services:
       PG_PORT: "5432"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      EVENT_BUS: ${EVENT_BUS:-rocketmq}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
@@ -102,6 +105,9 @@ services:
       QC_DEFAULT_ACTIVE_RULES_VERSION: v1.0
       QC_R14_RAG_ENABLED: "false"
       QC_REDIS_DB: "3"
+      EVENT_BUS: ${EVENT_BUS:-rocketmq}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
@@ -173,6 +179,9 @@ services:
       PG_PORT: "5432"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      EVENT_BUS: ${EVENT_BUS:-rocketmq}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}

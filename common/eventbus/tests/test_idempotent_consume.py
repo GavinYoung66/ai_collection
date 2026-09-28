@@ -2,47 +2,41 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any
 
 import pytest
 
-from common.eventbus.envelope import EventEnvelope
-from common.eventbus.factory import reset_event_bus
-from common.eventbus.redis_pubsub import RedisPubSubEventBus
+from common.eventbus.envelope import EventEnvelope, build_envelope
 
 
-class _FakePubSub:
-    def __init__(self, bus: "_FakeRedis") -> None:
-        self._bus = bus
-        self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+class _MockEventBus:
+    """In-memory EventBus Protocol stand-in (no redis / factory)."""
 
-    async def subscribe(self, channel: str) -> None:
-        self._bus._subs.setdefault(channel, []).append(self)
-
-    async def unsubscribe(self, channel: str) -> None:
-        return None
-
-    async def aclose(self) -> None:
-        return None
-
-    async def listen(self):
-        yield {"type": "subscribe", "data": 1}
-        while True:
-            yield await self._queue.get()
-
-
-class _FakeRedis:
     def __init__(self) -> None:
-        self._subs: dict[str, list[_FakePubSub]] = {}
+        self._handlers: dict[str, list[Any]] = {}
 
-    def pubsub(self) -> _FakePubSub:
-        return _FakePubSub(self)
+    async def publish(
+        self,
+        event_name: str,
+        data: dict[str, Any],
+        *,
+        key: str | None = None,
+        trace_id: str | None = None,
+        event_id: str | None = None,
+    ) -> None:
+        env = build_envelope(
+            event_name,
+            data,
+            event_id=event_id,
+            trace_id=trace_id or "tr_mock",
+        )
+        for handler in self._handlers.get(event_name, []):
+            await handler(env)
 
-    async def publish(self, channel: str, message: str) -> int:
-        for sub in self._subs.get(channel, []):
-            await sub._queue.put({"type": "message", "channel": channel, "data": message})
-        return 1
+    async def subscribe(
+        self, event_name: str, group: str, handler: Any
+    ) -> None:
+        self._handlers.setdefault(event_name, []).append(handler)
 
     async def aclose(self) -> None:
         return None
@@ -51,12 +45,7 @@ class _FakeRedis:
 @pytest.mark.asyncio
 async def test_duplicate_event_id_processed_once_by_idempotent_handler():
     """Same ``event_id`` redelivered → handler processes once (spec 幂等消费)."""
-    os.environ["EVENT_BUS"] = "redis"
-    os.environ["EVENT_BUS_SVC"] = "qc"
-    reset_event_bus()
-
-    fake = _FakeRedis()
-    bus = RedisPubSubEventBus(redis=fake)
+    bus = _MockEventBus()
     seen: set[str] = set()
     outcomes: list[str] = []
 
@@ -68,7 +57,6 @@ async def test_duplicate_event_id_processed_once_by_idempotent_handler():
         outcomes.append("process")
 
     await bus.subscribe("etl.task.done", "qc", idempotent_handler)
-    await asyncio.sleep(0.05)
 
     await bus.publish(
         "etl.task.done",
@@ -86,11 +74,6 @@ async def test_duplicate_event_id_processed_once_by_idempotent_handler():
         trace_id="tr_dup",
     )
 
-    for _ in range(50):
-        if len(outcomes) >= 2:
-            break
-        await asyncio.sleep(0.05)
-
     await bus.aclose()
     assert outcomes == ["process", "skip"]
     assert seen == {"evt_dup_fixed"}
@@ -99,8 +82,6 @@ async def test_duplicate_event_id_processed_once_by_idempotent_handler():
 @pytest.mark.asyncio
 async def test_envelope_exposes_event_id_for_dedup():
     """EventBus SHALL expose ``event_id`` so subscribers can dedupe."""
-    from common.eventbus.envelope import build_envelope
-
     env = build_envelope(
         "qc.check.completed",
         {"qc_record_id": "q1", "session_id": "s1", "case_id": "c1"},

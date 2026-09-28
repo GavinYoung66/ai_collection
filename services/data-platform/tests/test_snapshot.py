@@ -1,4 +1,4 @@
-"""快照表固定 14 列与序列化；回写请求体多传字段必须被拒。"""
+"""快照表固定 17 列与序列化；回写请求体多传字段必须被拒。"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -28,12 +28,15 @@ _EXPECTED_COLUMNS = [
     "verdict",
     "task_status",
     "backflow_at",
+    "product_type",
+    "repayment_records",
+    "create_time",
 ]
 
 
-def test_snapshot_columns_exactly_fourteen_english_names():
+def test_snapshot_columns_exactly_seventeen_english_names():
     assert SNAPSHOT_COLUMNS == tuple(_EXPECTED_COLUMNS)
-    assert len(SNAPSHOT_COLUMNS) == 14
+    assert len(SNAPSHOT_COLUMNS) == 17
     # 质检列沿用 qc_records 库列名，禁止退化为 score/risk
     assert "compliance_score" in SNAPSHOT_COLUMNS
     assert "risk_level" in SNAPSHOT_COLUMNS
@@ -41,7 +44,7 @@ def test_snapshot_columns_exactly_fourteen_english_names():
     assert "risk" not in SNAPSHOT_COLUMNS
 
 
-def test_serialize_snapshot_keeps_fourteen_keys_and_nulls():
+def test_serialize_snapshot_keeps_seventeen_keys_and_nulls():
     row = {
         "case_id": "11111111-2222-4333-8444-555555555501",
         "customer_name": "张*",
@@ -57,6 +60,9 @@ def test_serialize_snapshot_keeps_fourteen_keys_and_nulls():
         "verdict": None,
         "task_status": None,
         "backflow_at": datetime(2026, 9, 23, 15, 30, tzinfo=_SH),
+        "product_type": "credit_card",
+        "repayment_records": [],
+        "create_time": datetime(2026, 9, 20, 10, 0, tzinfo=_SH),
     }
     data = serialize_snapshot(row)
     assert list(data.keys()) == _EXPECTED_COLUMNS
@@ -66,8 +72,11 @@ def test_serialize_snapshot_keeps_fourteen_keys_and_nulls():
     for key in ("qc_record_id", "compliance_score", "risk_level", "has_high_alert",
                 "complaint_id", "verdict", "task_status"):
         assert data[key] is None
-    # 不引入第 15 个键
-    assert len(data) == 14
+    assert data["product_type"] == "credit_card"
+    assert data["repayment_records"] == []
+    assert data["create_time"] == datetime(2026, 9, 20, 10, 0, tzinfo=_SH).isoformat()
+    # 不引入第 18 个键
+    assert len(data) == 17
 
 
 def test_serialize_snapshot_naive_datetime_isoformat():

@@ -1,18 +1,28 @@
-"""run_min_loop.py — 最小闭环验收脚本（tasks 6.1~6.11）
+"""run_min_loop.py — 最小闭环验收脚本（complaint-event-driven 6.1）
 
-顺序：种子 → etl.task.done → 等 qc.check.completed → 推投诉 →
-judge(run_graph=true) → PUT review approve → 确认快照两侧都有值。
+顺序：种子 → etl.task.done → 等 qc.check.completed → 更新质检列 →
+发布 ``complaint.created``（EventBus）→ 等待快照投诉列回流 → 确认两侧非空。
 
-USE_MOCK_MCP=false（complaint-service 需以此环境启动）。
-可重复执行（upsert 覆盖 + 幂等创建，不产生重复数据）。
+投诉腿为**事件驱动**：脚本不调用 ComplaintClient 三步（create→judge→review）。
+complaint-service 消费 created → 幂等建单 → judge；验收环境
+``SIM_AUTO_REVIEW=true`` 同栈 auto-approve → sample_backflow → write_session
+→ ``complaint.result.ready``。
+
+等待证据选用**轮询快照投诉列**（非订阅 result.ready）：
+理由 — 快照列是验收权威（两路回流对账）；脚本内再挂一条 RocketMQ
+consumer 易与 dp 服务/qc 订阅争用客户端，轮询与既有 ``_poll_complaint_cols``
+一致且实现更稳。
+
+USE_MOCK_MCP=false（complaint-service 需以此环境启动）；SIM_AUTO_REVIEW=true。
+可重复执行（case_id 幂等，不产生重复投诉）。
 
 用法（仓库根目录）：
     python services/data-platform/scripts/run_min_loop.py
 
 前置：
-- complaint-service 以 USE_MOCK_MCP=false 启动
+- complaint-service 以 USE_MOCK_MCP=false、SIM_AUTO_REVIEW=true 启动
 - qc-service / rag-service / data-platform 运行中
-- Redis（db=3）和 PostgreSQL 可达
+- EVENT_BUS=rocketmq；Redis（db=3）和 PostgreSQL 可达
 """
 from __future__ import annotations
 
@@ -43,9 +53,10 @@ from sqlalchemy.pool import NullPool                   # noqa: E402
 
 from common.config.settings import settings as platform_settings  # noqa: E402
 from app.core.config import dp_settings                # noqa: E402
-from app.core.redis import build_redis                 # noqa: E402
-from app.events.publisher import publish_etl_task_done  # noqa: E402
-from app.integrations.complaint_client import ComplaintClient  # noqa: E402
+from app.events.publisher import (  # noqa: E402
+    publish_complaint_created,
+    publish_etl_task_done,
+)
 from seed_min_loop import (  # noqa: E402
     seed, CASE_ID, SESSION_ID,
     PHONE_ENCRYPTED, PHONE_HASH, CUSTOMER_NAME,
@@ -56,7 +67,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 CHANNEL_QC = "qc.check.completed"
-DEFAULT_COMPLAINT_TEXT = "质检发现坐席通话中存在不当话术（假冒法院、威胁催收），请研判是否构成违规投诉。"
 
 # 验收结果
 _results: list[dict[str, Any]] = []
@@ -115,23 +125,21 @@ async def _subscribe_qc_event(
     """
     from common.eventbus.envelope import EventEnvelope
     from common.eventbus.factory import reset_event_bus
-    from common.eventbus.redis_pubsub import RedisPubSubEventBus
     from common.eventbus.rocketmq import RocketMQEventBus
 
     if not (os.getenv("EVENT_BUS") or "").strip():
-        os.environ["EVENT_BUS"] = "redis"
+        os.environ["EVENT_BUS"] = "rocketmq"
     if not (os.getenv("EVENT_BUS_SVC") or "").strip():
         os.environ["EVENT_BUS_SVC"] = "dp"
 
-    mode = (os.getenv("EVENT_BUS") or "redis").strip().lower()
+    mode = (os.getenv("EVENT_BUS") or "rocketmq").strip().lower()
+    if mode != "rocketmq":
+        raise ValueError(f"run_min_loop requires EVENT_BUS=rocketmq, got {mode!r}")
     # Keep factory clear so publish_etl_task_done gets its own Producer.
     reset_event_bus()
-    if mode == "redis":
-        bus = RedisPubSubEventBus(redis=build_redis())
-    else:
-        # Host → mapped Proxy (container services use rocketmq-proxy:8081).
-        os.environ.setdefault("ROCKETMQ_PROXY", "localhost:18081")
-        bus = RocketMQEventBus(endpoints=os.environ["ROCKETMQ_PROXY"])
+    # Host → mapped Proxy (container services use rocketmq-proxy:8081).
+    os.environ.setdefault("ROCKETMQ_PROXY", "localhost:18081")
+    bus = RocketMQEventBus(endpoints=os.environ["ROCKETMQ_PROXY"])
 
     async def _handler(envelope: EventEnvelope) -> None:
         if not accepting.is_set():
@@ -295,20 +303,20 @@ async def _existing_done_qc(engine) -> dict[str, Any] | None:
 
 
 async def run_flow() -> bool:
-    """6.1: 种子 → etl.task.done → 等 qc.check.completed → 推投诉 → judge → review → 确认两侧。"""
-    print("\n=== 6.1 闭环流程 ===")
+    """种子 → qc 腿 → 发布 complaint.created → 轮询快照投诉列 → 确认两侧。"""
+    print("\n=== 6.1 闭环流程（事件驱动投诉腿）===")
     engine = _engine()
     try:
         # 1. 种子
-        print("  [1/7] 种子入库...")
+        print("  [1/6] 种子入库...")
         await seed()
 
-        # 2. 幂等重跑探测（任务 6.4：连续重跑不重复开检、无重复数据）
+        # 2. 幂等重跑探测（连续重跑不重复开检、无重复数据）
         global _idempotent_rerun
         done_qc = await _existing_done_qc(engine)
         if done_qc is not None:
             _idempotent_rerun = True
-            print(f"  [2/7] 幂等重跑：质检已终态({done_qc.get('qc_status')})，"
+            print(f"  [2/6] 幂等重跑：质检已终态({done_qc.get('qc_status')})，"
                   f"跳过事件等待与质检列更新")
         else:
             _idempotent_rerun = False
@@ -328,7 +336,7 @@ async def run_flow() -> bool:
                 return False
 
             # 3. 发布 etl.task.done（独立 Producer；勿与订阅端共用 RocketMQ 客户端）
-            print("  [3/7] 发布 etl.task.done...")
+            print("  [3/6] 发布 etl.task.done...")
             global _publish_time
             _publish_time = datetime.now(_SHANGHAI)
             from common.eventbus.factory import reset_event_bus
@@ -344,7 +352,7 @@ async def run_flow() -> bool:
             sub_accepting.set()
 
             # 4. 等 qc.check.completed
-            print(f"  [4/7] 等待 qc.check.completed（超时 {dp_settings.QC_TIMEOUT_MINUTES}min）...")
+            print(f"  [4/6] 等待 qc.check.completed（超时 {dp_settings.QC_TIMEOUT_MINUTES}min）...")
             try:
                 payload = await asyncio.wait_for(
                     qc_future, timeout=dp_settings.QC_TIMEOUT_MINUTES * 60
@@ -361,80 +369,74 @@ async def run_flow() -> bool:
                 return False
             print(f"         收到: score={payload.get('score')} risk={payload.get('risk')}")
 
-            # 5. 更新快照质检列
-            print("  [5/7] 更新快照质检列...")
+            # 5. 更新快照质检列（投诉由后续 complaint.created 触发，不在此建单）
+            print("  [5/6] 更新快照质检列...")
             await _update_qc_cols(engine, payload)
 
-        # 6. 推投诉（只带 complaint_text + case_id）
-        print("  [5/7] 创建投诉工单...")
-        client = ComplaintClient()
-        complaint_id = await client.create_complaint(
-            case_id=CASE_ID, complaint_text=DEFAULT_COMPLAINT_TEXT,
-        )
-        if not complaint_id:
-            # 可能 data-platform subscriber 已创建，查 DB 确认
-            async with engine.connect() as conn:
-                row = (await conn.execute(
-                    text("SELECT id::text FROM complaints WHERE case_id = :cid LIMIT 1"),
-                    {"cid": CASE_ID},
-                )).mappings().first()
-            if row:
-                complaint_id = row["id"]
-                print(f"         投诉已存在: {complaint_id}")
-            else:
-                _record("6.1", "闭环流程", False, "投诉创建失败")
-                return False
-        else:
-            print(f"         投诉创建: {complaint_id}")
-
-        # 7. Judge + review approve（已 approve 回流的终态工单幂等跳过，不重跑图）
+        # 6. 投诉腿：EventBus 发布 complaint.created（仅 case_id；正文由投诉侧组装）
+        # 不调用 ComplaintClient.create / judge / review（闭环主路径禁用 HTTP 三步）。
         pre_snap = await _get_snapshot(engine)
-        already_terminal = bool(
-            pre_snap and pre_snap.get("complaint_id")
-            and pre_snap.get("task_status") in ("resolved", "closed", "archived")
+        already_backflowed = bool(
+            pre_snap and pre_snap.get("complaint_id") and pre_snap.get("verdict")
         )
-        if already_terminal:
-            print("  [6/7] 幂等重跑：工单已终态，跳过 judge/review（不重跑图）")
-            _record("6.1-judge", "judge 后停在 human_review", True,
-                    "idempotent rerun: task_status="
-                    f"{pre_snap.get('task_status')}（首跑已验证）")
-            _record("6.5-pre", "approve 前投诉列为空", True,
-                    "idempotent rerun: 首跑 approve 后投诉列保留，不重复 approve")
+        if already_backflowed:
+            print(
+                "  [6/6] 幂等重跑：快照投诉列已非空，仍发 complaint.created"
+                "（投诉侧 case_id 幂等）后确认列保留"
+            )
         else:
-            print("  [6/7] POST judge (run_graph=true)...")
-            await client.judge_complaint(complaint_id=complaint_id)
+            print("  [6/6] 发布 complaint.created（EventBus，白名单仅 case_id）...")
 
-            # spec L207: judge 后停在 human_review（投诉状态 = pending_review）
-            await asyncio.sleep(1)  # 等 judge 异步处理
-            async with engine.connect() as conn:
-                comp_status = (await conn.execute(
-                    text("SELECT status FROM complaints WHERE case_id = :cid LIMIT 1"),
-                    {"cid": CASE_ID},
-                )).mappings().first()
-            judge_stopped = bool(comp_status and comp_status.get("status")
-                                 and any(kw in str(comp_status.get("status")).lower()
-                                         for kw in ("pending", "review", "human", "待审")))
-            _record("6.1-judge", "judge 后停在 human_review", judge_stopped,
-                    f"status={comp_status.get('status') if comp_status else None}")
+        from common.eventbus.factory import reset_event_bus
 
-            # 8. PUT review approve（恢复图 → sample_backflow → write_session）
-            # spec L207: approve 前投诉列为空（judge 停在人审，write_session 未调用）
-            pre_cols_empty = not (pre_snap and pre_snap.get("complaint_id"))
-            print(f"  [7/7] PUT review approve（前投诉列={'空' if pre_cols_empty else '非空'}）...")
-            _record("6.5-pre", "approve 前投诉列为空", pre_cols_empty,
-                    f"complaint_id={pre_snap.get('complaint_id') if pre_snap else None}")
-            await client.review_approve(complaint_id=complaint_id)
+        reset_event_bus()
+        if (os.getenv("EVENT_BUS") or "").strip().lower() == "rocketmq":
+            os.environ.setdefault("ROCKETMQ_PROXY", "localhost:18081")
+        created_ok = await publish_complaint_created(
+            case_id=CASE_ID,
+            trace_id=f"min-loop-created-{CASE_ID}",
+        )
+        if not created_ok:
+            _record("6.1", "闭环流程", False, "complaint.created 发布失败")
+            return False
+        _record(
+            "6.1-created",
+            "发布 complaint.created（事件驱动投诉腿）",
+            True,
+            f"case_id={CASE_ID} published=True",
+        )
+        _record(
+            "6.1-no-http-triad",
+            "主路径无 ComplaintClient create→judge→review",
+            True,
+            "脚本仅 publish_complaint_created + 轮询快照投诉列",
+        )
 
-            # 等待 write_session 桥回写快照投诉列
-            print("  等待快照投诉列回流...")
-            await _poll_complaint_cols(engine, timeout=60.0)
+        # 等待证据：轮询快照投诉列（见模块 docstring 选型理由）
+        print("  等待快照投诉列回流（SIM_AUTO_REVIEW 在投诉进程内完成 approve）...")
+        cols_ready = already_backflowed or await _poll_complaint_cols(
+            engine, timeout=120.0
+        )
+        if not cols_ready:
+            _record(
+                "6.1",
+                "闭环流程",
+                False,
+                "超时：快照投诉列仍为空（检查 SIM_AUTO_REVIEW / complaint 订阅）",
+            )
+            return False
 
         # 确认快照两侧都有值
         snap = await _get_snapshot(engine)
         qc_ok = bool(snap and snap.get("compliance_score") is not None)
         cp_ok = bool(snap and snap.get("complaint_id") and snap.get("verdict"))
-        _record("6.1", "闭环流程", qc_ok and cp_ok,
-                f"qc_cols={'ok' if qc_ok else 'empty'} complaint_cols={'ok' if cp_ok else 'empty'}")
+        _record(
+            "6.1",
+            "闭环流程（事件驱动）",
+            qc_ok and cp_ok,
+            f"qc_cols={'ok' if qc_ok else 'empty'} complaint_cols={'ok' if cp_ok else 'empty'} "
+            f"complaint_id={snap.get('complaint_id') if snap else None}",
+        )
         return qc_ok and cp_ok
     finally:
         await engine.dispose()
@@ -560,7 +562,7 @@ async def verify_6_4() -> None:
 # ──────────────────────────────────────────────────────────────
 
 async def verify_6_5() -> None:
-    """6.5: 质检完成后才创建投诉；人审 approve 后投诉列才有值。"""
+    """6.5: 质检完成后才发 complaint.created；回流后投诉列才有值。"""
     print("\n=== 6.5 顺序验证 ===")
     engine = _engine()
     try:
@@ -579,8 +581,12 @@ async def verify_6_5() -> None:
         timing_ok = bool(qc_time and comp_time and comp_time > qc_time)
         cols_ok = bool(snap and snap.get("complaint_id") and snap.get("verdict"))
         ok = timing_ok and cols_ok
-        _record("6.5", "质检完成后才创建投诉；approve 后投诉列有值", ok,
-                f"qc_at={qc_time} complaint_at={comp_time} complaint_cols={'ok' if cols_ok else 'empty'}")
+        _record(
+            "6.5",
+            "质检完成后才有投诉工单；事件链回流后投诉列有值",
+            ok,
+            f"qc_at={qc_time} complaint_at={comp_time} complaint_cols={'ok' if cols_ok else 'empty'}",
+        )
     finally:
         await engine.dispose()
 
@@ -658,7 +664,7 @@ async def verify_6_7() -> None:
              "-x", "-q"],
             cwd=str(cs_root),
             capture_output=True, text=True, timeout=120,
-            env={**os.environ, "USE_MOCK_MCP": "true", "EVENT_BUS": "redis"},
+            env={**os.environ, "USE_MOCK_MCP": "true", "EVENT_BUS": "rocketmq"},
         )
         proc_ok = proc.returncode == 0
         proc_tail = (proc.stdout.strip().split("\n")[-1]
@@ -727,8 +733,7 @@ async def verify_6_9() -> None:
                  "--tb=line"],
                 cwd=str(test_dir),
                 capture_output=True, text=True, timeout=300,
-                # Unit suites assume redis transport; do not inherit rocketmq host env.
-                env={**os.environ, "USE_MOCK_MCP": "true", "EVENT_BUS": "redis"},
+                env={**os.environ, "USE_MOCK_MCP": "true", "EVENT_BUS": "rocketmq"},
             )
             ok = proc.returncode == 0
             if not ok:
@@ -808,13 +813,14 @@ async def verify_6_11() -> None:
 
 async def main() -> int:
     print("=" * 60)
-    print("data-platform-min-loop 批次④ 闭环验收")
+    print("data-platform-min-loop 闭环验收（complaint.created 事件驱动）")
     print(f"case_id={CASE_ID}")
     print(f"session_id={SESSION_ID}")
+    print(f"EVENT_BUS={os.getenv('EVENT_BUS', 'rocketmq')}")
+    print("complaint leg: publish_complaint_created → poll snapshot cols")
+    print("(no ComplaintClient create→judge→review)")
     print(f"COMPLAINT_SERVICE_URL={dp_settings.COMPLAINT_SERVICE_URL}")
     print(f"QC_REDIS_DB={dp_settings.QC_REDIS_DB}")
-    print(f"COMPLAINT_HTTP_TIMEOUT={dp_settings.COMPLAINT_HTTP_TIMEOUT}s "
-          f"RETRY={dp_settings.COMPLAINT_HTTP_RETRY}")
     print("=" * 60)
 
     await verify_6_2()

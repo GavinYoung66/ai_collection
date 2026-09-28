@@ -29,10 +29,6 @@ class DataPlatformSettings(BaseSettings):
     # 种子入库后等待 qc.check.completed 的超时告警阈值（分钟）。
     QC_TIMEOUT_MINUTES: int = 10
 
-    # judge 跑图有界预算：投诉创建全量，judge/review 仅前 N 单（LLM 瓶颈+成本约束）。
-    # 超出预算的投诉停在"已创建未研判"。可用环境变量 JUDGE_BUDGET 覆盖。
-    JUDGE_BUDGET: int = 20
-
     @model_validator(mode="after")
     def _redis_db_must_not_be_default_zero(self) -> DataPlatformSettings:
         if self.QC_REDIS_DB == 0:

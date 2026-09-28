@@ -1,21 +1,24 @@
-"""run_batch_flow.py — 批量全链路回流验收脚本（tasks 5.2~5.5）
+"""run_batch_flow.py — 批量全链路回流验收（complaint-event-driven 6.2）
 
 流程：
 1. 读取 200 条 batch case_id + session_id
-2. 发布 200 条 etl.task.done 到 Redis 3 号库
-3. 等待 qc.check.completed 事件被消费（qc_records 落库 + 快照质检列回流）
-4. 等待投诉创建完成（complaints 表 +200）
-5. 等待 judge+review 有界子集完成（快照投诉列回流 ~20 行）
+2. 发布 200 条 etl.task.done（EventBus / RocketMQ）
+3. 等待 qc 落库 + 快照质检列回流
+4. 对质检列已回流的每个 case 批量 ``publish_complaint_created``
+   （研判量 = 事件条数；无 JUDGE_BUDGET）
+5. 轮询快照投诉列回流数（与 min_loop 同口径：轮询快照，非订 result.ready）
 6. 逐项验证 + 输出对账矩阵
+
+不调用 ComplaintClient 三步；complaint 侧 SIM_AUTO_REVIEW=true 完成 approve。
 
 用法（仓库根目录）：
     python services/data-platform/scripts/run_batch_flow.py
 
 前置：
-- gen_cases_batch + gen_calls_batch 已执行（5.1 PASS）
+- gen_cases_batch + gen_calls_batch 已执行
 - data-platform / qc-service / complaint-service / rag-service 运行中
-- USE_MOCK_MCP=false（complaint-service 需以此环境启动）
-- Redis（db=3）和 PostgreSQL 可达
+- complaint-service：USE_MOCK_MCP=false、SIM_AUTO_REVIEW=true
+- EVENT_BUS=rocketmq；PostgreSQL 可达
 """
 from __future__ import annotations
 
@@ -50,7 +53,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 QC_REDIS_DB = dp_settings.QC_REDIS_DB
-CHANNEL_QC = "qc.check.completed"
 
 # 验收结果
 _results: list[dict[str, Any]] = []
@@ -83,7 +85,7 @@ async def _read_batch_cases(engine) -> list[dict[str, str]]:
 
 
 async def _publish_etl_done(cases: list[dict[str, str]]) -> int:
-    """经 EventBus 发布 etl.task.done（默认 EVENT_BUS=redis → QC_REDIS_DB）。
+    """经 EventBus 发布 etl.task.done（默认 EVENT_BUS=rocketmq）。
 
     qc-service 收到后按 backfill_date 查 pending-qc 并逐个开检。
     为满足"推送 200 条"口径，对每条 case 发一条事件。
@@ -178,6 +180,53 @@ async def _count_judged_complaints(engine, case_ids: list[str]) -> int:
         return r.scalar() or 0
 
 
+async def _case_ids_with_qc_cols(engine, case_ids: list[str]) -> list[str]:
+    """质检列已回流的 case_id（投诉腿只对这些案发 complaint.created）。"""
+    if not case_ids:
+        return []
+    async with engine.connect() as conn:
+        rows = (await conn.execute(text("""
+            SELECT case_id::text AS case_id FROM dw.ads_case_loop
+            WHERE case_id = ANY(:cids)
+              AND qc_record_id IS NOT NULL
+              AND compliance_score IS NOT NULL
+            ORDER BY case_id
+        """), {"cids": case_ids})).mappings().all()
+    return [str(r["case_id"]) for r in rows]
+
+
+async def _publish_complaint_created_batch(case_ids: list[str]) -> int:
+    """批量发布 complaint.created；失败记日志并跳过，不中断批次。
+
+    返回实际 publish 成功条数（与日志口径一致）。
+    """
+    from common.eventbus.factory import reset_event_bus
+    from app.events.publisher import publish_complaint_created
+
+    if not (os.getenv("EVENT_BUS") or "").strip():
+        os.environ["EVENT_BUS"] = "rocketmq"
+    if not (os.getenv("EVENT_BUS_SVC") or "").strip():
+        os.environ["EVENT_BUS_SVC"] = "dp"
+    reset_event_bus()
+    if (os.getenv("EVENT_BUS") or "").strip().lower() == "rocketmq":
+        os.environ.setdefault("ROCKETMQ_PROXY", "localhost:18081")
+
+    published = 0
+    for cid in case_ids:
+        ok = await publish_complaint_created(
+            case_id=cid,
+            trace_id=f"batch-created-{cid}",
+        )
+        if ok:
+            published += 1
+        else:
+            logger.error(
+                "complaint.created publish failed; continue batch",
+                extra={"case_id": cid},
+            )
+    return published
+
+
 async def _count_duplicate_snapshot(engine, case_ids: list[str]) -> int:
     """统计快照表重复数。"""
     if not case_ids:
@@ -220,65 +269,6 @@ async def _wait_for_count(fn, target: int, timeout: float = 600.0, interval: flo
         print(f"  {label}: {last}/{target}...", end="\r")
         await asyncio.sleep(interval)
     return last
-
-
-async def _read_qc_records_for_republish(engine) -> list[dict[str, Any]]:
-    """读取 batch qc_records 用于重发 qc.check.completed 事件。
-
-    当 subscriber 因 COMPLAINT_SERVICE_URL 错误错过投诉创建时，
-    从 DB 读取已落库的 qc_records 并重新发布 qc.check.completed 事件。
-    """
-    async with engine.connect() as conn:
-        rows = (await conn.execute(text("""
-            SELECT q.id::text AS qc_record_id,
-                   q.session_id,
-                   cr.case_id::text AS case_id,
-                   cr.id::text AS call_id,
-                   q.compliance_score AS score,
-                   q.risk_level AS risk,
-                   q.grade AS grade
-            FROM qc_records q
-            JOIN call_records cr ON cr.session_id = q.session_id
-            WHERE cr.session_id LIKE 'batch-call-%'
-              AND q.is_delete = '0'
-            ORDER BY q.create_time
-        """))).mappings().all()
-    return [dict(r) for r in rows]
-
-
-async def _republish_qc_completed(qc_records: list[dict[str, Any]]) -> int:
-    """从 DB 读取的 qc_records 经 EventBus 重发 qc.check.completed（信封白名单 data）。"""
-    import os
-
-    from common.eventbus.factory import get_event_bus, reset_event_bus
-    from common.eventbus.util import whitelist_data
-
-    if not (os.getenv("EVENT_BUS") or "").strip():
-        os.environ["EVENT_BUS"] = "redis"
-    if not (os.getenv("EVENT_BUS_SVC") or "").strip():
-        os.environ["EVENT_BUS_SVC"] = "dp"
-    reset_event_bus()
-    bus = get_event_bus(force_new=True)
-    published = 0
-    for rec in qc_records:
-        payload = {
-            "trace_id": f"republish-{rec['case_id']}",
-            "session_id": rec["session_id"],
-            "case_id": rec["case_id"],
-            "qc_record_id": rec["qc_record_id"],
-            # score/risk 不上总线；消费方 HTTP 反拉
-            "score": rec.get("score"),
-            "risk": rec.get("risk"),
-            "grade": rec.get("grade"),
-        }
-        await bus.publish(
-            CHANNEL_QC,
-            whitelist_data(payload),
-            key=str(rec["session_id"]),
-            trace_id=str(payload["trace_id"]),
-        )
-        published += 1
-    return published
 
 
 async def run_batch_flow() -> dict[str, Any]:
@@ -352,92 +342,119 @@ async def run_batch_flow() -> dict[str, Any]:
         _record("5.2", f"dw.ads_case_loop 质检列回流 {snap_qc} 行非空", snap_qc_pass,
                 f"snapshot_qc_cols={snap_qc}, target>=168")
 
-        # 如果投诉未创建（subscriber 因 URL 错误错过），重发 qc.check.completed
-        existing_comp = await _count_complaints(engine, case_ids)
-        if existing_comp < 168:
-            print(f"\n投诉仅 {existing_comp} 条，重发 qc.check.completed 事件...")
-            qc_recs = await _read_qc_records_for_republish(engine)
-            republished = await _republish_qc_completed(qc_recs)
-            print(f"重发 qc.check.completed: {republished} 条 (Redis db={QC_REDIS_DB})")
-            # 给 subscriber 时间处理
-            await asyncio.sleep(5)
+        # === 6.2 质检列确认后批量发 complaint.created（事件条数 = 研判预算）===
+        print("\n=== 6.2 批量 publish complaint.created ===")
+        qc_ready_ids = await _case_ids_with_qc_cols(engine, case_ids)
+        print(f"质检列已回流 case 数: {len(qc_ready_ids)}（将逐条发 complaint.created）")
+        created_published = await _publish_complaint_created_batch(qc_ready_ids)
+        stats["complaint_created_published"] = created_published
+        stats["complaint_created_target"] = len(qc_ready_ids)
+        print(
+            f"complaint.created 发布成功: {created_published}/{len(qc_ready_ids)} "
+            f"（日志口径=实际成功条数）"
+        )
+        pub_ok = created_published == len(qc_ready_ids) and created_published >= 168
+        _record(
+            "6.2-pub",
+            "质检列回流后批量 publish_complaint_created",
+            pub_ok,
+            f"published={created_published} target_cases={len(qc_ready_ids)}",
+        )
+        if created_published == 0:
+            _record("6.2", "批量投诉事件腿", False, "零条 complaint.created 发布成功")
+            return stats
 
-        # === 5.3 批量创建投诉 ===
-        print("\n=== 5.3 批量创建投诉 ===")
+        # 等待投诉落库（投诉侧消费 created；case_id 幂等）
+        print("\n=== 等待投诉落库（事件消费）===")
         complaints_done = await _wait_for_count(
             lambda: _count_complaints(engine, case_ids),
-            target=168, timeout=600, interval=5,
+            target=created_published, timeout=600, interval=5,
             label="complaints",
         )
         stats["complaints"] = complaints_done
-        print(f"\n投诉落库: {complaints_done}/168+")
+        print(f"\n投诉落库: {complaints_done}/{created_published}")
 
-        comp_pass = complaints_done >= 168
-        _record("5.3", f"complaints 表 {complaints_done} 行（≥168 completed calls）", comp_pass,
-                f"complaints={complaints_done}, target>=168")
+        comp_pass = complaints_done >= min(created_published, 168)
+        _record(
+            "6.2-comp",
+            f"complaints 表 {complaints_done} 行（≈ created 事件条数）",
+            comp_pass,
+            f"complaints={complaints_done}, created_events={created_published}",
+        )
 
         dup_comp = await _count_duplicate_complaints(engine, case_ids)
         stats["duplicate_complaints"] = dup_comp
-        _record("5.3", "零重复 case_id", dup_comp == 0,
+        _record("6.2-dup", "零重复 case_id", dup_comp == 0,
                 f"duplicate_complaints={dup_comp}")
 
         texts = await _sample_complaint_texts(engine, case_ids)
         texts_diff = len(texts) >= 2 and texts[0] != texts[1]
-        _record("5.3", "抽样两起 complaint_text 内容不同", texts_diff,
+        _record("6.2-text", "抽样两起 complaint_text 内容不同", texts_diff,
                 f"texts_sample={len(texts)}, diff={texts_diff}")
 
-        # === 5.4 judge + review 有界子集 ===
-        print("\n=== 5.4 judge + review 有界子集 ===")
+        # 等待快照投诉列回流（与 min_loop 同口径：轮询快照列）
+        print("\n=== 等待快照投诉列回流（SIM_AUTO_REVIEW / write_session）===")
+        judged_target = max(1, min(created_published, created_published))
         judged = await _wait_for_count(
             lambda: _count_judged_complaints(engine, case_ids),
-            target=15, timeout=900, interval=10,
+            target=judged_target, timeout=900, interval=10,
             label="judged",
         )
         stats["judged"] = judged
-        print(f"\n已研判（快照投诉列非空）: {judged}")
+        print(f"\n已回流投诉列: {judged}/{created_published}")
 
-        budget = dp_settings.JUDGE_BUDGET
-        judged_pass = 10 <= judged <= budget + 5  # 约 20，容忍 ±5
-        _record("5.4", f"约 {budget} 单 judge+review 完成（快照投诉列非空）", judged_pass,
-                f"judged={judged}, budget={budget}")
+        judged_pass = judged >= max(1, int(created_published * 0.8))
+        _record(
+            "6.2-judged",
+            "快照投诉列回流（事件条数控流，无 budget）",
+            judged_pass,
+            f"judged={judged}, created_events={created_published}",
+        )
 
-        # === 5.5 两路回流 + 零重复对账 ===
-        print("\n=== 5.5 两路回流 + 零重复对账 ===")
+        # === 两路回流 + 零重复对账 ===
+        print("\n=== 两路回流 + 零重复对账 ===")
 
-        # 被处理子集两列均非空
-        snap_both = await _count_judged_complaints(engine, case_ids)  # 同 judged
+        snap_both = await _count_judged_complaints(engine, case_ids)
         stats["snapshot_both_cols"] = snap_both
 
-        # 质检列回流数
         snap_qc_final = await _count_snapshot_qc_cols(engine, case_ids)
         stats["snapshot_qc_final"] = snap_qc_final
 
-        # 投诉列回流数
         snap_comp_final = snap_both
         stats["snapshot_comp_final"] = snap_comp_final
 
-        both_pass = snap_qc_final >= 168 and snap_comp_final >= 10
-        _record("5.5", "被处理子集两列（质检+投诉）均非空", both_pass,
-                f"qc_cols={snap_qc_final}, complaint_cols={snap_comp_final}")
+        both_pass = snap_qc_final >= 168 and snap_comp_final >= max(
+            1, int(created_published * 0.8)
+        )
+        _record(
+            "6.2-both",
+            "质检列+投诉列均非空",
+            both_pass,
+            f"qc_cols={snap_qc_final}, complaint_cols={snap_comp_final}, "
+            f"created_events={created_published}",
+        )
 
-        # 全量对账：推送数=消费数=落库数
         dup_snap = await _count_duplicate_snapshot(engine, case_ids)
         stats["duplicate_snapshot"] = dup_snap
         stats["duplicate_complaints_final"] = dup_comp
 
-        # 对账：etl.task.done 推送 200 → qc_records 消费 N → complaints 落库 N
-        # no_answer/failed (15%) 不开检，故 N ≈ 168（85% completed）
+        # 对账：etl 200 → qc N → created 事件 M → complaints≈M；重复=0
         reconcile_pass = (
-            stats["published"] == 200
+            stats.get("published") == 200
             and stats["qc_records"] >= 168
-            and stats["complaints"] >= 168
-            and stats["qc_records"] == stats["complaints"]
+            and created_published >= 168
+            and stats["complaints"] >= min(created_published, 168)
             and dup_comp == 0
             and dup_snap == 0
         )
-        _record("5.5", "推送数=200，消费数=落库数=qc_records=complaints，重复数=0", reconcile_pass,
-                f"pushed={stats['published']} consumed(qc)={stats['qc_records']} "
-                f"landed(comp)={stats['complaints']} dup_comp={dup_comp} dup_snap={dup_snap}")
+        _record(
+            "6.2-reconcile",
+            "etl=200；qc≥168；created 事件条数≈投诉落库；重复=0",
+            reconcile_pass,
+            f"etl={stats.get('published')} qc={stats['qc_records']} "
+            f"created_events={created_published} complaints={stats['complaints']} "
+            f"dup_comp={dup_comp} dup_snap={dup_snap}",
+        )
 
         return stats
     finally:
@@ -446,10 +463,13 @@ async def run_batch_flow() -> dict[str, Any]:
 
 async def main() -> int:
     print("=" * 60)
-    print("batch-traffic-loop 批次5 批量全链路回流验收")
+    print("batch 全链路回流验收（complaint.created 事件驱动）")
+    print(f"EVENT_BUS={os.getenv('EVENT_BUS', 'rocketmq')}")
+    print("complaint leg: batch publish_complaint_created → poll snapshot cols")
+    print("(no ComplaintClient create→judge→review)")
     print(f"COMPLAINT_SERVICE_URL={dp_settings.COMPLAINT_SERVICE_URL}")
     print(f"QC_REDIS_DB={QC_REDIS_DB}")
-    print(f"JUDGE_BUDGET={dp_settings.JUDGE_BUDGET}")
+    print("judge load = complaint.created event count")
     print("=" * 60)
 
     stats = await run_batch_flow()
@@ -472,12 +492,14 @@ async def main() -> int:
     print("=" * 60)
     print(f"推送数 (etl.task.done):     {stats.get('published', 'N/A')}")
     print(f"消费数 (qc_records 落库):    {stats.get('qc_records', 'N/A')}")
+    print(f"complaint.created 发布数:   {stats.get('complaint_created_published', 'N/A')}"
+          f" / target={stats.get('complaint_created_target', 'N/A')}")
     print(f"落库数 (complaints):        {stats.get('complaints', 'N/A')}")
     print(f"重复数 (complaints):        {stats.get('duplicate_complaints', 'N/A')}")
     print(f"重复数 (snapshot):          {stats.get('duplicate_snapshot', 'N/A')}")
     print(f"快照质检列回流数:            {stats.get('snapshot_qc_final', stats.get('snapshot_qc_cols', 'N/A'))}")
     print(f"快照投诉列回流数:            {stats.get('snapshot_comp_final', stats.get('judged', 'N/A'))}")
-    print(f"judge 有界子集数:            {stats.get('judged', 'N/A')} (budget={dp_settings.JUDGE_BUDGET})")
+    print(f"judge 完成数（=事件条数控流）: {stats.get('judged', 'N/A')}")
 
     passed = sum(1 for r in _results if r["pass"])
     total = len(_results)

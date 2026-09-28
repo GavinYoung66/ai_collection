@@ -127,6 +127,10 @@ services:
   # rag-service stub —— 生产替换为真实 rag-service 镜像
   rag-service:
     image: python:3.11.15-slim
+    environment:
+      EVENT_BUS: ${EVENT_BUS:-rocketmq}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
     command:
       - python
       - -c
@@ -163,6 +167,10 @@ services:
       DATA_PLATFORM_URL: ${DATA_PLATFORM_URL:-http://data-platform:8000}
       QC_SERVICE_URL: ${QC_SERVICE_URL:-http://qc-service:8000}
       USE_MOCK_MCP: "false"
+      EVENT_BUS: ${EVENT_BUS:-rocketmq}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
+      EVENT_BUS_SVC: ${EVENT_BUS_SVC:-cs}
       # 链路追踪统一开关：从仓库根 .env 透传，全项目只改这一处
       # （environment 优先级高于 env_file，故 config/prod.env 不再重复定义）
       LANGSMITH_ENABLED: ${LANGSMITH_ENABLED:-false}
@@ -213,6 +221,10 @@ services:
       DATA_PLATFORM_URL: ${DATA_PLATFORM_URL:-http://data-platform:8000}
       QC_SERVICE_URL: ${QC_SERVICE_URL:-http://qc-service:8000}
       USE_MOCK_MCP: "false"
+      EVENT_BUS: ${EVENT_BUS:-rocketmq}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
+      EVENT_BUS_SVC: ${EVENT_BUS_SVC:-cs}
       # 链路追踪统一开关：从仓库根 .env 透传，全项目只改这一处
       # （environment 优先级高于 env_file，故 config/prod.env 不再重复定义）
       LANGSMITH_ENABLED: ${LANGSMITH_ENABLED:-false}

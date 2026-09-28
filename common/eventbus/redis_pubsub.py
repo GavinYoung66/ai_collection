@@ -1,7 +1,8 @@
-"""Redis Pub/Sub EventBus adapter (grayscale / rollback path).
+"""Redis Pub/Sub EventBus adapter (historical reference only).
 
-Uses Redis logical DB 3 (QC event bus). Process-local retry ×3 with exponential
-backoff + structlog warning. No persistent DLQ (spec Decision 5).
+Not loaded by ``factory.get_event_bus`` (runtime accepts only ``rocketmq``).
+Uses Redis logical DB 3. Process-local retry ×3 with exponential backoff +
+structlog warning. No persistent DLQ.
 """
 from __future__ import annotations
 

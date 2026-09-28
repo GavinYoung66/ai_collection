@@ -100,7 +100,7 @@ class DataPlatformBridge:
             logger.warning(
                 "backflow_resolve_miss", tool=tool, session_id=sid, trace_id=trace_id
             )
-            return {"success": True}
+            return {"success": True, "persisted": False}
 
         if not verdict or not task_status:
             # 回写口要求三列非空；缺字段属永久性数据缺口，重试无意义，不抛异常
@@ -110,7 +110,7 @@ class DataPlatformBridge:
                 session_id=sid,
                 trace_id=trace_id,
             )
-            return {"success": True}
+            return {"success": True, "persisted": False}
 
         complaint_id, case_id = resolved
         body = {
@@ -136,7 +136,13 @@ class DataPlatformBridge:
                     attempt=attempt,
                     trace_id=trace_id,
                 )
-                return {"success": True}
+                # persisted=True：快照投诉列确已写入（5.5 result.ready 门槛）
+                return {
+                    "success": True,
+                    "persisted": True,
+                    "case_id": case_id,
+                    "complaint_id": complaint_id,
+                }
             except BridgeNotFound as e:
                 # 快照行不存在：重试也不会出现，直接走失败入队
                 last_error = f"snapshot row not found: {e}"
@@ -156,7 +162,12 @@ class DataPlatformBridge:
 
         # 重试用尽（或快照行缺失）：零丢失入队 + A5013，不抛异常 → 工单正常推进
         await self._enqueue_failed(kind, sid, body, last_error, trace_id=trace_id)
-        return {"success": True}
+        return {
+            "success": True,
+            "persisted": False,
+            "case_id": case_id,
+            "complaint_id": complaint_id,
+        }
 
     async def _enqueue_failed(
         self,

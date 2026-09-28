@@ -1,13 +1,14 @@
-"""敏感词词库同步：DB 优先 + 文件兜底，版本号发布到 Redis Pub/Sub。
+"""敏感词词库同步：DB 优先 + 文件兜底，版本号写 Redis，通知经 EventBus。
 
 - get_current_dict：DB 活跃词（≥50 阈值）→ 拼接文本；不足或异常 → 回退内置字典文件；
   两者均失败 → 抛 FileNotFoundError（路由层转 404）。
-- refresh：DB 阈值校验 → Redis INCR 版本号 → PUBLISH kb.sensitive_updated；
-  DB/INCR 失败抛 BizException，PUBLISH 失败仅 warning 不阻断。
+- refresh：DB 阈值校验 → Redis INCR 版本号 → EventBus 发布 kb.sensitive_updated；
+  DB/INCR 失败抛 BizException，总线发布失败仅 warning 不阻断（version 轮询兜底）。
 """
+from __future__ import annotations
+
 import asyncio
-import json
-import time
+import os
 from pathlib import Path
 
 import structlog
@@ -26,7 +27,7 @@ logger = structlog.get_logger()
 _DICT_FILE = Path(__file__).resolve().parents[2] / "data" / "sensitive_words.dict"
 
 _VERSION_KEY = "rag:sensitive_words:version"
-_PUBLISH_CHANNEL = "kb.sensitive_updated"
+_EVENT_NAME = "kb.sensitive_updated"
 _MIN_DICT_SIZE = 50
 
 
@@ -84,8 +85,8 @@ class SensitiveWordsSyncService:
 
         - Step1: DB 校验 status='active' 活跃词数 ≥ 50，不足抛 BizException(A3001)；
         - Step2: Redis INCR rag:sensitive_words:version → new_version；
-        - Step3: Redis PUBLISH kb.sensitive_updated {version, trace_id, ts}；
-        - DB 异常 / INCR 异常 → BizException(B0007)；PUBLISH 失败仅 warning，不阻断；
+        - Step3: EventBus 发布 kb.sensitive_updated（data 可空；version 不进信封 data）；
+        - DB 异常 / INCR 异常 → BizException(B0007)；总线发布失败仅 warning，不阻断；
         - 返回 new_version。
         """
         # Step1: DB 阈值校验
@@ -117,7 +118,7 @@ class SensitiveWordsSyncService:
             logger.error("sensitive_refresh_incr_failed", error=str(e))
             raise BizException(ErrorCode.B0007, f"敏感词版本号自增失败: {e}")
 
-        # Step3: Redis PUBLISH 失效广播（失败仅 warning，不阻断）
+        # Step3: EventBus 失效广播（失败仅 warning，不阻断）
         trace_id = get_trace_id() or "startup"
         await self.publish_version(self.redis, new_version, trace_id)
 
@@ -131,22 +132,26 @@ class SensitiveWordsSyncService:
 
     @staticmethod
     async def publish_version(redis: Redis, version: int, trace_id: str) -> None:
-        """发布版本号变更事件到 Redis Pub-Sub（失败仅 warning，不阻断）。
+        """经 EventBus 发布 kb.sensitive_updated（失败仅 warning，不阻断）。
 
-        V4 D7 修复：改为静态方法显式接收 redis 参数，不依赖 DB session——
-        startup seed 分支不再复用已关闭的旧 DB session 构造服务实例即可 PUBLISH。
-        payload 严格为 JSON ``{"version":int,"trace_id":str,"ts":int}``。
+        ``redis`` 参数保留以兼容 startup seed 调用方；版本号已写 Redis 键，
+        信封 ``data`` 故意为空（version 不进非白名单 data 字段）。
         """
-        payload = json.dumps(
-            {
-                "version": version,
-                "trace_id": trace_id,
-                "ts": int(time.time()),
-            },
-            ensure_ascii=False,
-        )
+        del redis  # version lives in Redis key; not used for bus publish
         try:
-            await redis.publish(_PUBLISH_CHANNEL, payload)
+            if not (os.getenv("EVENT_BUS") or "").strip():
+                os.environ["EVENT_BUS"] = "rocketmq"
+            if not (os.getenv("EVENT_BUS_SVC") or "").strip():
+                os.environ["EVENT_BUS_SVC"] = "rag"
+            from common.eventbus.factory import get_event_bus
+
+            bus = get_event_bus()
+            await bus.publish(
+                _EVENT_NAME,
+                {},
+                key=f"sensitive-v{version}",
+                trace_id=trace_id,
+            )
         except Exception as e:
             logger.warning(
                 "sensitive_publish_version_failed",

@@ -335,7 +335,8 @@ async def test_write_session_puts_complaint_cols():
     )
     await client.aclose()
 
-    assert out == {"success": True}
+    assert out["success"] is True
+    assert out["persisted"] is True
     assert seen["path"] == f"/api/v1/data/snapshot/{_CASE_ID}"
     assert seen["body"] == {
         "complaint_id": _CASE_ID,
@@ -364,7 +365,8 @@ async def test_write_human_review_truth_same_cols_no_new_column():
         {"session_id": "sid-1", "task_status": "resolved", "verdict": "compliant"},
     )
     await client.aclose()
-    assert out == {"success": True}
+    assert out["success"] is True
+    assert out["persisted"] is True
     # 与 write_session 相同的三列；快照表无独立人审列
     assert set(seen["body"].keys()) == {"complaint_id", "verdict", "task_status"}
 
@@ -392,7 +394,8 @@ async def test_write_failure_enqueues_backflow_retry_and_never_raises():
     )
     await client.aclose()
 
-    assert out == {"success": True}  # 不抛异常 → 工单正常推进
+    assert out["success"] is True  # 不抛异常 → 工单正常推进
+    assert out["persisted"] is False  # 入队失败路径不发 result.ready
     assert calls["n"] == 3
     queue = redis.lists[backflow_retry_key()]
     assert len(queue) == 1

@@ -4,10 +4,9 @@
 - DB ≥50 行时走 DB 拼接
 - DB 空走文件兜底
 - refresh 后 version INCR
-- PUBLISH 失败 warning 不阻断
+- EventBus 发布失败 warning 不阻断
 - 接口 GET 返回 text/plain 内容与 V1 .dict 文件字节级一致（50 词集合排序输出）
 """
-import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -33,15 +32,25 @@ def _mock_db(words: list[str]):
     return db
 
 
-def _mock_redis(version: int = 0, publish_fail: bool = False):
-    """构造 mock Redis。"""
+def _mock_redis(version: int = 0):
+    """构造 mock Redis（版本键；跨服务通知不再用 PUBLISH）。"""
     redis = MagicMock()
     redis.incr = AsyncMock(return_value=version + 1)
-    if publish_fail:
-        redis.publish = AsyncMock(side_effect=ConnectionError("redis pubsub down"))
-    else:
-        redis.publish = AsyncMock()
     return redis
+
+
+def _mock_event_bus(monkeypatch, *, publish_fail: bool = False):
+    bus = MagicMock()
+    if publish_fail:
+        bus.publish = AsyncMock(side_effect=ConnectionError("eventbus down"))
+    else:
+        bus.publish = AsyncMock()
+    monkeypatch.setenv("EVENT_BUS", "rocketmq")
+    monkeypatch.setattr(
+        "common.eventbus.factory.get_event_bus",
+        lambda **kwargs: bus,
+    )
+    return bus
 
 
 class TestGetCurrentDict:
@@ -88,26 +97,29 @@ class TestGetCurrentDict:
 
 class TestRefresh:
     @pytest.mark.asyncio
-    async def test_refresh_incr_version(self):
+    async def test_refresh_incr_version(self, monkeypatch):
         """refresh 成功 → Redis INCR 版本号 +1 并返回。"""
         words = [f"word_{i:03d}" for i in range(50)]
         db = _mock_db(words)
         redis = _mock_redis(version=5)
+        bus = _mock_event_bus(monkeypatch)
         svc = SensitiveWordsSyncService(db, redis)
         new_version = await svc.refresh()
         assert new_version == 6
         redis.incr.assert_called_once()
+        bus.publish.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_refresh_publish_fail_not_block(self):
-        """PUBLISH 失败 → 仅 warning，不阻断，仍返回 new_version。"""
+    async def test_refresh_publish_fail_not_block(self, monkeypatch):
+        """EventBus 发布失败 → 仅 warning，不阻断，仍返回 new_version。"""
         words = [f"word_{i:03d}" for i in range(50)]
         db = _mock_db(words)
-        redis = _mock_redis(version=3, publish_fail=True)
+        redis = _mock_redis(version=3)
+        bus = _mock_event_bus(monkeypatch, publish_fail=True)
         svc = SensitiveWordsSyncService(db, redis)
         new_version = await svc.refresh()
         assert new_version == 4
-        redis.publish.assert_called_once()
+        bus.publish.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_refresh_below_threshold_raises(self):
@@ -122,18 +134,19 @@ class TestRefresh:
         assert exc_info.value.code == ErrorCode.A3001
 
     @pytest.mark.asyncio
-    async def test_refresh_publish_payload_format(self):
-        """PUBLISH payload 格式 {version, trace_id, ts}（§11.3）。"""
+    async def test_refresh_publishes_via_eventbus(self, monkeypatch):
+        """经 EventBus 发布 kb.sensitive_updated；data 可空；trace_id 上信封。"""
         words = [f"word_{i:03d}" for i in range(50)]
         db = _mock_db(words)
         redis = _mock_redis(version=10)
+        bus = _mock_event_bus(monkeypatch)
+        monkeypatch.setattr(
+            "app.services.sensitive_words_sync.get_trace_id", lambda: "tr-sensitive"
+        )
         svc = SensitiveWordsSyncService(db, redis)
         await svc.refresh()
-        call_args = redis.publish.call_args
-        channel = call_args[0][0]
-        payload = json.loads(call_args[0][1])
-        assert channel == "kb.sensitive_updated"
-        assert payload["version"] == 11
-        assert "trace_id" in payload
-        assert "ts" in payload
-        assert isinstance(payload["ts"], int)
+        bus.publish.assert_called_once()
+        args, kwargs = bus.publish.call_args
+        assert args[0] == "kb.sensitive_updated"
+        assert args[1] == {}
+        assert kwargs.get("trace_id") == "tr-sensitive"

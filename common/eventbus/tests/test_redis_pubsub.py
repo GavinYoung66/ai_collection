@@ -1,4 +1,8 @@
-"""Redis Pub/Sub adapter tests (task 2.3)."""
+"""Redis Pub/Sub adapter reference-unit tests (not a service runtime mode).
+
+``RedisPubSubEventBus`` remains on disk for对照；factory MUST NOT load it.
+These tests exercise the adapter class in isolation with a fake Redis.
+"""
 from __future__ import annotations
 
 import asyncio

@@ -189,6 +189,9 @@ services:
       KB_SUMMARY_ES_BOOST: "1.0"
       KB_SUMMARY_MAX_LEN: "200"
       KB_ASR_OPENING_TRIM_ENABLED: "false"
+      EVENT_BUS: ${EVENT_BUS:-rocketmq}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
     depends_on:
       postgres:
         condition: service_healthy

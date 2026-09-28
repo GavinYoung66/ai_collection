@@ -38,3 +38,19 @@ def _reset_qc_resilience_state():
     reset_inflight_gate()
     reset_redis()
 
+
+@pytest.fixture(autouse=True)
+def _mock_event_bus(monkeypatch):
+    """跨服务 EventBus 一律 mock：单测不连真实 RocketMQ。
+
+    publisher/subscriber 均为函数内 ``from common.eventbus.factory import
+    get_event_bus``，每次调用从源模块取属性，patch 源模块即生效。
+    """
+    from unittest.mock import AsyncMock
+
+    bus = AsyncMock()
+    monkeypatch.setattr(
+        "common.eventbus.factory.get_event_bus", lambda **kwargs: bus
+    )
+    yield bus
+

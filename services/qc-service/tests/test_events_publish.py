@@ -68,8 +68,8 @@ async def _persist(replay: ReplayService, result: QcRunResult, **qc_kw) -> QcRun
 
 
 class TestCompletedPayload:
-    async def test_completed_uses_score_risk_and_null_call_id(self):
-        replay, pub, redis, _db = _svc()
+    async def test_completed_uses_score_risk_and_null_call_id(self, _mock_event_bus):
+        replay, pub, _redis, _db = _svc()
         result = QcRunResult(
             code="0",
             compliance_score=80,
@@ -96,12 +96,17 @@ class TestCompletedPayload:
         assert "compliance_score" not in payload
         assert "risk_level" not in payload
         assert "ts" in payload and "trace_id" in payload
-        # Wire format is EventEnvelope; score stays in emitted business payload only.
-        raw = json.loads(redis.published[-1][1])
-        assert raw["event_name"] == CHANNEL_CHECK_COMPLETED
-        assert "event_id" in raw and "data" in raw
-        assert raw["data"].get("session_id") == "sess_ok"
-        assert "score" not in raw["data"]
+        # Wire format goes through EventBus (mocked); envelope structure is
+        # covered by common/eventbus tests. Here assert whitelist data only.
+        bus = _mock_event_bus
+        calls = [
+            c for c in bus.publish.await_args_list
+            if c.args[0] == CHANNEL_CHECK_COMPLETED
+        ]
+        assert calls
+        data = calls[0].args[1]
+        assert data.get("session_id") == "sess_ok"
+        assert "score" not in data
         assert payload["score"] == 80
 
     async def test_completed_call_id_is_uuid_not_session(self):
@@ -468,6 +473,9 @@ class TestResilienceHooks:
         class _Boom:
             def append(self, _item):
                 raise RuntimeError("emitted list down")
+
+            def clear(self):  # teardown _cleanup() calls clear_emitted()
+                pass
 
         monkeypatch.setattr(resilience, "emitted", _Boom())
         await resilience.on_resilience_event(

@@ -1,51 +1,44 @@
-"""Local verification for tasks 4.1–4.4 over EVENT_BUS=redis (fake redis)."""
+"""Local verification for QC-chain events via mock EventBus Protocol."""
 from __future__ import annotations
 
-import asyncio
-import os
 from typing import Any
 
 import pytest
 
-from common.eventbus.envelope import EventEnvelope
-from common.eventbus.factory import reset_event_bus
-from common.eventbus.redis_pubsub import RedisPubSubEventBus
+from common.eventbus.envelope import EventEnvelope, build_envelope
 from common.eventbus.util import whitelist_data
 
 
-class _FakePubSub:
-    def __init__(self, bus: "_FakeRedis") -> None:
-        self._bus = bus
-        self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+class _MockEventBus:
+    """In-memory EventBus Protocol stand-in (no redis / factory)."""
 
-    async def subscribe(self, channel: str) -> None:
-        self._bus._subs.setdefault(channel, []).append(self)
-
-    async def unsubscribe(self, channel: str) -> None:
-        return None
-
-    async def aclose(self) -> None:
-        return None
-
-    async def listen(self):
-        yield {"type": "subscribe", "data": 1}
-        while True:
-            yield await self._queue.get()
-
-
-class _FakeRedis:
     def __init__(self) -> None:
-        self.published: list[tuple[str, str]] = []
-        self._subs: dict[str, list[_FakePubSub]] = {}
+        self._handlers: dict[str, list[Any]] = {}
+        self.published: list[EventEnvelope] = []
 
-    def pubsub(self) -> _FakePubSub:
-        return _FakePubSub(self)
+    async def publish(
+        self,
+        event_name: str,
+        data: dict[str, Any],
+        *,
+        key: str | None = None,
+        trace_id: str | None = None,
+        event_id: str | None = None,
+    ) -> None:
+        env = build_envelope(
+            event_name,
+            data,
+            event_id=event_id,
+            trace_id=trace_id or "tr_mock",
+        )
+        self.published.append(env)
+        for handler in self._handlers.get(event_name, []):
+            await handler(env)
 
-    async def publish(self, channel: str, message: str) -> int:
-        self.published.append((channel, message))
-        for sub in self._subs.get(channel, []):
-            await sub._queue.put({"type": "message", "channel": channel, "data": message})
-        return 1
+    async def subscribe(
+        self, event_name: str, group: str, handler: Any
+    ) -> None:
+        self._handlers.setdefault(event_name, []).append(handler)
 
     async def aclose(self) -> None:
         return None
@@ -53,11 +46,7 @@ class _FakeRedis:
 
 @pytest.mark.asyncio
 async def test_etl_and_completed_roundtrip_via_eventbus():
-    os.environ["EVENT_BUS"] = "redis"
-    os.environ["EVENT_BUS_SVC"] = "dp"
-    reset_event_bus()
-    fake = _FakeRedis()
-    bus = RedisPubSubEventBus(redis=fake)
+    bus = _MockEventBus()
 
     etl_got: list[EventEnvelope] = []
     completed_got: list[EventEnvelope] = []
@@ -70,7 +59,6 @@ async def test_etl_and_completed_roundtrip_via_eventbus():
 
     await bus.subscribe("etl.task.done", "qc", on_etl)
     await bus.subscribe("qc.check.completed", "dp", on_completed)
-    await asyncio.sleep(0.05)
 
     etl_payload = {
         "case_id": "c1",
@@ -103,11 +91,6 @@ async def test_etl_and_completed_roundtrip_via_eventbus():
         key="s1",
         trace_id="tr1",
     )
-
-    for _ in range(50):
-        if etl_got and completed_got:
-            break
-        await asyncio.sleep(0.05)
 
     await bus.aclose()
     assert len(etl_got) == 1

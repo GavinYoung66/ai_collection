@@ -32,6 +32,9 @@ class ComplaintSettings(Settings):
     USE_MOCK_MCP: bool = True
     USE_MOCK_LLM: bool = True
 
+    # 仿真：judge 停在 human_review 后同栈 auto-approve（默认关；验收 compose 显式 true）
+    SIM_AUTO_REVIEW: bool = False
+
     # ── CoT 加密密钥（dev stub，不接 KMS；prod 由 KMS 注入）──
     LLM_COT_KEY: str = "dev_cot_key_stub_change_me"
 

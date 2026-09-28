@@ -3,10 +3,20 @@
 把服务根加入 sys.path；单测默认强制 Mock，避免本机 .env 的 USE_MOCK_*=false
 误打真 LLM/MCP（真实路径用例自行 monkeypatch）。
 """
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
+
+# rocketmq-python 客户端在 import 时把日志硬编码到 ~/logs/rocketmq_python/（见
+# rocketmq/v5/log/log_config.py 的 __DIR），沙箱禁写该路径导致进程 exit 1。
+# 测试期把 HOME 重定向到可写临时目录，确保 RotatingFileHandler 落盘到 /tmp 下。
+# 必须在任意 app/rocketmq 模块 import 前执行（conftest 先于测试模块加载）。
+if not os.environ.get("_CS_TEST_HOME_REDIRECTED"):
+    os.environ["HOME"] = tempfile.mkdtemp(prefix="cs_test_home_")
+    os.environ["_CS_TEST_HOME_REDIRECTED"] = "1"
 
 # 服务根：services/complaint-service（conftest 在 tests/ 下，上溯一级）
 _SERVICE_ROOT = Path(__file__).resolve().parent.parent

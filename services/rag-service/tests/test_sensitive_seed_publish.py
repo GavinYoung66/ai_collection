@@ -1,12 +1,11 @@
-"""敏感词 seed 初始化 PUBLISH 单元测试（B2 / D3）。
+"""敏感词 seed 初始化 EventBus 发布单元测试（B2 / D3）。
 
 覆盖：
 - count<50→=50 时 seed 后发布版本事件
 - 已 ≥50 词时跳过不发布（幂等）
-- PUBLISH payload 三字段完整（version/trace_id/ts）
+- 经 EventBus 发布 kb.sensitive_updated（data 可空）
 - 发布失败仅 warning 不阻断
 """
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -48,7 +47,7 @@ def _write_dict(tmp_path, n):
     return p
 
 
-def _setup(monkeypatch, session, redis, dict_path):
+def _setup(monkeypatch, session, redis, dict_path, bus):
     monkeypatch.setattr(
         "common.db.session.async_session_factory",
         MagicMock(return_value=_FakeSessionCtx(session)),
@@ -56,17 +55,28 @@ def _setup(monkeypatch, session, redis, dict_path):
     monkeypatch.setattr("app.api.deps.get_redis", AsyncMock(return_value=redis))
     monkeypatch.setattr("common.trace.middleware.get_trace_id", lambda: "trace-test")
     monkeypatch.setattr("app.services.sensitive_words_sync._DICT_FILE", dict_path)
+    monkeypatch.setenv("EVENT_BUS", "rocketmq")
+    monkeypatch.setattr(
+        "common.eventbus.factory.get_event_bus",
+        lambda **kwargs: bus,
+    )
 
 
-def _make_redis(publish_fail=False):
+def _make_redis():
     redis = MagicMock()
     redis.set = AsyncMock()
     redis.get = AsyncMock(return_value="1")
-    if publish_fail:
-        redis.publish = AsyncMock(side_effect=ConnectionError("pubsub down"))
-    else:
-        redis.publish = AsyncMock()
+    redis.incr = AsyncMock(return_value=1)
     return redis
+
+
+def _make_bus(*, publish_fail=False):
+    bus = MagicMock()
+    if publish_fail:
+        bus.publish = AsyncMock(side_effect=ConnectionError("eventbus down"))
+    else:
+        bus.publish = AsyncMock()
+    return bus
 
 
 class TestSeedPublish:
@@ -76,17 +86,16 @@ class TestSeedPublish:
         dict_path = _write_dict(tmp_path, 50)
         session = _make_session(before_count=40, after_count=50, n_inserts=50)
         redis = _make_redis()
-        _setup(monkeypatch, session, redis, dict_path)
+        bus = _make_bus()
+        _setup(monkeypatch, session, redis, dict_path, bus)
 
         await _ensure_sensitive_words_baseline()
 
-        redis.publish.assert_called_once()
-        channel, payload = redis.publish.call_args[0]
-        assert channel == "kb.sensitive_updated"
-        data = json.loads(payload)
-        assert data["version"] == 1
-        assert data["trace_id"] == "trace-test"
-        assert isinstance(data["ts"], int)
+        bus.publish.assert_called_once()
+        args, kwargs = bus.publish.call_args
+        assert args[0] == "kb.sensitive_updated"
+        assert args[1] == {}
+        assert kwargs.get("trace_id") == "trace-test"
 
     @pytest.mark.asyncio
     async def test_seed_skip_when_already_50(self, monkeypatch, tmp_path):
@@ -94,19 +103,21 @@ class TestSeedPublish:
         dict_path = _write_dict(tmp_path, 50)
         session = _make_session(before_count=50, after_count=50, n_inserts=0)
         redis = _make_redis()
-        _setup(monkeypatch, session, redis, dict_path)
+        bus = _make_bus()
+        _setup(monkeypatch, session, redis, dict_path, bus)
 
         await _ensure_sensitive_words_baseline()
 
-        redis.publish.assert_not_called()
+        bus.publish.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_seed_publish_failure_warning_only(self, monkeypatch, tmp_path):
         """发布失败仅 warning，不阻断启动自检。"""
         dict_path = _write_dict(tmp_path, 50)
         session = _make_session(before_count=40, after_count=50, n_inserts=50)
-        redis = _make_redis(publish_fail=True)
-        _setup(monkeypatch, session, redis, dict_path)
+        redis = _make_redis()
+        bus = _make_bus(publish_fail=True)
+        _setup(monkeypatch, session, redis, dict_path, bus)
 
         # 不抛异常即通过（publish_version 内部 catch 并 warning）
         await _ensure_sensitive_words_baseline()

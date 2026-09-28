@@ -1,4 +1,4 @@
-"""Task 6.1 / 5.1: eventbus hooks + redis retry exhaust."""
+"""Reference-adapter observability hooks (RedisPubSub not a runtime bus mode)."""
 from __future__ import annotations
 
 import asyncio

@@ -1,9 +1,7 @@
 """质检事件订阅（经统一 EventBus）。
 
-本 change 经 EventBus 订阅的 QC 入站事件：``call.session.ended``、``etl.task.done``
-（以及既有 ``kb.sensitive_updated`` / ``strategy.updated``）。
-出站 ``qc.check.completed`` 由 publisher 上总线；其余 M1 出站频道仍 Redis PUBLISH，
-属明确范围外（见 publisher ``_BUS_CHANNELS``），勿误判为漏迁。
+四入站一律 ``eventbus.subscribe``：``call.session.ended``、``etl.task.done``、
+``kb.sensitive_updated``、``strategy.updated``。无 Redis Pub/Sub 旁路。
 
 handler 接收 ``EventEnvelope``，从 ``data`` 提取字段后接入现有处理逻辑。
 listen 循环仅进程后台使用，单测直接调 handler / handle_envelope。
@@ -272,29 +270,17 @@ class QcEventSubscriber:
     async def listen(self, redis: Any | None = None) -> None:
         """Subscribe via EventBus (group short-code ``qc`` → gid_qc_*).
 
-        Channels ``kb.sensitive_updated`` / ``strategy.updated`` are published
-        only on Redis (rag-service / ops scripts), so they always use the
-        RedisPubSubEventBus regardless of ``EVENT_BUS`` mode. The QC-chain
-        channels (``call.session.ended`` / ``etl.task.done``) follow the
-        configured EventBus adapter.
+        All four inbound channels use the RocketMQ EventBus. ``redis`` is
+        accepted for API compatibility but is not used as a bus transport.
         """
         from common.eventbus.factory import get_event_bus
-        from common.eventbus.redis_pubsub import RedisPubSubEventBus
 
         if not (os.getenv("EVENT_BUS") or "").strip():
-            os.environ["EVENT_BUS"] = "redis"
+            os.environ["EVENT_BUS"] = "rocketmq"
         if not (os.getenv("EVENT_BUS_SVC") or "").strip():
             os.environ["EVENT_BUS_SVC"] = "qc"
 
-        mode = (os.getenv("EVENT_BUS") or "redis").strip().lower()
-        if mode == "redis" and redis is not None:
-            bus = RedisPubSubEventBus(redis=redis)
-        else:
-            bus = get_event_bus()
-
-        # kb/strategy channels stay on Redis in all modes (their publishers
-        # are not migrated to RocketMQ in this change).
-        redis_bus = RedisPubSubEventBus(redis=redis) if redis is not None else RedisPubSubEventBus()
+        bus = get_event_bus()
 
         async def _make_handler(name: str):
             async def _handler(envelope: EventEnvelope) -> None:
@@ -304,10 +290,7 @@ class QcEventSubscriber:
             return _handler
 
         for channel in SUBSCRIBE_CHANNELS:
-            if channel in (CHANNEL_KB_UPDATED, CHANNEL_STRATEGY_UPDATED):
-                await redis_bus.subscribe(channel, "qc", await _make_handler(channel))
-            else:
-                await bus.subscribe(channel, "qc", await _make_handler(channel))
+            await bus.subscribe(channel, "qc", await _make_handler(channel))
 
         # Keep the listen task alive while bus background tasks run.
         try:
@@ -317,9 +300,6 @@ class QcEventSubscriber:
             close = getattr(bus, "aclose", None)
             if close is not None:
                 await close()
-            redis_close = getattr(redis_bus, "aclose", None)
-            if redis_close is not None:
-                await redis_close()
             raise
 
     async def listen_forever(self, redis: Any | None = None) -> None:

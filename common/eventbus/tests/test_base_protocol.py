@@ -1,4 +1,8 @@
-"""EventBus Protocol structural checks (task 2.2)."""
+"""EventBus Protocol structural checks.
+
+Runtime factory only loads RocketMQ. Redis adapters are reference-only and are
+checked here solely for Protocol structural compatibility.
+"""
 from __future__ import annotations
 
 from common.eventbus.base import EventBus, consumer_group_name
@@ -14,8 +18,13 @@ def test_consumer_group_naming():
     )
 
 
-def test_three_adapters_satisfy_protocol():
-    for cls in (RedisPubSubEventBus, RocketMQEventBus, RedisStreamsEventBus):
+def test_rocketmq_adapter_satisfies_protocol():
+    assert isinstance(RocketMQEventBus(), EventBus)
+    assert callable(getattr(RocketMQEventBus, "publish"))
+    assert callable(getattr(RocketMQEventBus, "subscribe"))
+
+
+def test_reference_adapters_still_satisfy_protocol():
+    """Historical adapters remain Protocol-compatible; not factory-loaded."""
+    for cls in (RedisPubSubEventBus, RedisStreamsEventBus):
         assert isinstance(cls(), EventBus)
-        assert callable(getattr(cls, "publish"))
-        assert callable(getattr(cls, "subscribe"))

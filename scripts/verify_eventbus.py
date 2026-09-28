@@ -2,7 +2,6 @@
 """EventBus smoke: publish ``verify.test`` and consume once.
 
 Usage:
-  python scripts/verify_eventbus.py --mode redis
   python scripts/verify_eventbus.py --mode rocketmq
 
 Prints ``PASS`` on success. Safe to run twice (unique event_id each run).
@@ -24,22 +23,17 @@ if str(_ROOT) not in sys.path:
 async def _run(mode: str) -> None:
     from common.eventbus.envelope import EventEnvelope
     from common.eventbus.factory import get_event_bus, reset_event_bus
-    from common.eventbus.redis_pubsub import RedisPubSubEventBus
+
+    if mode != "rocketmq":
+        raise ValueError(f"EVENT_BUS runtime only supports rocketmq, got {mode!r}")
 
     os.environ["EVENT_BUS"] = mode
     os.environ["EVENT_BUS_SVC"] = "csmp"
-    if mode == "rocketmq" and not os.getenv("ROCKETMQ_PROXY"):
+    if not os.getenv("ROCKETMQ_PROXY"):
         os.environ["ROCKETMQ_PROXY"] = "localhost:18081"
-    if mode == "redis":
-        os.environ.setdefault("REDIS_HOST", "localhost")
-        os.environ.setdefault("REDIS_PORT", "6379")
-        os.environ.setdefault("QC_REDIS_DB", "3")
 
     reset_event_bus()
-    if mode == "redis":
-        bus = RedisPubSubEventBus()
-    else:
-        bus = get_event_bus(force_new=True)
+    bus = get_event_bus(force_new=True)
 
     event_name = "verify.test"
     event_id = f"evt_verify_{uuid.uuid4().hex[:12]}"
@@ -54,28 +48,27 @@ async def _run(mode: str) -> None:
 
     # RocketMQ: warm publish so Proxy has topic route before consume loop.
     # Retries cover cold Proxy route cache after mqadmin createTopic.
-    if mode == "rocketmq":
-        last_exc: Exception | None = None
-        for attempt in range(1, 6):
-            try:
-                await bus.publish(
-                    event_name,
-                    {"session_id": f"warmup-{session_id}"},
-                    key=f"warmup-{session_id}",
-                    event_id=f"evt_warmup_{uuid.uuid4().hex[:8]}",
-                    trace_id=f"tr_warmup_{uuid.uuid4().hex[:8]}",
-                )
-                last_exc = None
-                break
-            except Exception as exc:  # noqa: BLE001 — smoke retry
-                last_exc = exc
-                await asyncio.sleep(0.5 * attempt)
-        if last_exc is not None:
-            raise last_exc
-        await asyncio.sleep(1.0)
+    last_exc: Exception | None = None
+    for attempt in range(1, 6):
+        try:
+            await bus.publish(
+                event_name,
+                {"session_id": f"warmup-{session_id}"},
+                key=f"warmup-{session_id}",
+                event_id=f"evt_warmup_{uuid.uuid4().hex[:8]}",
+                trace_id=f"tr_warmup_{uuid.uuid4().hex[:8]}",
+            )
+            last_exc = None
+            break
+        except Exception as exc:  # noqa: BLE001 — smoke retry
+            last_exc = exc
+            await asyncio.sleep(0.5 * attempt)
+    if last_exc is not None:
+        raise last_exc
+    await asyncio.sleep(1.0)
 
     await bus.subscribe(event_name, "csmp", handler)
-    await asyncio.sleep(0.3 if mode == "redis" else 1.5)
+    await asyncio.sleep(1.5)
     await bus.publish(
         event_name,
         {"session_id": session_id},
@@ -84,7 +77,7 @@ async def _run(mode: str) -> None:
         trace_id=f"tr_verify_{uuid.uuid4().hex[:8]}",
     )
     try:
-        await asyncio.wait_for(done.wait(), timeout=20.0 if mode == "rocketmq" else 5.0)
+        await asyncio.wait_for(done.wait(), timeout=20.0)
     except TimeoutError as exc:
         raise RuntimeError(f"timeout waiting for {event_name} event_id={event_id}") from exc
     finally:
@@ -102,9 +95,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Verify EventBus publish/subscribe")
     parser.add_argument(
         "--mode",
-        choices=("redis", "rocketmq"),
-        required=True,
-        help="Transport mode to verify",
+        choices=("rocketmq",),
+        default="rocketmq",
+        help="Transport mode to verify (only rocketmq)",
     )
     args = parser.parse_args(argv)
     try:

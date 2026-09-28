@@ -87,7 +87,7 @@ class TestReviewHttp:
         assert body["data"]["items"] == []
         assert body["data"]["total"] == 0
 
-    def test_correct_sets_reviewed_and_score(self):
+    def test_correct_sets_reviewed_and_score(self, _mock_event_bus):
         repo = FakeReviewRepo()
         redis = MemoryRedis(db=3)
         row = _record(compliance_score=80, qc_status="PENDING_REVIEW")
@@ -109,7 +109,8 @@ class TestReviewHttp:
         assert row.qc_status == "REVIEWED"
         assert row.compliance_score == 72
         assert repo.reviews and repo.reviews[0].action == "CORRECT"
-        channels = [ch for ch, _msg in redis.published]
+        # 业务事件经 EventBus（mock）发布
+        channels = [c.args[0] for c in _mock_event_bus.publish.await_args_list]
         assert CHANNEL_REVIEW_DONE in channels
 
     def test_correct_100_sets_reviewed_and_score(self):
@@ -199,13 +200,13 @@ class TestReviewHttp:
         assert missing.json()["code"] == "A2008"
         assert row.qc_status == "PENDING_REVIEW"
 
-    def test_sample_type_mappings_and_review_done(self):
+    def test_sample_type_mappings_and_review_done(self, _mock_event_bus):
         redis = MemoryRedis(db=3)
         assert ReviewService.sample_type("CONFIRM") == "positive"
         assert ReviewService.sample_type("DISMISS") == "negative"
         assert ReviewService.sample_type("CORRECT") == "corrected"
         mapping = {"CONFIRM": "positive", "DISMISS": "negative", "CORRECT": "corrected"}
-        for action, sample in mapping.items():
+        for action in mapping:
             repo = FakeReviewRepo()
             row = _record(qc_status="PENDING_REVIEW")
             repo.add(row)
@@ -215,16 +216,14 @@ class TestReviewHttp:
                 body["revised_score"] = 88
             resp = client.post(f"/api/v1/qc/reviews/{row.id}", headers=_token("qc"), json=body)
             assert resp.status_code == 200
-            payload = None
-            for channel, raw in redis.published:
-                if channel == CHANNEL_REVIEW_DONE:
-                    import json
-
-                    payload = json.loads(raw)
-            assert payload is not None
-            assert payload["sample_type"] == sample
-            assert payload["action"] == action
-            redis.published.clear()
+            # 业务事件经 EventBus（mock）发布；信封 data 仅白名单，
+            # sample_type/action 业务字段由 publisher 单测 test_three_sample_types 覆盖
+            calls = [
+                c for c in _mock_event_bus.publish.await_args_list
+                if c.args[0] == CHANNEL_REVIEW_DONE
+            ]
+            assert len(calls) == 1
+            _mock_event_bus.publish.reset_mock()
 
     def test_unauthenticated_is_401_b0002(self):
         client = _client(FakeReviewRepo())

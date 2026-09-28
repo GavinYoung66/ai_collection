@@ -1,6 +1,15 @@
 """投诉服务 HTTP 客户端（data-platform → complaint-service）。
 
-最小闭环事件链：收到 qc.check.completed 后调用投诉 API 三步流：
+**逃生舱 / 测试专用（complaint-event-driven Decision 7 / tasks 6.3）**
+
+- 闭环与批量验收主路径 **禁用** 本客户端：须经 EventBus 发布
+  ``complaint.created``，由 complaint-service 订阅后建单 + judge；
+  人审由 ``SIM_AUTO_REVIEW`` 或既有人审 API 完成，**不得**再以
+  create→judge→review HTTP 三步编排闭环。
+- 本模块仅保留供：单测、联调排障、显式逃生舱手工调用。
+- ``run_min_loop.py`` / ``run_batch_flow.py`` 主路径不得 import 本类。
+
+历史三步 API（逃生舱仍可用）：
 1. POST /api/v1/complaints         → 创建工单（只带 complaint_text + case_id）
 2. POST /api/v1/complaints/{id}/judge  → 触发研判（run_graph=true，停在人审）
 3. PUT  /api/v1/complaints/{id}/review → 人审通过（review_action=approve，恢复图）
@@ -33,7 +42,10 @@ def _unwrap(data: Any) -> dict[str, Any]:
 
 
 class ComplaintClient:
-    """投诉服务 HTTP 客户端。本机闭环调用，不经过 api-gateway。"""
+    """投诉服务 HTTP 客户端（测试/排障逃生舱；闭环主路径禁用）。
+
+    本机直连，不经过 api-gateway。
+    """
 
     def __init__(
         self,

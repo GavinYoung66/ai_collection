@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.deps import get_alert_repo, get_redis, get_review_repo
-from app.events.publisher import CHANNEL_ALERT_RAISED, CHANNEL_STOP_CALL, FORBIDDEN_CHANNELS
+from app.events.publisher import ALERT_STREAM, CHANNEL_ALERT_RAISED, CHANNEL_STOP_CALL, FORBIDDEN_CHANNELS
 from app.integrations.qc_session import QCSession
 from app.main import app
 from app.models.qc import QcAlert, QcRecord, QcReview, QcViolation
@@ -293,17 +293,24 @@ class TestAssertions1to14:
         assert items[0]["session_id"] == "sess_a3"
         assert items[0]["qc_record_id"]
 
-    def test_assertion_04_alert_raised_has_alert_id(self):
+    def test_assertion_04_alert_raised_has_alert_id(self, _mock_event_bus):
         db = ApiFakeSession()
         db.call_ids.add("sess_a4")
         redis = MemoryRedis(db=3)
         client = _client(db, redis, FakeDp({}))
         replay = _post_raw(client, _raw_body("sess_a4", _one_high_turns()))
         _assert_envelope(replay.json(), code="0")
-        raised = _payloads(redis, CHANNEL_ALERT_RAISED)
-        assert raised
-        assert raised[0].get("alert_id")
-        assert raised[0]["session_id"] == "sess_a4"
+        # 业务事件经 EventBus（mock）发布，信封 data 仅白名单；
+        # alert_id 等非白名单字段经 alert:stream XADD 留存
+        bus_calls = [
+            c for c in _mock_event_bus.publish.await_args_list
+            if c.args[0] == CHANNEL_ALERT_RAISED
+        ]
+        assert bus_calls
+        assert bus_calls[0].args[1].get("session_id") == "sess_a4"
+        stream_alerts = [f for s, f in redis.xadd_log if s == ALERT_STREAM]
+        assert stream_alerts
+        assert json.loads(stream_alerts[0]["alert_id"])
         assert CHANNEL_ALERT_RAISED not in FORBIDDEN_CHANNELS
 
     def test_assertion_05_no_escalate_human(self):
@@ -371,7 +378,7 @@ class TestAssertions1to14:
         assert data["qc_result"] == "pending_review"
         assert data["qc_status"] == "PENDING_REVIEW"
 
-    def test_assertion_08_stop_call_r13_user_not_scored(self):
+    def test_assertion_08_stop_call_r13_user_not_scored(self, _mock_event_bus):
         db = ApiFakeSession()
         db.call_ids.add("sess_a8")
         redis = MemoryRedis(db=3)
@@ -393,7 +400,11 @@ class TestAssertions1to14:
         agent_r13 = [hit for hit in r13 if hit.get("speaker") == "agent"]
         assert agent_r13
         assert data["compliance_score"] == 80
-        assert CHANNEL_STOP_CALL in _published_channels(redis)
+        # 业务事件经 EventBus（mock）发布
+        assert any(
+            c.args[0] == CHANNEL_STOP_CALL
+            for c in _mock_event_bus.publish.await_args_list
+        )
         user_r13 = [hit for hit in r13 if hit.get("speaker") == "user"]
         assert user_r13
 
