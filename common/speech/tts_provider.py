@@ -10,6 +10,7 @@ import structlog
 from common.config.settings import settings
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
+from common.llm.reliability import is_placeholder_secret
 from common.utils.retry import retry
 
 logger = structlog.get_logger()
@@ -35,7 +36,7 @@ class TTSProvider:
         Returns:
             bytes: MP3 音频数据。
         """
-        if settings.ENV == "dev" and self._app_key == "change_me":
+        if settings.ENV == "dev" and is_placeholder_secret(self._app_key):
             logger.info("tts_mock_mode", text_len=len(text))
             return b"mock_audio_bytes"
 

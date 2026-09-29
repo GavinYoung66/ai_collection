@@ -1,0 +1,260 @@
+# 公共 server 内容（api-gateway-hardening D2/D7 / tasks 6.2）：
+# 8080 明文 server 与 8443 TLS server（tls.conf）include 同一份，
+# 避免双份路由漂移。本文件为 envsubst 模板（变量白名单见 docker-entrypoint.sh），
+# 由入口脚本渲染为 /etc/nginx/server_common.conf。
+index index.html;
+limit_req_status 429;
+
+# CORS（D6 / tasks 5.1）：$cors_origin 由 /etc/nginx/cors.conf 的 map 按
+# $http_origin 匹配 CORS_ALLOWED_ORIGINS 白名单产生；未命中白名单时为空串，
+# nginx 对空值 add_header 不产出该响应头（浏览器按 CORS 策略拒绝）。
+# 网关为单一 CORS 权威：proxy_hide_header 屏蔽后端 FastAPI CORSMiddleware 自带
+# CORS 头。否则后端 echo 的 ACAO 与网关 add_header 的 ACAO 成双头，浏览器按
+# 逗号拼接后与 origin 不匹配 → CORS 失败。屏蔽后由网关统一 add_header 下发。
+add_header Access-Control-Allow-Origin $cors_origin always;
+add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
+add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-Trace-Id, X-User-Id" always;
+add_header Access-Control-Allow-Credentials "true" always;
+proxy_hide_header Access-Control-Allow-Origin;
+proxy_hide_header Access-Control-Allow-Credentials;
+proxy_hide_header Access-Control-Allow-Methods;
+proxy_hide_header Access-Control-Allow-Headers;
+
+# 安全响应头（D7 / tasks 6.1）：server 级 always。
+# 注意 nginx add_header 继承规则：子 location 一旦有自己的 add_header，
+# server 级全部不继承——故 @rate_limited/@auth_required 内需重复本组。
+add_header X-Frame-Options "DENY" always;
+add_header X-Content-Type-Options "nosniff" always;
+add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+# OPTIONS 预检由网关直接响应，不透传后端（spec「CORS 与预检处理」）。
+if ($request_method = OPTIONS) {
+    return 204;
+}
+
+location = /gateway/health {
+    access_log off;
+    default_type application/json;
+    return 200 '{"code":"B0000","message":"ok","data":{"status":"healthy"},"trace_id":"$trace_id"}';
+}
+
+location = /health {
+    # 已知项（审核观察项）：HEAD /health 由后端 qc 返回 405（后端未实现 HEAD），
+    # GET 正常；compose healthcheck 以 GET（wget -qO-）探测，不受影响。
+    proxy_pass http://qc;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Trace-Id $trace_id;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 3s;
+    limit_req zone=gateway burst=40 nodelay;
+}
+
+# 鉴权子请求端点（api-gateway-hardening D3 / tasks 4.3）：
+# internal 保证仅 nginx auth_request 可调用，外部不可直连。
+# auth_request 子请求沿用原始方法与头（含 Authorization），不下发 body。
+location = /internal/authz {
+    internal;
+    proxy_pass http://auth;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    proxy_set_header X-Original-URI $request_uri;
+    proxy_set_header X-Trace-Id $trace_id;
+}
+
+# judge 长任务专用（D9 / tasks 7.2）：POST /api/v1/complaints/{id}/judge 为
+# 同步跑图（含 LLM 调用，典型耗时 >15s），若落在 /api/v1/complaints 前缀的
+# 15s 读超时会被误杀。正则 location 优先于前缀匹配，单独放 120s 级。
+location ~ ^/api/v1/complaints/[^/]+/judge$ {
+    include /etc/nginx/proxy_pass/complaint.conf;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Trace-Id $trace_id;
+    include /etc/nginx/auth_request.conf;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 120s;
+    limit_req zone=gateway burst=40 nodelay;
+}
+
+location /api/v1/complaints {
+    include /etc/nginx/proxy_pass/complaint.conf;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Trace-Id $trace_id;
+    include /etc/nginx/auth_request.conf;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 15s;
+    limit_req zone=gateway burst=40 nodelay;
+}
+
+location /api/v1/stats {
+    include /etc/nginx/proxy_pass/complaint.conf;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Trace-Id $trace_id;
+    include /etc/nginx/auth_request.conf;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 15s;
+    limit_req zone=gateway burst=40 nodelay;
+}
+
+location /api/v1/mode {
+    include /etc/nginx/proxy_pass/complaint.conf;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Trace-Id $trace_id;
+    include /etc/nginx/auth_request.conf;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 15s;
+    limit_req zone=gateway burst=40 nodelay;
+}
+
+location /api/v1/qc {
+    include /etc/nginx/proxy_pass/qc.conf;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Trace-Id $trace_id;
+    include /etc/nginx/auth_request.conf;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 15s;
+    limit_req zone=gateway burst=40 nodelay;
+}
+
+location /api/v1/kb {
+    include /etc/nginx/proxy_pass/kb.conf;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Trace-Id $trace_id;
+    include /etc/nginx/auth_request.conf;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 15s;
+    limit_req zone=gateway burst=40 nodelay;
+}
+
+location /api/v1/sensitive-words {
+    include /etc/nginx/proxy_pass/kb.conf;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Trace-Id $trace_id;
+    include /etc/nginx/auth_request.conf;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 15s;
+    limit_req zone=gateway burst=40 nodelay;
+}
+
+# 指标导出（D10 / tasks 8.1-8.2）：反代到内网 nginx-prometheus-exporter。
+# ENABLE_AUTH=true 时经 auth_request 鉴权（spec「仅内网或鉴权可达」）；
+# false 时 include 为空文件 = 放行（本地/内网语义）。MUST NOT 加 limit_req——
+# 高频抓取不得触发 429，保证监控连续性。
+location = /metrics {
+    include /etc/nginx/auth_request.conf;
+    proxy_pass http://metrics;
+    proxy_set_header Host $host;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 15s;
+}
+
+# stub_status 仅 docker 内网可抓（exporter 经 ai-shared-net 访问，172.x 命中 allow）。
+# 实测（macOS Docker Desktop）：宿主机经 published 端口访问时源 IP 为宿主代理
+# 地址 192.168.65.1（不在 172.16.0.0/12 段）→ 命中 deny，返回 403，与 spec
+# 「外部 403」一致。Linux 上 docker-proxy 源 IP 可能落在 172.16/12 内（视同内网
+# 放行），生产环境如需强制拒绝，以不发布 stub 路由或防火墙规则兜底。
+location = /stub_status {
+    stub_status;
+    allow 172.16.0.0/12;
+    deny all;
+}
+
+# Gradio 在子路径 /rag/ 下仍会向 origin 根请求 /manifest.json；
+# 不拦会落到导航页 root 并写 error_log 404。归 Gradio/流式级超时（D9）。
+location = /manifest.json {
+    proxy_pass http://web/rag/manifest.json;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 120s;
+    access_log off;
+}
+
+location /rag/ {
+    proxy_pass http://web;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Trace-Id $trace_id;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 120s;
+    proxy_buffering off;
+}
+
+location /complaint/ {
+    alias /usr/share/nginx/html/complaint/;
+}
+
+location /qc/ {
+    alias /usr/share/nginx/html/qc/;
+}
+
+location / {
+    root /usr/share/nginx/html/www;
+}
+
+error_page 429 = @rate_limited;
+error_page 502 = @bad_gateway;
+error_page 504 = @gateway_timeout;
+
+# 鉴权失败统一信封（api-gateway-hardening / tasks 4.3）：
+# 仅当 ENABLE_AUTH=true 时由 /etc/nginx/auth_request.conf 的
+# `error_page 401 = @auth_required;` 引用；ENABLE_AUTH=false 时
+# 无 error_page 401 指向此处，后端自有 401 不会被改写，保证零回归。
+# 本 location 有自定义 add_header，server 级安全头不继承，须重复（tasks 6.1）。
+location @auth_required {
+    internal;
+    default_type application/json;
+    add_header Access-Control-Allow-Origin $cors_origin always;
+    add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
+    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-Trace-Id, X-User-Id" always;
+    add_header Access-Control-Allow-Credentials "true" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    return 401 '{"code":"B0002","message":"请先登录","data":null,"trace_id":"$trace_id"}';
+}
+
+# 同上：有自定义 add_header，server 级安全头不继承，须重复（tasks 6.1）。
+location @rate_limited {
+    internal;
+    default_type application/json;
+    add_header Retry-After 1 always;
+    add_header Access-Control-Allow-Origin $cors_origin always;
+    add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
+    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-Trace-Id, X-User-Id" always;
+    add_header Access-Control-Allow-Credentials "true" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    return 429 '{"code":"B0006","message":"请求过于频繁","data":null,"trace_id":"$trace_id"}';
+}
+
+location @bad_gateway {
+    internal;
+    default_type application/json;
+    return 502 '{"code":"B0008","message":"网关错误","data":null,"trace_id":"$trace_id"}';
+}
+
+location @gateway_timeout {
+    internal;
+    default_type application/json;
+    return 504 '{"code":"B0009","message":"服务暂不可用","data":null,"trace_id":"$trace_id"}';
+}

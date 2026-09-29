@@ -22,7 +22,7 @@ from common.llm.transport import message_content_from_completions, post_chat_com
 T = TypeVar("T")
 
 PLACEHOLDER_SECRETS = frozenset(
-    {"", "change_me", "<change_me>", "dev_cot_key_stub_change_me"}
+    {"", "change_me", "<change_me>", "dev_cot_key_stub_change_me", "placeholder", "<placeholder>"}
 )
 
 

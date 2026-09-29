@@ -70,6 +70,13 @@ class Settings(BaseSettings):
     JWT_SECRET: str = "change_me"
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_HOURS: int = 24
+    # 网关鉴权：iss/aud 为空字符串表示未配置，跳过对应 claims 校验（零回归）。
+    JWT_ISSUER: str = ""
+    JWT_AUDIENCE: str = ""
+    # API Key 白名单：逗号分隔、无空格，如 "ak-xxx,ak-yyy"；空表示禁用 API Key 方案。
+    API_KEYS: str = ""
+    # API Key 对应的身份角色默认值（API Key 本身不带 role，统一赋予此角色）。
+    API_KEY_ROLE: str = "admin"
 
     # 业务参数（外呼 / 质检 / 熔断）
     CALL_ALLOWED_HOURS: str = "08:00-21:00"

@@ -112,6 +112,21 @@ def _unwrap_event_payload(raw: Any) -> dict[str, Any]:
     return raw
 
 
+def _ensure_host_event_bus_env() -> None:
+    """宿主机运行所需的 EventBus 环境默认值（幂等，不覆盖已有值）。
+
+    本脚本按设计在**宿主机**运行：容器内服务用 ``rocketmq-proxy:8081``，宿主机走
+    映射端口 ``localhost:18081``。``.env`` 里的 EVENT_BUS / ROCKETMQ_PROXY 只被
+    pydantic 读取，不会导出到 ``os.environ``，因此此处 MUST NOT 以「os.environ 中
+    EVENT_BUS 是否已存在」作为前置条件——否则幂等重跑分支会跳过代理默认值，
+    RocketMQEventBus 回落到容器内主机名 ``rocketmq-proxy:8081``，在宿主机不可解析，
+    报 ``failed to fetch topic:...route``。
+    """
+    os.environ.setdefault("EVENT_BUS", "rocketmq")
+    os.environ.setdefault("EVENT_BUS_SVC", "dp")
+    os.environ.setdefault("ROCKETMQ_PROXY", "localhost:18081")
+
+
 async def _subscribe_qc_event(
     future: asyncio.Future,
     ready: asyncio.Event,
@@ -127,18 +142,12 @@ async def _subscribe_qc_event(
     from common.eventbus.factory import reset_event_bus
     from common.eventbus.rocketmq import RocketMQEventBus
 
-    if not (os.getenv("EVENT_BUS") or "").strip():
-        os.environ["EVENT_BUS"] = "rocketmq"
-    if not (os.getenv("EVENT_BUS_SVC") or "").strip():
-        os.environ["EVENT_BUS_SVC"] = "dp"
-
+    _ensure_host_event_bus_env()
     mode = (os.getenv("EVENT_BUS") or "rocketmq").strip().lower()
     if mode != "rocketmq":
         raise ValueError(f"run_min_loop requires EVENT_BUS=rocketmq, got {mode!r}")
     # Keep factory clear so publish_etl_task_done gets its own Producer.
     reset_event_bus()
-    # Host → mapped Proxy (container services use rocketmq-proxy:8081).
-    os.environ.setdefault("ROCKETMQ_PROXY", "localhost:18081")
     bus = RocketMQEventBus(endpoints=os.environ["ROCKETMQ_PROXY"])
 
     async def _handler(envelope: EventEnvelope) -> None:
@@ -342,8 +351,7 @@ async def run_flow() -> bool:
             from common.eventbus.factory import reset_event_bus
 
             reset_event_bus()
-            if (os.getenv("EVENT_BUS") or "").strip().lower() == "rocketmq":
-                os.environ.setdefault("ROCKETMQ_PROXY", "localhost:18081")
+            _ensure_host_event_bus_env()
             published = await publish_etl_task_done(case_id=CASE_ID, session_id=SESSION_ID)
             if not published:
                 sub_task.cancel()
@@ -390,8 +398,7 @@ async def run_flow() -> bool:
         from common.eventbus.factory import reset_event_bus
 
         reset_event_bus()
-        if (os.getenv("EVENT_BUS") or "").strip().lower() == "rocketmq":
-            os.environ.setdefault("ROCKETMQ_PROXY", "localhost:18081")
+        _ensure_host_event_bus_env()
         created_ok = await publish_complaint_created(
             case_id=CASE_ID,
             trace_id=f"min-loop-created-{CASE_ID}",

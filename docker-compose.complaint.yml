@@ -147,6 +147,13 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    # 刻意不接入 ai-shared-net：本服务是 RAG stub，仅需被 complaint-service-a/b
+    # 经 default 网络以 http://rag-service:8000 访问。若接入共享网络，其服务名别名
+    # `rag-service` 会与 docker-compose.dev.yml 的真 rag-service 冲突（Docker DNS
+    # 在两栈同时运行时随机择一），污染网关的 kb 上游。真 rag-service 才是网关
+    # upstream `rag-service` 的唯一所有者。
+    networks:
+      - default
 
   complaint-service-a:
     build:
@@ -201,6 +208,9 @@ services:
       timeout: 3s
       retries: 30
       start_period: 30s
+    networks:
+      - default
+      - ai-shared-net
 
   complaint-service-b:
     build:
@@ -255,7 +265,16 @@ services:
       timeout: 3s
       retries: 30
       start_period: 30s
+    networks:
+      - default
+      - ai-shared-net
 
 volumes:
   complaint_pg_data:
   complaint_redis_data:
+
+networks:
+  default: {}
+  ai-shared-net:
+    external: true
+    name: ai-shared-net

@@ -41,6 +41,8 @@ htmlcov/
 .env.*
 !.env.example
 *.local
+# 网关自签 TLS 私钥/证书（gen-self-signed.sh 本地生成；生产替换正式证书且严禁入库）
+deploy/gateway/tls/
 
 # ── Docker 数据卷（仅根目录挂载）──────────────────────
 # 注意：必须锚定 /data/，否则会误伤 services/rag-service/data/sensitive_words.dict

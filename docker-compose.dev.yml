@@ -233,6 +233,9 @@ services:
       timeout: 3s
       retries: 30
       start_period: 30s
+    networks:
+      - default
+      - ai-shared-net
 
   qc-service:
     build:
@@ -301,6 +304,9 @@ services:
       timeout: 3s
       retries: 30
       start_period: 30s
+    networks:
+      - default
+      - ai-shared-net
 
   call-service:
     build:
@@ -427,6 +433,9 @@ services:
       timeout: 3s
       retries: 30
       start_period: 30s
+    networks:
+      - default
+      - ai-shared-net
 
   review-service:
     build:
@@ -470,3 +479,12 @@ services:
       - ./services/rag-service/data/assets:/app/data/assets
       # 热更新工作台源码（镜像内路径为 /app/app/app.py）
       - ./services/rag-service/gradio:/app/app
+    networks:
+      - default
+      - ai-shared-net
+
+networks:
+  default: {}
+  ai-shared-net:
+    external: true
+    name: ai-shared-net

@@ -14,13 +14,44 @@ http {
                        'status=$status trace_id=$trace_id '
                        'request_time=$request_time '
                        'upstream_response_time=$upstream_response_time '
+                       'upstream_addr=$upstream_addr '
                        'body_bytes_sent=$body_bytes_sent';
-    access_log /var/log/nginx/access.log gateway;
+
+    # LOG_JSON=true 时启用的 JSON 访问日志格式（D / tasks 9.1）：
+    # 含 trace_id/status/request_time/upstream_response_time/body_bytes_sent，
+    # 增补 upstream_addr（tasks 10.1 灰度验收依据：v2 独立后端接入后据其
+    # 统计分流占比；spec 字段清单为 MUST 下限，允许增补），
+    # escape=json 保证字段值内特殊字符转义，单行可被 jq/采集系统结构化解析。
+    log_format gateway_json escape=json
+        '{"remote_addr":"$remote_addr","time":"$time_iso8601",'
+        '"request":"$request","status":"$status","trace_id":"$trace_id",'
+        '"request_time":"$request_time",'
+        '"upstream_response_time":"$upstream_response_time",'
+        '"upstream_addr":"$upstream_addr",'
+        '"body_bytes_sent":"$body_bytes_sent"}';
+
+    # access_log 由入口脚本按 LOG_JSON 生成（false=gateway 文本，true=gateway_json）。
+    include /etc/nginx/log.conf;
 
     map $http_x_trace_id $trace_id {
         ""      $request_id;
         default $http_x_trace_id;
     }
+
+    # CORS 白名单 map（D6 / tasks 5.1）：入口脚本把 CORS_ALLOWED_ORIGINS
+    # 逗号拆分生成；未命中白名单的 Origin 得空串，不产生 Allow-Origin 头。
+    include /etc/nginx/cors.conf;
+
+    # 灰度分流（D11 / tasks 10.1）：入口脚本按 CANARY_WEIGHT 生成 split_clients。
+    # 分流键用稳定会话标识 $cookie_canary；MUST NOT 用每请求唯一的
+    # $trace_id/$request_id（会同会话散到不同版本）。
+    # 注：location 用变量 proxy_pass（http://$xxx_upstream）后，upstream keepalive
+    # 连接缓存不生效（每请求新建连接）；灰度默认 CANARY_WEIGHT=0 未启用，属可接受
+    # 代价；v2 独立后端接入如需 keepalive，可将 proxy_pass 改回定名 upstream 组。
+    # 灰度验收方法（审核观察项3闭环）：v2 指向独立后端后，按访问日志新增的
+    # upstream_addr 字段统计 v1/v2 占比是否≈CANARY_WEIGHT，并以固定
+    # $cookie_canary 值复测会话粘性（同 cookie 恒定同 upstream）。
+    include /etc/nginx/canary.conf;
 
     limit_req_zone $binary_remote_addr zone=gateway:10m rate=20r/s;
 
@@ -29,189 +60,95 @@ http {
     # 而不是整个网关 [emerg] 起不来。`zone` 是 `resolve` 的必要前提。
     resolver 127.0.0.11 valid=10s ipv6=off;
 
+    # 被动熔断与重试边界（D8 / tasks 7.1）：
+    # - 仅连接层错误/超时重试，不因 HTTP 5xx 重试；
+    # - nginx 默认不含 non_idempotent，POST/PUT/DELETE/PATCH 不会被重试
+    #   （避免重复创建工单等副作用）；
+    # - 当前单节点 upstream 无下一节点，重试实际不发生；
+    # - 幂等 GET 在将来多节点时的 5xx 重试属后续项。
+    proxy_next_upstream error timeout;
+
     upstream complaint {
         zone complaint_up 64k;
-        server ${UPSTREAM_COMPLAINT} resolve;
+        server ${UPSTREAM_COMPLAINT} resolve max_fails=3 fail_timeout=10s;
         keepalive 64;
     }
 
     upstream qc {
         zone qc_up 64k;
-        server ${UPSTREAM_QC} resolve;
+        server ${UPSTREAM_QC} resolve max_fails=3 fail_timeout=10s;
         keepalive 64;
     }
 
     upstream kb {
         zone kb_up 64k;
-        server ${UPSTREAM_RAG} resolve;
+        server ${UPSTREAM_RAG} resolve max_fails=3 fail_timeout=10s;
         keepalive 64;
     }
 
     upstream web {
         zone web_up 64k;
-        server ${UPSTREAM_WEB} resolve;
+        server ${UPSTREAM_WEB} resolve max_fails=3 fail_timeout=10s;
         keepalive 64;
     }
+
+    # v2 灰度占位（D11 / tasks 10.1）：与 v1 指向相同后端，CANARY_WEIGHT=0
+    #（默认）时无流量；启用灰度时仅需把 v2 的 server 指向新版本后端。
+    upstream complaint_v2 {
+        zone complaint_v2_up 64k;
+        server ${UPSTREAM_COMPLAINT} resolve max_fails=3 fail_timeout=10s;
+        keepalive 64;
+    }
+
+    upstream qc_v2 {
+        zone qc_v2_up 64k;
+        server ${UPSTREAM_QC} resolve max_fails=3 fail_timeout=10s;
+        keepalive 64;
+    }
+
+    upstream kb_v2 {
+        zone kb_v2_up 64k;
+        server ${UPSTREAM_RAG} resolve max_fails=3 fail_timeout=10s;
+        keepalive 64;
+    }
+
+    upstream web_v2 {
+        zone web_v2_up 64k;
+        server ${UPSTREAM_WEB} resolve max_fails=3 fail_timeout=10s;
+        keepalive 64;
+    }
+
+    # 鉴权 sidecar（api-gateway-hardening D3 / tasks 4.3）：
+    # 仅 auth_request 子请求使用，外部经 `location = /internal/authz { internal; }` 不可直连。
+    upstream auth {
+        zone auth_up 64k;
+        server auth-sidecar:8000 resolve;
+        keepalive 64;
+    }
+
+    # 指标 exporter（D10 / tasks 8.1）：容器内抓取本网关 stub_status 并转
+    # Prometheus 格式；仅 ai-shared-net 内网可达，compose 不 publish 端口。
+    upstream metrics {
+        zone metrics_up 64k;
+        server nginx-prometheus-exporter:9113 resolve;
+    }
+
+    # TLS 8443 server 块（D7 / tasks 6.2）：TLS_ENABLED=true 时由入口脚本
+    # 生成（含证书引用与 HSTS），false 时空文件 = no-op。
+    include /etc/nginx/tls.conf;
 
     server {
         listen 8080;
         listen [::]:8080;
         server_name _;
-        index index.html;
-        limit_req_status 429;
 
-        add_header Access-Control-Allow-Origin * always;
-        add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
-        add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-Trace-Id, X-User-Id" always;
+        # TLS_ENABLED=true 时由入口脚本生成 8080→8443 的 301 跳转
+        #（豁免 /gateway/health，否则 compose healthcheck 走 wget 明文会被跳走）；
+        # false 时空文件 = no-op。须位于 OPTIONS if 之前，故在 include 公共块前。
+        include /etc/nginx/tls_redirect.conf;
 
-        if ($request_method = OPTIONS) {
-            return 204;
-        }
-
-        location = /gateway/health {
-            access_log off;
-            default_type application/json;
-            return 200 '{"code":"B0000","message":"ok","data":{"status":"healthy"},"trace_id":"$trace_id"}';
-        }
-
-        location = /health {
-            proxy_pass http://qc;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Trace-Id $trace_id;
-            proxy_connect_timeout 3s;
-            proxy_read_timeout 120s;
-            limit_req zone=gateway burst=40 nodelay;
-        }
-
-        location /api/v1/complaints {
-            proxy_pass http://complaint;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Trace-Id $trace_id;
-            proxy_connect_timeout 3s;
-            proxy_read_timeout 120s;
-            limit_req zone=gateway burst=40 nodelay;
-        }
-
-        location /api/v1/stats {
-            proxy_pass http://complaint;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Trace-Id $trace_id;
-            proxy_connect_timeout 3s;
-            proxy_read_timeout 120s;
-            limit_req zone=gateway burst=40 nodelay;
-        }
-
-        location /api/v1/mode {
-            proxy_pass http://complaint;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Trace-Id $trace_id;
-            proxy_connect_timeout 3s;
-            proxy_read_timeout 120s;
-            limit_req zone=gateway burst=40 nodelay;
-        }
-
-        location /api/v1/qc {
-            proxy_pass http://qc;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Trace-Id $trace_id;
-            proxy_connect_timeout 3s;
-            proxy_read_timeout 120s;
-            limit_req zone=gateway burst=40 nodelay;
-        }
-
-        location /api/v1/kb {
-            proxy_pass http://kb;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Trace-Id $trace_id;
-            proxy_connect_timeout 3s;
-            proxy_read_timeout 120s;
-            limit_req zone=gateway burst=40 nodelay;
-        }
-
-        location /api/v1/sensitive-words {
-            proxy_pass http://kb;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Trace-Id $trace_id;
-            proxy_connect_timeout 3s;
-            proxy_read_timeout 120s;
-            limit_req zone=gateway burst=40 nodelay;
-        }
-
-        # Gradio 在子路径 /rag/ 下仍会向 origin 根请求 /manifest.json；
-        # 不拦会落到导航页 root 并写 error_log 404。
-        location = /manifest.json {
-            proxy_pass http://web/rag/manifest.json;
-            proxy_http_version 1.1;
-            proxy_set_header Host $http_host;
-            proxy_connect_timeout 3s;
-            proxy_read_timeout 30s;
-            access_log off;
-        }
-
-        location /rag/ {
-            proxy_pass http://web;
-            proxy_http_version 1.1;
-            proxy_set_header Host $http_host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Trace-Id $trace_id;
-            proxy_set_header Upgrade $http_upgrade;
-            proxy_set_header Connection "upgrade";
-            proxy_connect_timeout 3s;
-            proxy_read_timeout 120s;
-            proxy_buffering off;
-        }
-
-        location /complaint/ {
-            alias /usr/share/nginx/html/complaint/;
-        }
-
-        location /qc/ {
-            alias /usr/share/nginx/html/qc/;
-        }
-
-        location / {
-            root /usr/share/nginx/html/www;
-        }
-
-        error_page 429 = @rate_limited;
-        error_page 502 = @bad_gateway;
-        error_page 504 = @gateway_timeout;
-
-        location @rate_limited {
-            internal;
-            default_type application/json;
-            add_header Retry-After 1 always;
-            add_header Access-Control-Allow-Origin * always;
-            add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
-            add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-Trace-Id, X-User-Id" always;
-            return 429 '{"code":"B0006","message":"请求过于频繁","data":null,"trace_id":"$trace_id"}';
-        }
-
-        location @bad_gateway {
-            internal;
-            default_type application/json;
-            return 502 '{"code":"B0008","message":"网关错误","data":null,"trace_id":"$trace_id"}';
-        }
-
-        location @gateway_timeout {
-            internal;
-            default_type application/json;
-            return 504 '{"code":"B0009","message":"服务暂不可用","data":null,"trace_id":"$trace_id"}';
-        }
+        # 公共 server 内容（CORS/安全头/全路由/错误信封），8443 TLS server
+        # 复用同一份 include，避免双份路由漂移。
+        include /etc/nginx/server_common.conf;
     }
 }

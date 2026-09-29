@@ -21,6 +21,7 @@ from common.resilience.timeout import Timeout
 
 def test_placeholder_secrets():
     assert is_placeholder_secret("change_me")
+    assert is_placeholder_secret("placeholder")
     assert is_placeholder_secret("")
     assert not is_placeholder_secret("sk-real")
     with pytest.raises(RuntimeError, match="placeholder"):
