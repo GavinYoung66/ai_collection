@@ -442,16 +442,44 @@ async def test_fail_shutdown_guards_terminal_and_existing_review():
 
 @pytest.mark.asyncio
 async def test_n4_resume_lock_released_after_single_holder():
-    """单路 resume：持锁末尾无等待者 → 释放前回收登记。"""
+    """单路 resume：引用归零 → 回收登记（调用契约：在 async with 退出后释放）。"""
     from app.service import complaint_service as cs
 
     cid = "n4-lock-single-001"
     cs._resume_locks.pop(cid, None)
+    cs._resume_lock_refs.pop(cid, None)
     lock = cs._resume_lock(cid)
     assert cid in cs._resume_locks
     async with lock:
-        cs._release_resume_lock(cid, lock)
+        pass
+    cs._release_resume_lock(cid, lock)
     assert cid not in cs._resume_locks
+    assert cid not in cs._resume_lock_refs
+
+
+@pytest.mark.asyncio
+async def test_n4_resume_lock_refcount_keeps_registry_while_referenced():
+    """引用未归零时不回收登记——这是替代 `_waiters` 探测的核心不变量。
+
+    旧实现用 asyncio.Lock._waiters 私有属性判断"有无等待者"，跨版本语义有变、
+    属性缺失时退化为永不回收；改用显式计数后，只要还有人持有引用就不回收。
+    """
+    from app.service import complaint_service as cs
+
+    cid = "n4-lock-refcount-001"
+    cs._resume_locks.pop(cid, None)
+    cs._resume_lock_refs.pop(cid, None)
+
+    lock_a = cs._resume_lock(cid)
+    lock_b = cs._resume_lock(cid)          # 第二个引用者（如排队中的另一路）
+    assert lock_a is lock_b, "同一工单必须复用同一把锁"
+
+    cs._release_resume_lock(cid, lock_a)
+    assert cid in cs._resume_locks, "仍有引用者时不得回收"
+
+    cs._release_resume_lock(cid, lock_b)
+    assert cid not in cs._resume_locks, "引用归零后应回收"
+    assert cid not in cs._resume_lock_refs
 
 
 @pytest.mark.asyncio
@@ -466,19 +494,19 @@ async def test_n4_resume_lock_dual_drive_serialized_and_cleaned():
 
     async def worker(tag: str) -> None:
         lock = cs._resume_lock(cid)
-        async with lock:
-            try:
+        try:
+            async with lock:
                 order.append(f"{tag}-enter")
                 await asyncio.sleep(0.05)
                 order.append(f"{tag}-exit")
-            finally:
-                cs._release_resume_lock(cid, lock)
+        finally:
+            cs._release_resume_lock(cid, lock)
 
     t1 = asyncio.create_task(worker("a"))
     await asyncio.sleep(0.01)  # a 已持锁
     t2 = asyncio.create_task(worker("b"))
-    await asyncio.sleep(0.01)  # b 已在 _waiters 排队
-    assert cid in cs._resume_locks  # 有等待者，登记必须保留
+    await asyncio.sleep(0.01)  # b 已取到同一把锁并排队（引用计数为 2）
+    assert cid in cs._resume_locks  # 仍有引用者，登记必须保留
 
     await asyncio.gather(t1, t2)
     assert order == ["a-enter", "a-exit", "b-enter", "b-exit"]  # 从不并发
@@ -492,8 +520,10 @@ async def test_n4_resume_lock_many_complaints_no_registry_growth():
 
     async def one(cid: str) -> None:
         lock = cs._resume_lock(cid)
-        async with lock:
-            await asyncio.sleep(0)
+        try:
+            async with lock:
+                await asyncio.sleep(0)
+        finally:
             cs._release_resume_lock(cid, lock)
 
     await asyncio.gather(*(one(f"n4-lock-many-{i:03d}") for i in range(50)))

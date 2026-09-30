@@ -75,6 +75,10 @@ def _unwire_resilience_hooks() -> None:
 # 队列消费循环轮询间隔（秒）
 _QUEUE_CONSUME_INTERVAL = 1.0
 
+# 周期维护循环间隔（秒）：超时转人工 + checkpoint 三表裁剪。
+# 5min 足够频繁（崩溃后最长 5min 内把滞留工单转人工），又不至于给 PG 加压。
+_MAINTENANCE_INTERVAL = 300.0
+
 # 在途排队研判任务强引用集合：事件循环仅弱持有 asyncio.Task，
 # 不保存返回值时任务可能在执行中被 GC（中途消失 → 槽/幂等锁不释放）。
 # 任务完成后经 done_callback 自动移出集合。
@@ -161,6 +165,25 @@ async def _queue_consumer_loop() -> None:
         await asyncio.sleep(_QUEUE_CONSUME_INTERVAL)
 
 
+async def _maintenance_loop() -> None:
+    """周期维护循环：超时转人工 + checkpoint 三表裁剪。
+
+    多副本下每个实例都会跑此循环，但 `run_maintenance` 内部有跨副本锁
+    （maintenance_lock），保证同刻只有一个实例真正执行，其余跳过。
+    """
+    import structlog
+
+    from app.service.maintenance import run_maintenance
+
+    logger = structlog.get_logger()
+    while True:
+        try:
+            await run_maintenance()
+        except Exception as e:  # noqa: BLE001 — 循环永不退出
+            logger.warning("maintenance_loop_error", error=str(e))
+        await asyncio.sleep(_MAINTENANCE_INTERVAL)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """startup：真路径 MCP 配置 fail-fast；PG/MCP 探活；shutdown 清理。
@@ -184,6 +207,10 @@ async def lifespan(app: FastAPI):
     consumer_task = asyncio.create_task(_queue_consumer_loop())
     app.state.queue_consumer = consumer_task
 
+    # 周期维护循环：超时转人工（崩溃/重启后从 PG 恢复滞留工单）+ 三表裁剪
+    maintenance_task = asyncio.create_task(_maintenance_loop())
+    app.state.maintenance = maintenance_task
+
     # 4.4：EventBus 业务订阅（含 complaint.created 占位 handler）；失败不阻断启动
     from app.events.subscriber import start_eventbus_subscriber
 
@@ -204,11 +231,26 @@ async def lifespan(app: FastAPI):
 
         validate_real_llm_config()
 
-    # 预留 AsyncPostgresSaver 初始化（批次4 接入 LangGraph checkpointer 时实现）
+    # 批次4：LangGraph checkpointer 初始化。
+    # 语义：pg_degraded 为 True 当且仅当「期望 PG 但退回了 MemorySaver」；
+    # 未配置 DSN（dev/test）走 MemorySaver 属预期，不算降级。
+    # checkpointer_kind 是生产上唯一能区分「真持久化 / 断点会丢」的信号，务必暴露到 /health。
     try:
-        # TODO(批次4): 初始化 AsyncPostgresSaver，连接池 min_size=5, max_size=20
-        pass
-    except Exception:
+        from app.graph.checkpointer import (
+            checkpointer_kind,
+            init_checkpointer,
+            is_checkpointer_degraded,
+        )
+
+        app.state.checkpointer = await init_checkpointer()
+        # 必须用 checkpointer_kind()（按 saver 实际类型判定），不能用
+        # is_checkpointer_degraded() 取反——「未配置 DSN」时后者为 False（表示
+        # 这不是降级），取反会误报 postgres，让监控以为断点已持久化。
+        app.state.checkpointer_kind = checkpointer_kind()
+        app.state.pg_degraded = is_checkpointer_degraded()
+    except Exception:  # noqa: BLE001 — 降级启动，不阻断服务
+        app.state.checkpointer = None
+        app.state.checkpointer_kind = "memory"
         app.state.pg_degraded = True
 
     # MCP：standalone 且非 Mock 时探活网关，避免 health mcp 假绿
@@ -224,6 +266,9 @@ async def lifespan(app: FastAPI):
     consumer_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await consumer_task
+    maintenance_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await maintenance_task
     if eventbus_task is not None:
         eventbus_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -242,10 +287,13 @@ async def lifespan(app: FastAPI):
         with contextlib.suppress(asyncio.CancelledError):
             await task
     _unwire_resilience_hooks()
-    # 预留连接池清理（批次4 接入后实现 engine.dispose() 等）
+    # 关闭 checkpointer 连接池。必须在在途排队任务 await 完之后（上方 239-243），
+    # 否则正在执行的图会被抽掉连接。
     try:
-        pass
-    except Exception:
+        from app.graph.checkpointer import shutdown_checkpointer
+
+        await shutdown_checkpointer()
+    except Exception:  # noqa: BLE001 — 关池失败不阻断 shutdown
         pass
 
 

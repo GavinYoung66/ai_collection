@@ -36,7 +36,7 @@ def _clean():
 
 
 def test_write_session_persisted_publishes_result_ready():
-    async def _call(server, tool, payload):
+    async def _call(server, tool, payload, **kwargs):
         if tool == "write_session":
             return {
                 "success": True,
@@ -57,7 +57,7 @@ def test_write_session_persisted_publishes_result_ready():
 
 
 def test_write_session_not_persisted_no_result_ready():
-    async def _call(server, tool, payload):
+    async def _call(server, tool, payload, **kwargs):
         return {"success": True, "persisted": False}
 
     with patch("app.graph.nodes.sample_backflow.get_mcp_client") as gm:
@@ -68,7 +68,7 @@ def test_write_session_not_persisted_no_result_ready():
 
 
 def test_result_ready_idempotent_no_double_publish():
-    async def _call(server, tool, payload):
+    async def _call(server, tool, payload, **kwargs):
         return {
             "success": True,
             "persisted": True,

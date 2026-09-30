@@ -10,6 +10,7 @@ from app.api.health import router as health_router
 from app.auth import register_auth_handlers
 from app.errors import register_qc_exception_handlers
 from app.events.subscriber import start_background_tasks
+from app.mcp.http import router as mcp_router
 from app.routers.alerts import router as alerts_router
 from app.routers.check import router as check_router
 from app.routers.demo import router as demo_router
@@ -110,3 +111,4 @@ app.include_router(records_router)
 app.include_router(alerts_router)
 app.include_router(review_router)
 app.include_router(rules_router)
+app.include_router(mcp_router)

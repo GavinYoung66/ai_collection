@@ -18,6 +18,18 @@ def _state(cid: str = "c-hr") -> dict:
     ).model_dump()
 
 
+def _async_saver(saver):
+    """把 saver 包成 `_get_graph_checkpointer` 的异步替身。
+
+    `_get_graph_checkpointer` 已 async 化（生产为 PG saver）。测试要驱动
+    `_resume_graph_thread` 等内部会 `await` 它的方法时，必须注入异步替身，
+    否则会把 coroutine 当 saver 传给 `build_complaint_graph`。
+    """
+    async def _get():
+        return saver
+    return _get
+
+
 class TestHumanReview:
     def test_fanout_nodes_exist(self):
         """judgment_fanout 与 evidence_re_gather 节点在图中注册。"""
@@ -68,7 +80,11 @@ def _batch2_state(cid: str) -> dict:
 
 
 class TestBatch2GraphPersistence:
-    """批次② 3.1/3.2/3.3：进程级 MemorySaver + thread_id=complaint_id + review 恢复。"""
+    """批次② 3.1/3.2/3.3：同一 checkpointer 实例 + thread_id=complaint_id + review 恢复。
+
+    用局部 MemorySaver 替代生产 checkpointer：本组用例验的是图语义与 resume 路径，
+    工厂/saver 选型由 tests/unit/test_batch10_coverage.py 与 PG 集成用例覆盖。
+    """
 
     def test_thread_id_complaint_id_state_kept_and_resumed_to_backflow(self):
         """judge 与 review 各自编译图但共享同一进程级 checkpointer：
@@ -78,10 +94,10 @@ class TestBatch2GraphPersistence:
         - 3.3 sample_backflow 经 mcp.call 调 data_platform.write_session。
         """
         from app.api.deps import get_mcp_client
-        from app.service.complaint_service import _get_graph_checkpointer
+        from langgraph.checkpoint.memory import MemorySaver
 
         cid = "c-b2-persist-001"
-        saver = _get_graph_checkpointer()
+        saver = MemorySaver()
         cfg = {"configurable": {"thread_id": cid}}
 
         # judge 端：编译图 A，跑到 human_review 中断
@@ -107,20 +123,20 @@ class TestBatch2GraphPersistence:
         assert ("data_platform", "write_session") in calls
         assert ("data_platform", "write_human_review_truth") in calls
 
-    def test_service_resume_graph_thread_reuses_same_thread(self):
-        """3.2/3.3 生产方法：complaint_service._resume_graph_thread 用同一进程级
+    def test_service_resume_graph_thread_reuses_same_thread(self, monkeypatch):
+        """3.2/3.3 生产方法：complaint_service._resume_graph_thread 用同一 checkpointer
 
-        checkpointer 与 thread_id=complaint_id 恢复图，不新建线程。
+        与 thread_id=complaint_id 恢复图，不新建线程。
         """
         from app.api.deps import get_mcp_client
-        from app.service.complaint_service import (
-            _get_graph_checkpointer,
-            complaint_service,
-        )
+        from app.service import complaint_service as cs_module
+        from app.service.complaint_service import complaint_service
 
         cid = "c-b2-svc-resume-001"
         cfg = {"configurable": {"thread_id": cid}}
-        graph = build_complaint_graph(checkpointer=_get_graph_checkpointer())
+        saver = MemorySaver()
+        monkeypatch.setattr(cs_module, "_get_graph_checkpointer", _async_saver(saver))
+        graph = build_complaint_graph(checkpointer=saver)
         out = asyncio.run(graph.ainvoke(_batch2_state(cid), cfg))
         assert "__interrupt__" in out
 
@@ -145,17 +161,16 @@ class TestBatch2ResumeGuards:
         """
         from app.api.deps import get_mcp_client
         from app.service import complaint_service as cs_module
-        from app.service.complaint_service import (
-            _get_graph_checkpointer,
-            complaint_service,
-        )
+        from app.service.complaint_service import complaint_service
 
         monkeypatch.setattr(cs_module, "_RESUME_WAIT_TIMEOUT_S", 0.2)
         monkeypatch.setattr(cs_module, "_RESUME_WAIT_INTERVAL_S", 0.02)
 
         cid = "c-b2-resume-guard-001"
         cfg = {"configurable": {"thread_id": cid}}
-        graph = build_complaint_graph(checkpointer=_get_graph_checkpointer())
+        saver = MemorySaver()
+        monkeypatch.setattr(cs_module, "_get_graph_checkpointer", _async_saver(saver))
+        graph = build_complaint_graph(checkpointer=saver)
         before = len(get_mcp_client().call_log)
 
         # 全新线程：图从未运行 → 非可恢复态 → 不应发 resume
@@ -183,3 +198,47 @@ class TestBatch2ResumeGuards:
 
         assert out["complaint_id"] == rec["complaint_id"]
         assert out["task_status"] == TaskStatus.pending.value
+
+
+class TestResumePollingBackoff:
+    """#3：resume 等断点的轮询用指数退避而非固定间隔。"""
+
+    def test_polling_backs_off_and_caps(self, monkeypatch):
+        """轮询间隔按 0.25 → 0.5 → 1 → 2 增长并封顶，总次数远低于固定 1s。
+
+        固定 1s 在 120s 窗口内最多打 120 次 aget_state（每次含 blob join）；
+        退避后应降到约 60 次。
+        """
+        from types import SimpleNamespace
+
+        from app.service import complaint_service as cs_module
+        from app.service.complaint_service import complaint_service
+
+        sleeps: list[float] = []
+        real_sleep = asyncio.sleep
+
+        async def _fake_sleep(seconds):
+            sleeps.append(seconds)
+            await real_sleep(0)  # 不真等，只记录间隔
+
+        monkeypatch.setattr(cs_module.asyncio, "sleep", _fake_sleep)
+
+        class _NeverInterrupts:
+            async def aget_state(self, config):  # noqa: ARG002
+                return SimpleNamespace(next=(), values={})
+
+        monkeypatch.setattr(cs_module, "_get_graph_checkpointer", _async_saver(object()))
+        monkeypatch.setattr(
+            "app.graph.builder.build_complaint_graph",
+            lambda checkpointer=None: _NeverInterrupts(),
+        )
+
+        asyncio.run(complaint_service._resume_graph_thread("c-backoff-001", "s-1"))
+
+        assert sleeps[0] == pytest.approx(cs_module._RESUME_WAIT_INTERVAL_S)
+        assert sleeps[1] == pytest.approx(0.5)
+        assert sleeps[2] == pytest.approx(1.0)
+        assert sleeps[3] == pytest.approx(2.0)
+        assert all(s <= cs_module._RESUME_WAIT_MAX_INTERVAL_S for s in sleeps), \
+            "间隔必须封顶，否则退避会超过总超时窗口"
+        assert 50 < len(sleeps) < 70, f"退避未生效，轮询次数={len(sleeps)}"

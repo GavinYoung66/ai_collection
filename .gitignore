@@ -72,6 +72,9 @@ pnpm-debug.log*
 *.swp
 *.swo
 *.swn
+.github/
+.vscode/
+
 
 # ── 操作系统 ───────────────────────────────────────────
 .DS_Store

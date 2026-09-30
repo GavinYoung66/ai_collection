@@ -376,6 +376,61 @@ services:
       retries: 30
       start_period: 30s
 
+  # ========== 独立 MCP 网关（mcp-gateway-standalone 批次6 / tasks 8.1-8.4）==========
+  # 独立容器：对 Agent 暴露 MCP 协议（/mcp streamable-http），内嵌 rag_kb/business_ticket/
+  # data_platform 工具（HTTP 调下游）+ call_qc 混合（query_call_asr 内嵌调 data-platform，
+  # query_qc_violations/query_qc_alerts 经 MCP client 调 qc-service /mcp）。
+  # 下游地址一律 docker network 服务名（rag-service:8000 / data-platform:8000 /
+  # qc-service:8000），SHALL NOT 使用 host.docker.internal（宿主机端口映射是宿主机视角，
+  # 容器内不可解析）。宿主机映射 9009→容器 9000（9000 已被 minio 占用）。
+  mcp-gateway:
+    build:
+      context: .
+      dockerfile: services/mcp-gateway/Dockerfile
+    ports: ["9009:9000"]
+    env_file: .env
+    environment:
+      # 容器内 Redis 用服务名（根 .env 的 REDIS_HOST=localhost 是宿主机视角）；
+      # 网关限流/降级标志依赖 Redis，漏配会导致 fail-open（日志连 localhost:6379 失败）。
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      # 熔断/限流 key 前缀（{svc}:mcp_degraded:{server}）；启动 set_default_service 读取，
+      # 缺省会 fail-fast。根 .env 为单一事实源，此处显式透传（environment 优先于 env_file）。
+      MCP_GATEWAY_SERVICE_NAME: ${MCP_GATEWAY_SERVICE_NAME:-csmp}
+      MCP_GATEWAY_ENABLE_AUTH: ${MCP_GATEWAY_ENABLE_AUTH:-false}
+      MCP_GATEWAY_AUTH_API_KEY: ${MCP_GATEWAY_AUTH_API_KEY:-}
+      # 下游地址（网关读 MCP_GATEWAY_ 前缀；容器内一律服务名 + 内部端口 8000）
+      MCP_GATEWAY_RAG_SERVICE_URL: ${MCP_GATEWAY_RAG_SERVICE_URL:-http://rag-service:8000}
+      MCP_GATEWAY_DATA_PLATFORM_URL: ${MCP_GATEWAY_DATA_PLATFORM_URL:-http://data-platform:8000}
+      MCP_GATEWAY_QC_SERVICE_URL: ${MCP_GATEWAY_QC_SERVICE_URL:-http://qc-service:8000}
+    volumes:
+      - ./services/mcp-gateway/app:/app/app
+      - ./common:/app/common
+    command:
+      [
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "9000",
+        "--reload",
+      ]
+    depends_on:
+      # 真路径模式（USE_MOCK_MCP=false）：网关待三下游 healthy 后再接流量
+      rag-service: { condition: service_healthy }
+      qc-service: { condition: service_healthy }
+      data-platform: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    networks:
+      - default
+      - ai-shared-net
+
   complaint-service:
     build:
       context: .
@@ -388,7 +443,10 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_DB: "6"
-      MCP_GATEWAY_MODE: inline
+      MCP_GATEWAY_MODE: standalone
+      # Agent 侧 MCP SDK client 连网关（USE_MOCK_MCP=false 时生效）；显式传递，
+      # 不隐式依赖 shell env（容器内用服务名 + 9000）。
+      MCP_GATEWAY_URL: ${MCP_GATEWAY_URL:-http://mcp-gateway:9000}
       # Langfuse 本地自托管（与 LangSmith 同构）；容器内经 host.docker.internal 访问宿主机
       LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}

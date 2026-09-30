@@ -55,6 +55,20 @@ class ComplaintSettings(Settings):
     DEEPSEEK_API_KEY: str = ""
     DASHSCOPE_API_KEY: str = ""
 
+    # ── LangGraph checkpointer 持久化（批次4）──
+    # COMPLAINT_PG_DSN：显式覆盖，优先级最高；留空且 CHECKPOINTER_PG=true 时由 PG_* 派生。
+    # COMPLAINT_CHECKPOINTER_PG：总开关。默认 false → dev/test 走 MemorySaver，零行为变化。
+    #   不做「有 PG_HOST 就自动派生」——PG_HOST 默认 localhost，自动派生会让本地所有
+    #   judge 用例吃连接超时后降级，每个慢十几秒。必须显式开启。
+    COMPLAINT_PG_DSN: str = ""
+    COMPLAINT_CHECKPOINTER_PG: bool = False
+    # session 持久化总开关。实际生效还要求 USE_MOCK_MCP=false（与 _persist_complaint_row
+    # 同一道门），保证单测默认不碰 PG。回滚时置 false 即退回纯内存语义。
+    COMPLAINT_SESSION_PERSIST: bool = True
+    # psycopg 连接池大小（仅 CHECKPOINTER_PG=true 时生效）
+    COMPLAINT_PG_POOL_MIN: int = 5
+    COMPLAINT_PG_POOL_MAX: int = 20
+
     # ── LangSmith 追踪配置已上收 common Settings（跨服务统一开关）──
     # 见 common/trace/langsmith_gate.py；本服务默认 project 由闸门 fallback 提供
 

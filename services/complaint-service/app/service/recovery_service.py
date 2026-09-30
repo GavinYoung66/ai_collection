@@ -1,6 +1,7 @@
 """灾备恢复服务（9.3）。
 
-- checkpointer 恢复：成功继续，失败 pending_review
+- **checkpoint 恢复：未接线（DEBT）** —— 见 `recover_from_checkpoint` 的 docstring。
+  真正的 checkpoint 恢复入口是 `complaint_service._resume_graph_thread`。
 - Redis fallback checkpoint：csmp:session:{id}:fallback TTL 72h
 - 挂起积压清理：非 archived/closed 且 update>24h → pending_review
 - PG 不可用：新工单 A5010，已接入 Redis 降级
@@ -11,8 +12,12 @@ import json
 import time
 from typing import Any, Optional
 
+import structlog
+
 from app.utils.redis_keys import TTL_SESSION_FALLBACK, session_fallback_key
 from common.errors.codes import ErrorCode
+
+logger = structlog.get_logger()
 
 FALLBACK_TTL = TTL_SESSION_FALLBACK  # 72h
 STALE_HOURS = 24
@@ -44,6 +49,21 @@ class RecoveryService:
 
     def recover_from_checkpoint(self, session_id: str,
                                  checkpointer: Any = None) -> tuple[bool, Optional[str]]:
+        """[未接线 / DEBT] 本方法的参数形状与 checkpointer 契约不符，勿使用。
+
+        两处错误：
+        1. `checkpointer.get(session_id)` 传的是裸字符串，而 LangGraph 的
+           `BaseCheckpointSaver.get(config)` 要的是 `RunnableConfig`
+           （`{"configurable": {"thread_id": ...}}`）——会把 coroutine/字符串
+           索引错误吞进 except，永远返回 pending_review。
+        2. 即便修好形状，用 `session_id` 当 `thread_id` 也是错的：全仓
+           `thread_id` 恒等于 `complaint_id`（见 complaint_service 的三个调用点）。
+
+        真正的 checkpoint 恢复入口是
+        `complaint_service._resume_graph_thread` 里的
+        `graph.aget_state({"configurable": {"thread_id": complaint_id}})`。
+        当前生产零调用方；修一半比不修更危险（会造成"灾备恢复已实现"的错觉）。
+        """
         if not self._pg_available:
             return self.recover_from_fallback(session_id)
         try:
@@ -53,7 +73,9 @@ class RecoveryService:
             if state is None:
                 return False, "pending_review"
             return True, None
-        except Exception:
+        except Exception as e:  # noqa: BLE001 — 保留 fail-safe 返回值，但不再静默
+            logger.warning("recovery_checkpointer_unwired",
+                           session_id=session_id, error=str(e))
             return False, "pending_review"
 
     def save_fallback(self, session_id: str, state: dict) -> None:

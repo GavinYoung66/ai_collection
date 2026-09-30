@@ -40,6 +40,10 @@ logger = structlog.get_logger(__name__)
 # Spec: maxRetryTimes=3 → original + 3 retries = 4 deliveries.
 MAX_RETRY_TIMES = 3
 _DEFAULT_PROXY = "rocketmq-proxy:8081"
+# SimpleConsumer.receive 的不可见时长（秒）：handler 在此窗口内 ACK，超时则消息
+# 重新可见并被重投，ACK 会报 INVALID_RECEIPT_HANDLE。真 LLM 研判 handler 需 ~37s，
+# 原 30s 必然超时；提到 300s（覆盖研判 + 慢 LLM + 重试，远小于投诉全局 30min）。
+RECEIVE_INVISIBLE_DURATION = 300
 
 
 def _proxy_endpoints() -> str:
@@ -173,7 +177,7 @@ class RocketMQEventBus:
         try:
             while True:
                 messages = await loop.run_in_executor(
-                    self._executor, consumer.receive, 8, 30
+                    self._executor, consumer.receive, 8, RECEIVE_INVISIBLE_DURATION
                 )
                 if not messages:
                     await asyncio.sleep(0.05)

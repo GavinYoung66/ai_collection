@@ -9,11 +9,14 @@ import os
 import sys
 from pathlib import Path
 
-import nest_asyncio
 import pytest
 from fastapi.testclient import TestClient
 
-nest_asyncio.apply()  # 允许 TestClient 内嵌套 asyncio.run（judge run_graph=True 路径）
+# nest_asyncio 全局 apply() 会 monkeypatch Task 类与 asyncio.run，污染整个测试
+# 进程的事件循环（尤其让 anyio 流关闭时的 CancelledError 吞并场景下 wait_for
+# 不超时）。app 侧 asyncio.run 调用点均已带 get_running_loop() 守卫，无需嵌套 run。
+# 若某 TestClient 场景确需嵌套 run，再按需局部启用。
+# nest_asyncio.apply()
 
 _SERVICE_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_SERVICE_ROOT) not in sys.path:

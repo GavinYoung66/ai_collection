@@ -28,9 +28,18 @@ async def evidence_case_node(state: ComplaintSessionState) -> dict:
 
     for case_id in state.case_ids:
         try:
-            case_info = await mcp.call(_SERVER, "query_case_info", {"case_id": case_id})
-            history_tickets = await mcp.call(_SERVER, "query_history_tickets", {"case_id": case_id})
-            history_complaints = await mcp.call(_SERVER, "query_history_complaints", {"case_id": case_id})
+            case_info = await mcp.call(
+                _SERVER, "query_case_info", {"case_id": case_id},
+                trace_id=state.trace_id, session_id=state.session_id,
+            )
+            history_tickets = await mcp.call(
+                _SERVER, "query_history_tickets", {"case_id": case_id},
+                trace_id=state.trace_id, session_id=state.session_id,
+            )
+            history_complaints = await mcp.call(
+                _SERVER, "query_history_complaints", {"case_id": case_id},
+                trace_id=state.trace_id, session_id=state.session_id,
+            )
         except (MCPTimeoutError, MCPError) as e:
             logger.warning("evidence_case_mcp_error", case_id=case_id, error=str(e))
             return {

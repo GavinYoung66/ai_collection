@@ -46,6 +46,21 @@ from common.errors.codes import ErrorCode
 router = APIRouter(prefix="/complaints", tags=["complaints"])
 
 
+async def _flush_session(rec: dict) -> None:
+    """把状态流转写穿到 PG，使重启/换副本后状态仍可恢复。
+
+    fail-open：aflush_session 自身已吞异常并置 persist_degraded，这里再兜一层，
+    保证持久化问题绝不影响 API 响应。
+    """
+    sid = rec.get("session_id")
+    if not sid:
+        return
+    try:
+        await session_service.aflush_session(sid)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @router.post("")
 async def create_complaint(req: ComplaintCreateRequest, request: Request):
     try:
@@ -119,7 +134,7 @@ async def list_published_events(
 @router.get("/{complaint_id}")
 async def get_complaint(complaint_id: str, request: Request):
     try:
-        rec = complaint_service.get_or_raise(complaint_id)
+        rec = await complaint_service.aget_or_raise(complaint_id)
     except ComplaintNotFound:
         return fail(ErrorCode.A5001, f"投诉工单不存在: {complaint_id}", request=request)
     from app.models.state import VerdictType
@@ -174,7 +189,7 @@ async def judge_complaint(complaint_id: str, request: Request, req: JudgeRequest
     run_graph = bool(req.run_graph) if req is not None else False
     # 先验存在：防 404 工单先占用幂等锁/排队位
     try:
-        complaint_service.get_or_raise(complaint_id)
+        await complaint_service.aget_or_raise(complaint_id)
     except ComplaintNotFound:
         return fail(ErrorCode.A5001, f"投诉工单不存在: {complaint_id}", request=request)
     # 用户维接入限流（X-User-Id 优先回退 IP，Redis 挂零件层静默放行）
@@ -195,7 +210,7 @@ async def judge_complaint(complaint_id: str, request: Request, req: JudgeRequest
         from app.models.state import TaskStatus as _TS
         from app.service.complaint_service import is_graph_inflight
 
-        _cur = complaint_service.get_or_raise(complaint_id)
+        _cur = await complaint_service.aget_or_raise(complaint_id)
         _sid = _cur["session_id"]
         _in_pipeline = session_service.get_status(_sid) in (
             _TS.evidence_gathering.value,
@@ -224,7 +239,7 @@ async def judge_complaint(complaint_id: str, request: Request, req: JudgeRequest
                 ErrorCode.B0005, "同工单正在处理中，请勿重复提交", request=request
             )
         if outcome == OUTCOME_QUEUED:
-            rec = complaint_service.get_or_raise(complaint_id)
+            rec = await complaint_service.aget_or_raise(complaint_id)
             data = JudgeResponse(
                 complaint_id=complaint_id,
                 task_status=rec["task_status"],
@@ -339,6 +354,7 @@ async def disposition_verdict(
         return fail(ErrorCode.A5002, str(e), request=request)
     except RuntimeError as e:
         return fail(ErrorCode.A5002, str(e), request=request)
+    await _flush_session(rec)
     data = DispositionVerdictResponse(
         complaint_id=rec["complaint_id"],
         task_status=rec["task_status"],
@@ -367,6 +383,7 @@ async def disposition_callback(
         return fail(ErrorCode.A5002, str(e), request=request)
     except RuntimeError as e:
         return fail(ErrorCode.A5002, str(e), request=request)
+    await _flush_session(rec)
     est = rec.get("disposition_verdict") or rec.get("verdict")
     data = DispositionCallbackResponse(
         complaint_id=rec["complaint_id"],
@@ -388,6 +405,7 @@ async def review_complaint(complaint_id: str, req: ReviewRequest, request: Reque
         return fail(ErrorCode.A5001, f"投诉工单不存在: {complaint_id}", request=request)
     except ValueError as e:
         return fail(ErrorCode.A5002, str(e), request=request)
+    await _flush_session(rec)
     data = ReviewResponse(
         complaint_id=rec["complaint_id"],
         task_status=rec["task_status"],
@@ -408,6 +426,7 @@ async def close_complaint(complaint_id: str, request: Request, req: CloseRequest
         return fail(ErrorCode.A5002, str(e), request=request)
     except RuntimeError as e:
         return fail(ErrorCode.A5002, str(e), request=request)
+    await _flush_session(rec)
     data = CloseResponse(
         complaint_id=rec["complaint_id"],
         task_status=rec["task_status"],

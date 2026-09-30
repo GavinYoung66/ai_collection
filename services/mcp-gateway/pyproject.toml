@@ -1,0 +1,16 @@
+[project]
+name = "mcp-gateway"
+version = "0.1.0"
+description = "独立 MCP 网关：对 Agent 暴露 MCP 协议(list_tools + call_tool)，内嵌工具路由到下游服务"
+requires-python = ">=3.11"
+dependencies = [
+    # === MCP SDK（1.x 稳定线，FastMCP 高层 API + streamable-http/sse transport）===
+    "mcp>=1.16,<2",
+    # === /metrics 指标端点 ===
+    "prometheus-client>=0.19,<1",
+    # 其余运行时依赖（fastapi/uvicorn/pydantic/pydantic-settings/httpx/structlog 等）
+    # 复用全局 requirements.lock 约定，不在此重复声明。
+]
+
+[tool.ruff]
+line-length = 120

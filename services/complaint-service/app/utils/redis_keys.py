@@ -121,6 +121,34 @@ def judge_lock_key(complaint_id: str) -> str:
     return f"{PREFIX}complaint:judge_lock:{complaint_id}"
 
 
+# ── 10c. 跨进程图锁（批次11 / 多副本安全）──
+# 与维5 judge_lock_key 的区别：judge_lock 是**接入幂等**（重复提交直接拒绝 B0005），
+# 本组是**执行互斥**（防多副本对同一 thread_id 并发跑图导致 checkpoint 分叉）。
+# TTL 由调用方按执行超时传入，不在此硬编。
+def graph_lock_key(complaint_id: str) -> str:
+    """csmp:complaint:graph_lock:{id} —— 跨进程图执行锁。"""
+    return f"{PREFIX}complaint:graph_lock:{complaint_id}"
+
+
+def resume_lock_key(complaint_id: str) -> str:
+    """csmp:complaint:resume_lock:{id} —— 跨进程 resume 互斥。
+
+    与 graph_lock 分开：judge 与 review-resume 可能并发发生（resume 侧本就要
+    等 graph 跑完），共用一把锁会互相误判为"他人持有"。
+    """
+    return f"{PREFIX}complaint:resume_lock:{complaint_id}"
+
+
+def maintenance_lock_key() -> str:
+    """csmp:maintenance:lock —— 周期维护任务（超时转人工 + 三表裁剪）的跨副本互斥。
+
+    多副本下每个实例都会跑维护循环，用此锁保证同一时刻只有一个副本执行，
+    避免重复处理。维护任务幂等（UPDATE/DELETE 条件性），故锁 fail-open 无害：
+    Redis 挂时各副本仍跑，重复执行只是空操作。
+    """
+    return f"{PREFIX}maintenance:lock"
+
+
 # ── 11. 回调死信队列（批次8） ──
 CALLBACK_DLQ_KEY = f"{PREFIX}callback:dlq"  # LIST，人工介入
 

@@ -155,6 +155,18 @@ services:
     networks:
       - default
 
+  # ── complaint-service 两实例（多副本预留）────────────────────
+  # a/b 除宿主端口外配置完全相同，共用同一 PG/Redis 与同一 RocketMQ 消费者组
+  # （EVENT_BUS_SVC=cs → gid_cs_complaint_created，竞争消费，每条消息只投一个实例）。
+  #
+  # ⚠️ 启用前必读（当前默认只跑一个，日常为 docker-compose.dev.yml 的单实例）：
+  #   1) 同单并发跑图 / 并发 resume 已由跨进程锁覆盖（graph_lock / resume_lock，
+  #      见 app/service/graph_lock.py）；
+  #   2) **但接入层的并发闸与队列仍是进程内的**——Semaphore(max_active=20) 与
+  #      BoundedQueue(500) 定义在 common/resilience/{concurrency,queue}.py，
+  #      基于 asyncio。同时起 a/b 会让**实际并发上限静默翻倍为 40**、队列各自 500。
+  #      故启用时应把两实例的 COMPLAINT_MAX_ACTIVE 各调到 10 以维持总量不变。
+  #   3) 事件订阅本身无重复消费问题（同组竞争消费）。
   complaint-service-a:
     build:
       context: .

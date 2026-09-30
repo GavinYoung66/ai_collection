@@ -97,6 +97,17 @@ class Settings(BaseSettings):
         return f"postgresql+psycopg2://{self.PG_USER}:{self.PG_PASSWORD}@{self.PG_HOST}:{self.PG_PORT}/{self.PG_DB}"
 
     @property
+    def pg_dsn_psycopg3(self) -> str:
+        """psycopg3 / psycopg_pool 用的裸 DSN。
+
+        方言注意：pg_dsn 是 postgresql+asyncpg://（SQLAlchemy asyncpg）、
+        pg_dsn_sync 是 postgresql+psycopg2://（SQLAlchemy psycopg2），二者都带 "+driver"。
+        psycopg_pool 直接吃 libpq 语义的 URL，带 "+driver" 会解析失败，
+        故此处返回不带 driver 的 postgresql://。
+        """
+        return f"postgresql://{self.PG_USER}:{self.PG_PASSWORD}@{self.PG_HOST}:{self.PG_PORT}/{self.PG_DB}"
+
+    @property
     def es_url(self) -> str:
         return f"http://{self.ES_HOST}:{self.ES_PORT}"
 
