@@ -64,6 +64,29 @@ class RealMCPTransport:
         ).rstrip("/")
         self._gateway_base = url
         self._timeout = float(timeout)
+        # 实例级长生命周期 HTTP 连接池：跨多次工具调用复用底层 TCP 连接。
+        # 依据（2.1 spike，mcp 1.30.0 源码 streamable_http.py）：streamable_http_client
+        # 对调用方提供的 http_client 不接管生命周期（client_provided 分支不 close），
+        # MCP session 状态挂在每次新建的 StreamableHTTPTransport 上而非 client，
+        # 故复用连接池不引发 stateless 会话串扰。
+        # 已知限制（技术债，详见本 change design.md Open Questions）：mcp 1.30.0
+        # _handle_sse_response 收到响应后提前 aclose SSE 流，httpx 不将该连接归还
+        # keepalive 池 → TCP 层实际每次新建即关（无泄漏、连接数稳定）；本 client
+        # 仍提供连接数上限保护与统一关停语义。
+        # httpx 超时给 self._timeout + 2s 宽限：Agent 侧薄超时（asyncio.wait_for）
+        # 是权威取消点，传输层仅兜底防止连接悬挂泄漏。
+        self._http_client = httpx.AsyncClient(
+            timeout=self._timeout + 2.0,
+            limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+        )
+        self._closed = False
+
+    async def aclose(self) -> None:
+        """关闭共享 HTTP 连接池（幂等，供 lifespan shutdown 调用）。"""
+        if self._closed:
+            return
+        self._closed = True
+        await self._http_client.aclose()
 
     @property
     def endpoint(self) -> str:
@@ -106,7 +129,6 @@ class RealMCPTransport:
                 lambda session: session.call_tool(
                     f"{server}.{tool}", arguments, meta=meta
                 ),
-                timeout=self._timeout,
             )
         except MCPError:
             raise
@@ -132,21 +154,29 @@ class RealMCPTransport:
                 "", "list_tools", "real MCP path requires MCP_GATEWAY_URL"
             )
         try:
-            await self._run_session(
-                lambda session: session.list_tools(), timeout=_PROBE_TIMEOUT
-            )
+            await self._run_probe_session(lambda session: session.list_tools())
         except MCPError:
             raise
         except Exception as e:  # noqa: BLE001
             raise self._map_error("", "list_tools", e) from e
 
-    async def _run_session(self, op: Any, *, timeout: float) -> Any:
-        """短连接执行一次 MCP 操作（网关 stateless_http，无需会话复用）。
+    async def _run_session(self, op: Any) -> Any:
+        """复用实例级连接池执行一次 MCP 调用（MCP 会话层仍 stateless）。
 
-        httpx 超时给 ``timeout + 2s`` 宽限：Agent 侧薄超时（asyncio.wait_for）
-        是权威取消点，传输层仅兜底防止连接悬挂泄漏。
+        每次调用仍新建轻量 ClientSession 并 initialize（网关 stateless_http 不变）；
+        仅底层 httpx.AsyncClient/TCP 连接池跨调用复用。timeout+2s 宽限语义
+        固化在实例级 client 上（见 __init__）。
         """
-        async with httpx.AsyncClient(timeout=timeout + 2.0) as http_client:
+        async with streamable_http_client(
+            self.endpoint, http_client=self._http_client
+        ) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                return await op(session)
+
+    async def _run_probe_session(self, op: Any) -> Any:
+        """健康探活维持短生命周期临时连接（不进共享池，超时 5s 级）。"""
+        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT + 2.0) as http_client:
             async with streamable_http_client(
                 self.endpoint, http_client=http_client
             ) as (read_stream, write_stream, _):

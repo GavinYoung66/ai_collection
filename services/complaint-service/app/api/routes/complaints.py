@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, Body, Query, Request
+from fastapi.responses import JSONResponse
 
 from app.api.response import fail, success
 from app.api.schemas.complaint import (
@@ -34,6 +35,7 @@ from app.api.schemas.complaint import (
     TraceResponse,
     VerdictResponse,
 )
+from app.config import settings
 from app.service.complaint_service import (
     ComplaintNotFound,
     ComplaintPersistError,
@@ -231,6 +233,24 @@ async def judge_complaint(complaint_id: str, request: Request, req: JudgeRequest
     outcome = await rate_limiter.acquire_complaint(complaint_id)
     try:
         if outcome == OUTCOME_FULL:
+            # 溢出补偿（surge hardening 阶段3，design D4）：开关开启且兜底容量
+            # 未满 → LPUSH 入 Redis 延迟队列，返回 202 受理，由后台补偿循环
+            # 补位执行；维5幂等锁已由 acquire_complaint 在 full 分支回滚，
+            # 补偿循环重新接入不会被误判 duplicate。
+            # 容量满 / 开关关闭 / Redis 故障 → 维持 B0006（fail-closed 回退现状）。
+            if settings.COMPLAINT_DEFERRED_QUEUE_ENABLED and await rate_limiter.deferred_offer(
+                complaint_id
+            ):
+                rec = await complaint_service.aget_or_raise(complaint_id)
+                data = JudgeResponse(
+                    complaint_id=complaint_id,
+                    task_status=rec["task_status"],
+                    message="judge queued in deferred backlog",
+                )
+                return JSONResponse(
+                    status_code=202,
+                    content=success(data=data.model_dump(mode="json"), request=request),
+                )
             return fail(
                 ErrorCode.B0006, "排队队列已满，请稍后重试", request=request
             )

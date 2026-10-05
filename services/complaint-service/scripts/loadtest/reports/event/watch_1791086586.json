@@ -1,0 +1,29 @@
+{
+  "artifact": "/Users/ellisguo/myproject/my_work/ai_collection/services/complaint-service/scripts/loadtest/reports/event/publish_soak53.jsonl",
+  "generated_at": "2026-10-04T04:03:06Z",
+  "published_ok": 248,
+  "terminal": 248,
+  "inflight": 0,
+  "missing": 0,
+  "duplicate_complaint_cases": 0,
+  "duplicate_session_cases": 0,
+  "degrade_pending_review": 248,
+  "degrade_with_exception": 0,
+  "degrade_rate": 0.0,
+  "latency_s": {
+    "p50": 723.26,
+    "p95": 1547.91,
+    "p99": 1767.32,
+    "max": 1918.9,
+    "min": 22.75,
+    "samples": 248
+  },
+  "publish_wall_clock_s": 1799.96,
+  "status_distribution": {
+    "pending_review": 248
+  },
+  "inflight_case_ids": [],
+  "missing_case_ids": [],
+  "dup_complaint_case_ids": [],
+  "dup_session_case_ids": []
+}

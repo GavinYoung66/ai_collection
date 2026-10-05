@@ -104,8 +104,8 @@ def _extract_calls(body: bytes) -> list[dict[str, Any]]:
 class MCPRateLimitMiddleware:
     """POST /mcp tools/call 的 per-server 固定窗口限流（429 + 事件钩子）。"""
 
-    def __init__(self, asgi_app) -> None:
-        self.asgi_app = asgi_app
+    def __init__(self, app) -> None:
+        self.asgi_app = app
 
     async def __call__(self, scope, receive, send) -> None:
         started = time.monotonic()

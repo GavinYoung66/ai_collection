@@ -48,6 +48,15 @@ REBUILD=1 bash scripts/mock/verify_complaint_v2_real_llm.sh
 
 说明：`RealLLMTransport` 默认用 **httpx** 调兼容 `/chat/completions`，不依赖镜像内是否已装 `openai`。仅配了 DashScope 时，`deepseek-*` 角色会 **回退 qwen-plus**（日志 `deepseek_key_missing_fallback_qwen`）。
 
+> **本机 uvicorn 直跑注意（不经 compose 时）**：限流阈值 `LLM_RATE_LIMIT` / `LLM_RATE_WINDOW`（默认 60 次 / 60 秒 / 模型）在进程启动时只从**真实环境变量**读取，不会自动加载本 `.env` 文件。直跑前须先导入：
+>
+> ```bash
+> set -a; source .env; set +a
+> PYTHONPATH=. uvicorn app.main:app --app-dir services/complaint-service --host 0.0.0.0 --port 8006
+> ```
+>
+> `services/complaint-service/scripts/loadtest/run_loadtest.sh` 已内置该 source 步骤并打印生效阈值。compose 部署不受影响（`env_file: .env` 自动注入，改后 recreate）。阈值在 import 时读取一次，任何方式改值后都需重启进程。
+
 3. 确认未跟踪真实 Key：
 
 ```bash

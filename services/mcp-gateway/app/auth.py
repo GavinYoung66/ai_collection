@@ -130,8 +130,8 @@ def _audit_target(items: list[dict[str, Any]]) -> tuple[str, str, Any, Any]:
 class MCPAuthMiddleware:
     """鉴权闸门：默认关闭直通；开启后 /mcp 与 /metrics 无有效凭证返回 401/B0002。"""
 
-    def __init__(self, asgi_app) -> None:
-        self.asgi_app = asgi_app
+    def __init__(self, app) -> None:
+        self.asgi_app = app
 
     async def __call__(self, scope, receive, send) -> None:
         started = time.monotonic()

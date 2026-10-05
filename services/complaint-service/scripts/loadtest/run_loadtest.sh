@@ -42,6 +42,11 @@ echo "  Complaint Service Load Test"
 echo "  Host: $HOST"
 echo "  Users: $USERS, Spawn: $SPAWN_RATE, Time: $RUN_TIME"
 echo "  Locustfile: $LOCUSTFILE"
+echo "  SOP:"
+echo "    1) 清场后必须重启 complaint-service，不能只清 PG（内存 _cache 仍会影响幂等判断）"
+echo "    2) 新一轮压测必须保留/更换 run-tag，不要复用历史 publish artifact 的 case 集合"
+echo "    3) 全本地 vLLM 压测请确认 .env 中 LLM_FALLBACK_CHAIN=deepseek-chat，避免付费兜底"
+echo "    4) 排查端口/容器问题禁止 kill Docker Desktop / com.docke* 进程"
 echo "========================================"
 
 cleanup() {
@@ -57,6 +62,17 @@ if ! curl -sf "$HOST/health" >/dev/null 2>&1; then
         echo "[INFO] 可用 compose 基线: $COMPOSE_FILE（本脚本默认本机 uvicorn）"
     fi
     cd "$SERVICE_DIR"
+    # 本机 uvicorn 直跑不经 compose env_file，common.llm 的 LLM_RATE_LIMIT/WINDOW
+    # 在进程启动时只认真实环境变量（不读 .env 文件），故启动前显式导入根 .env；
+    # compose 部署由 env_file 自动注入，无需此步。
+    if [ -f "$REPO_ROOT/.env" ]; then
+        echo "[INFO] 本机直跑：source $REPO_ROOT/.env 注入环境变量"
+        set -a
+        # shellcheck disable=SC1091
+        source "$REPO_ROOT/.env"
+        set +a
+    fi
+    echo "[INFO] LLM 限流阈值（启动时读取）: LLM_RATE_LIMIT=${LLM_RATE_LIMIT:-60} 次 / LLM_RATE_WINDOW=${LLM_RATE_WINDOW:-60}s"
     PYTHONPATH=../..:${PYTHONPATH:-} python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8006 &
     SERVER_PID=$!
     sleep 4

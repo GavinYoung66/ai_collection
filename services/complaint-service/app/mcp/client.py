@@ -50,6 +50,17 @@ class MCPClient:
         """审计日志快照。"""
         return list(self._call_log)
 
+    async def aclose(self) -> None:
+        """关闭底层 transport 持有的共享资源（如 HTTP 连接池）。
+
+        透传到 transport 的 ``aclose``；transport 无此方法（如 Mock）时 no-op。
+        供 main lifespan shutdown 调用，异常由调用方 suppress，不阻断关停。
+        """
+        transport = self._get_transport()
+        close = getattr(transport, "aclose", None)
+        if close is not None:
+            await close()
+
     def _get_transport(self) -> Any:
         """懒加载默认 transport（批次0 MockMCPClient）。"""
         if self._transport is None:

@@ -95,15 +95,29 @@ async def test_atimeout_converts_stale_judging(make_session, pg_conn, enable_per
     assert (await cur.fetchone())[0] == "pending_review"
 
 
+async def test_atimeout_converts_stale_pending(make_session, pg_conn, enable_persist):
+    """图锁 skip-ACK 导致滞留 pending 超 30min → 转 pending_review。"""
+    sid, _, _ = await make_session("pending", age_minutes=45)
+    timed_out = await session_service.atimeout_sessions_stale()
+    assert sid in timed_out
+
+    cur = await pg_conn.execute(
+        "SELECT task_status FROM complaint_sessions WHERE session_id = %s", (sid,)
+    )
+    assert (await cur.fetchone())[0] == "pending_review"
+
+
 async def test_atimeout_spares_recent_and_terminal(make_session, pg_conn, enable_persist):
-    """未超期的 judging 与终态 closed 都不转（即使 closed 超期）。"""
-    recent_sid, _, _ = await make_session("judging", age_minutes=10)
+    """未超期的 judging/pending 与终态 closed 都不转（即使 closed 超期）。"""
+    recent_judging_sid, _, _ = await make_session("judging", age_minutes=10)
+    recent_pending_sid, _, _ = await make_session("pending", age_minutes=10)
     closed_sid, _, _ = await make_session("closed", age_minutes=500)
     draft_sid, _, _ = await make_session("draft_generated", age_minutes=60)
 
     timed_out = await session_service.atimeout_sessions_stale()
 
-    assert recent_sid not in timed_out, "未超期不应转"
+    assert recent_judging_sid not in timed_out, "未超期 judging 不应转"
+    assert recent_pending_sid not in timed_out, "未超期 pending 不应转"
     assert closed_sid not in timed_out, "终态不可回退"
     assert draft_sid in timed_out, "超期 draft_generated 应转"
 

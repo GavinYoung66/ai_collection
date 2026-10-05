@@ -59,11 +59,15 @@ class RocketMQEventBus:
         endpoints: str | None = None,
         topic: str = PHYSICAL_TOPIC,
         max_retry_times: int = MAX_RETRY_TIMES,
+        parallelism: int = 1,
         executor: ThreadPoolExecutor | None = None,
     ) -> None:
         self._endpoints = endpoints or _proxy_endpoints()
         self._topic = topic
         self._max_retry_times = max_retry_times
+        # 消费并行度：1 = 同批逐条串行（与改造前行为一致）；>1 = 同批 gather 并发，
+        # 由 Semaphore 保证全局在途 handler 数不超过 parallelism
+        self._parallelism = max(1, parallelism)
         self._executor = executor or ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="eventbus-rmq"
         )
@@ -74,6 +78,10 @@ class RocketMQEventBus:
     @property
     def max_retry_times(self) -> int:
         return self._max_retry_times
+
+    @property
+    def parallelism(self) -> int:
+        return self._parallelism
 
     def _ensure_producer(self):
         if self._producer is not None:
@@ -174,22 +182,75 @@ class RocketMQEventBus:
         consumer = await loop.run_in_executor(
             self._executor, self._start_consumer, event_name, consumer_group
         )
+        # 信号量限制同批在途 handler 数；parallelism=1 时逐条放行，等同改造前串行
+        semaphore = asyncio.Semaphore(self._parallelism)
         try:
             while True:
-                messages = await loop.run_in_executor(
-                    self._executor, consumer.receive, 8, RECEIVE_INVISIBLE_DURATION
-                )
+                try:
+                    messages = await loop.run_in_executor(
+                        self._executor, consumer.receive, 8, RECEIVE_INVISIBLE_DURATION
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "eventbus_consumer_receive_failed",
+                        transport="rocketmq",
+                        event_name=event_name,
+                        consumer_group=consumer_group,
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+                    raise
                 if not messages:
                     await asyncio.sleep(0.05)
                     continue
-                for msg in messages:
-                    await self._handle_message(
-                        msg, event_name, consumer_group, handler, consumer, loop
-                    )
+                # 同批消息 gather 分派；return_exceptions=True 保证单条失败不影响同批
+                results = await asyncio.gather(
+                    *(
+                        self._handle_with_semaphore(
+                            semaphore,
+                            msg,
+                            event_name,
+                            consumer_group,
+                            handler,
+                            consumer,
+                            loop,
+                        )
+                        for msg in messages
+                    ),
+                    return_exceptions=True,
+                )
+                # 异常自然上浮到此处：打 warn 后循环继续处理下一批；
+                # 失败条未被 ack，由 Broker 不可见超时后重投
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.warning(
+                            "eventbus_consume_batch_error",
+                            transport="rocketmq",
+                            event_name=event_name,
+                            consumer_group=consumer_group,
+                            error=str(result),
+                            error_type=type(result).__name__,
+                        )
         except asyncio.CancelledError:
             raise
         finally:
             await loop.run_in_executor(self._executor, consumer.shutdown)
+
+    async def _handle_with_semaphore(
+        self,
+        semaphore: asyncio.Semaphore,
+        msg: Any,
+        event_name: str,
+        consumer_group: str,
+        handler: EventHandler,
+        consumer: Any,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        # 信号量内执行单条处理；parallelism=1 时退化为逐条串行 await
+        async with semaphore:
+            await self._handle_message(
+                msg, event_name, consumer_group, handler, consumer, loop
+            )
 
     def _start_consumer(self, event_name: str, consumer_group: str):
         from rocketmq import (

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional, Type
@@ -19,15 +20,13 @@ from app.llm.router import ModelRouter
 from common.llm.reliability import (
     LLMRateLimitError,
     call_with_retry,
+    get_llm_rate_limit,
+    is_llm_orchestration_active,
     is_placeholder_secret,
     resolve_service_name,
 )
 from common.llm.transport import message_content_from_completions, post_chat_completions
 from common.resilience.rate_limit import allow as rate_limit_allow
-
-# LLM 模型维限流参数：与 common.llm.reliability.invoke_llm 口径一致（60 次/60s/模型）
-_LLM_RATE_LIMIT = 60
-_LLM_RATE_WINDOW = 60
 
 logger = structlog.get_logger()
 
@@ -212,6 +211,7 @@ class RealLLMTransport:
                 agent_role=role,
                 trace_id=trace_id,
                 session_id=session_id,
+                schema=schema,
             )
         except RuntimeError as e:
             # DashScope 免费额度耗尽等：自动切 DeepSeek，保证本地真图可跑通
@@ -238,6 +238,7 @@ class RealLLMTransport:
                 agent_role=role,
                 trace_id=trace_id,
                 session_id=session_id,
+                schema=schema,
             )
 
     async def _post_chat(
@@ -252,6 +253,7 @@ class RealLLMTransport:
         agent_role: str,
         trace_id: str,
         session_id: str,
+        schema: Optional[Type[BaseModel]] = None,
     ) -> dict:
         self.last_model = model
         self.last_provider = provider
@@ -271,25 +273,49 @@ class RealLLMTransport:
         # （csmp:llm_degraded:{model}），transport 层不再设置任何全局降级门，
         # 避免全局键短路整条 fallback_chain（见 llm-layer spec MODIFIED）。
 
-        # LLM 模型维限流：本 transport 直调 call_with_retry、不经 invoke_llm 编排，
-        # 此前 {svc}:llm_ratelimit:{model}（60/60s）在真路径缺失，此处按同 key 口径补齐。
+        # LLM 模型维限流：本 transport 直调 call_with_retry、不经 invoke_llm 编排时，
+        # 此前 {svc}:llm_ratelimit:{model}（默认 60/60s）在真路径缺失，此处按同 key 口径补齐。
+        # 阈值与 invoke_llm 共用 common.llm.reliability 的单一事实源，禁止本地再硬编码。
+        # 生产真路径经 ComplaintLLMProvider → invoke_llm 嵌套调用本 transport，
+        # 编排层已按 primary 模型统一 INCR 过一次；此处必须跳过，否则同一请求对同 key
+        # 计两次（配额减半，D-1）。仅"不经编排的直调"才由本段本地计数。
         # Redis 故障或服务名未配置时静默放行（与零件降级语义一致），不阻断业务。
-        try:
-            _svc = resolve_service_name()
-        except Exception:  # noqa: BLE001
-            _svc = "csmp"
-        if not await rate_limit_allow(
-            f"{_svc}:llm_ratelimit:{model}",
-            limit=_LLM_RATE_LIMIT,
-            window=_LLM_RATE_WINDOW,
-            context={"trace_id": trace_id, "node": agent_role or "llm"},
-        ):
-            raise LLMRateLimitError(
-                f"LLM rate limit exceeded: {_svc}:llm_ratelimit:{model}"
-            )
+        if not is_llm_orchestration_active():
+            try:
+                _svc = resolve_service_name()
+            except Exception:  # noqa: BLE001
+                _svc = "csmp"
+            _rate_limit_value, _rate_window_value = get_llm_rate_limit()
+            if not await rate_limit_allow(
+                f"{_svc}:llm_ratelimit:{model}",
+                limit=_rate_limit_value,
+                window=_rate_window_value,
+                context={"trace_id": trace_id, "node": agent_role or "llm"},
+            ):
+                raise LLMRateLimitError(
+                    f"LLM rate limit exceeded: {_svc}:llm_ratelimit:{model}"
+                )
 
         async def _once() -> dict:
             try:
+                # 优先用 pydantic schema 走 json_schema guided decoding（vLLM outlines 对
+                # 具体 schema 快且守格式 ~8s；通用 json_object 无 schema 指引会退化成填充垃圾）。
+                _resp_fmt = None
+                if os.environ.get("LLM_RESPONSE_FORMAT_JSON", "1") == "1":
+                    if schema is not None:
+                        try:
+                            _resp_fmt = {
+                                "type": "json_schema",
+                                "json_schema": {
+                                    "name": getattr(schema, "__name__", "resp"),
+                                    "schema": schema.model_json_schema(),
+                                },
+                            }
+                        except Exception:  # noqa: BLE001 — schema 序列化失败退 json_object
+                            _resp_fmt = {"type": "json_object"}
+                    else:
+                        _resp_fmt = {"type": "json_object"}
+                _timeout = float(os.environ.get("LLM_HTTP_TIMEOUT", "120"))
                 body = await post_chat_completions(
                     base_url=base_url,
                     api_key=api_key,
@@ -298,11 +324,11 @@ class RealLLMTransport:
                         {"role": "system", "content": system},
                         {"role": "user", "content": prompt},
                     ],
-                    timeout=120.0,
+                    timeout=_timeout,
                     temperature=0.1,
                     top_p=0.9,
                     seed=42,
-                    response_format={"type": "json_object"},
+                    response_format=_resp_fmt,
                 )
             except RuntimeError as e:
                 raise RuntimeError(

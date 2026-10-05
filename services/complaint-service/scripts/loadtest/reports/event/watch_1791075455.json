@@ -1,0 +1,29 @@
+{
+  "artifact": "services/complaint-service/scripts/loadtest/reports/event/publish_run8.jsonl",
+  "generated_at": "2026-10-04T00:57:35Z",
+  "published_ok": 100,
+  "terminal": 100,
+  "inflight": 0,
+  "missing": 0,
+  "duplicate_complaint_cases": 0,
+  "duplicate_session_cases": 0,
+  "degrade_pending_review": 100,
+  "degrade_with_exception": 100,
+  "degrade_rate": 1.0,
+  "latency_s": {
+    "p50": 847.66,
+    "p95": 1522.09,
+    "p99": 1582.27,
+    "max": 1582.32,
+    "min": 121.67,
+    "samples": 100
+  },
+  "publish_wall_clock_s": 0.31,
+  "status_distribution": {
+    "pending_review": 100
+  },
+  "inflight_case_ids": [],
+  "missing_case_ids": [],
+  "dup_complaint_case_ids": [],
+  "dup_session_case_ids": []
+}

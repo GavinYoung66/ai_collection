@@ -534,7 +534,7 @@ class SessionService:
             """
             UPDATE complaint_sessions
             SET task_status = 'pending_review'
-            WHERE task_status IN ('judging', 'draft_generated')
+            WHERE task_status IN ('pending', 'judging', 'draft_generated')
               AND is_delete = '0'
               AND update_time < now() - (:minutes * interval '1 minute')
             RETURNING session_id

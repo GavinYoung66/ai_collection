@@ -168,3 +168,16 @@ BACKFLOW_RETRY_KEY = f"{PREFIX}backflow:retry"  # LIST，人工介入前不丢
 def backflow_retry_key() -> str:
     """csmp:backflow:retry —— LIST，零丢失暂存（投诉服务内部队列，非 3 号库事件总线）。"""
     return BACKFLOW_RETRY_KEY
+
+
+# ── 13. HTTP 队列满溢出延迟队列（surge hardening 阶段3，design D4）──
+DEFERRED_QUEUE_KEY = f"{PREFIX}complaint:deferred"  # LIST，LPUSH/BRPOP FIFO
+
+
+def deferred_queue_key() -> str:
+    """csmp:complaint:deferred —— LIST。
+
+    内存并发闸（维1）+ 削峰队列（维2）满时溢出暂存；LPUSH 左进、BRPOP 右出
+    保证 FIFO。补偿循环 BRPOP 取单重新接入，容量由调用方兜底（软上限）。
+    """
+    return DEFERRED_QUEUE_KEY

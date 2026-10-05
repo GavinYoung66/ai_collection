@@ -87,3 +87,30 @@ async def test_subscribe_uses_gid_and_filter_expression():
 
     assert started["event_name"] == "call.session.ended"
     assert started["consumer_group"] == "gid_qc_call_session_ended"
+
+
+@pytest.mark.asyncio
+async def test_receive_failure_emits_warning_and_raises():
+    """receive 异常要有显式 warning 日志，并继续向上抛给外层重试循环。"""
+    bus = RocketMQEventBus(endpoints="127.0.0.1:18081")
+
+    class _FailingConsumer:
+        def receive(self, *_a, **_k):
+            raise RuntimeError("proxy unavailable")
+
+        def shutdown(self):
+            return None
+
+    with patch.object(bus, "_start_consumer", return_value=_FailingConsumer()), \
+         patch("common.eventbus.rocketmq.logger") as mock_logger:
+        with pytest.raises(RuntimeError, match="proxy unavailable"):
+            await bus._consume_loop("call.session.ended", "gid_qc_call_session_ended", MagicMock())
+
+    warning_calls = [
+        c for c in mock_logger.warning.call_args_list
+        if c.args and c.args[0] == "eventbus_consumer_receive_failed"
+    ]
+    assert warning_calls, "receive 失败必须记录 eventbus_consumer_receive_failed"
+    kwargs = warning_calls[0].kwargs
+    assert kwargs["consumer_group"] == "gid_qc_call_session_ended"
+    assert kwargs["error"] == "proxy unavailable"

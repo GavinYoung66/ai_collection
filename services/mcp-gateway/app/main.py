@@ -34,8 +34,8 @@ ACTIVE_CONNECTIONS = Gauge("mcp_gateway_active_connections", "In-flight HTTP req
 class MetricsMiddleware:
     """纯 ASGI 指标采集：不用 BaseHTTPMiddleware（避免缓冲破坏 /mcp 的 SSE 流）。"""
 
-    def __init__(self, asgi_app) -> None:
-        self.asgi_app = asgi_app
+    def __init__(self, app) -> None:
+        self.asgi_app = app
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http":

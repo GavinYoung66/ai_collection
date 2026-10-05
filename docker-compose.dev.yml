@@ -88,12 +88,14 @@ services:
       timeout: 5s
       retries: 3
 
-  # ========== 轻量词库 mock（可选；与 rag-service 争用宿主机 8002，非 qc 演示默认）==========
+  # ========== 轻量词库 mock（可选；默认不随全栈启动，避免与 rag-service 争用宿主机 8002）==========
   # 契约：GET /api/v1/sensitive-words/current.dict ，text/plain，一行一词。
-  # 容器内听 8000；宿主机仍占 rag 的 8002，便于 curl localhost:8002。qc 必须用服务名:8000。
+  # 仅 smoke 场景显式启用：
+  #   docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile smoke up -d rag-dict-mock
   rag-dict-mock:
     image: python:3.11.15-slim
-    ports: ["8002:8000"]
+    profiles: ["smoke"]
+    expose: ["8000"]
     volumes:
       - ./scripts/smoke/mocks/rag_current_dict.py:/app/server.py:ro
       - ./scripts/smoke/mocks/current.dict:/app/current.dict:ro

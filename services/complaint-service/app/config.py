@@ -69,6 +69,13 @@ class ComplaintSettings(Settings):
     COMPLAINT_PG_POOL_MIN: int = 5
     COMPLAINT_PG_POOL_MAX: int = 20
 
+    # ── HTTP 队列满溢出 Redis 延迟队列（surge hardening 阶段3，design D4）──
+    # 默认关闭 = 现状不变（full → B0006）。开启后内存并发闸+削峰队列满时
+    # 溢出暂存 Redis List，由后台补偿循环补位执行；MAX 为兜底容量软上限，
+    # 防止 Redis List 被打穿（容量满回退 B0006，fail-closed）。
+    COMPLAINT_DEFERRED_QUEUE_ENABLED: bool = False
+    COMPLAINT_DEFERRED_QUEUE_MAX: int = 10000
+
     # ── LangSmith 追踪配置已上收 common Settings（跨服务统一开关）──
     # 见 common/trace/langsmith_gate.py；本服务默认 project 由闸门 fallback 提供
 
