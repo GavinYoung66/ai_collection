@@ -118,5 +118,23 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Skeleton placeholder (1.1)
-        run: echo "common job skeleton"
+      # D2 同款依赖安装（仓库根路径；common.eventbus 测试需要 rocketmq 可导入）
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install pytest pytest-asyncio pytest-cov httpx nest-asyncio fastapi uvicorn
+          grep -vE '^rocketmq-python-client' requirements.lock > /tmp/requirements.base.lock
+          pip install -r /tmp/requirements.base.lock
+          pip install 'rocketmq-python-client==5.1.1' 'opentelemetry-exporter-otlp>=1.33.1'
+
+      # 显式三目录：禁止裸跑 pytest——根 pytest.ini 的 testpaths 夹带 services/qc-service/tests
+      - name: common tests
+        run: pytest common/tests common/eventbus/tests common/security/tests -q
+
+      - name: Scaffold services health (call/case/review)
+        run: |
+          for svc in call-service case-service review-service; do
+            echo "== $svc health =="
+            (cd services/$svc && PYTHONPATH=../.. pytest tests/ -q)
+          done
