@@ -1,16 +1,30 @@
 name: CI
 
+# 触发器：
+# - push 主干 / pull_request：全量门禁（6 job）
+# - workflow_call：供批次 4 CD（.github/workflows/cd.yml）以 reusable workflow 复用同一门禁（design D7）
 on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_call:
 
 jobs:
-  test:
+  # 五个有实质测试的服务矩阵；检查名形如 service-test (<service>)
+  service-test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # 任一条目失败不取消其余条目，暴露全部问题（ci-matrix spec：其余 job 仍执行完毕）
+      matrix:
+        service: [data-platform, rag-service, qc-service, mcp-gateway, complaint-service]
+        # 逐批点亮期临时排除；对应任务本地验证+CI 转绿后即删除该行：
+        exclude:
+          - service: rag-service        # 1.3 点亮后删除
+          - service: qc-service         # 1.4 点亮后删除
+          - service: complaint-service  # 1.5 迁入四阶段后删除
     defaults:
       run:
-        working-directory: services/complaint-service
+        working-directory: services/${{ matrix.service }}
     steps:
       - uses: actions/checkout@v4
 
@@ -19,58 +33,46 @@ jobs:
         with:
           python-version: "3.11"
 
+      # D2 统一依赖安装：基线测试包 + 根 requirements.lock + 服务 requirements.runtime.txt（存在才装）
       - name: Install dependencies
+        env:
+          SERVICE: ${{ matrix.service }}
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          pip install pytest pytest-asyncio pytest-cov httpx nest-asyncio fastapi uvicorn locust
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          if [ -f ../../requirements.lock ]; then pip install -r ../../requirements.lock || true; fi
+          # 基线（与旧 ci.yml 一致；locust 移到 complaint 条件安装）
+          pip install pytest pytest-asyncio pytest-cov httpx nest-asyncio fastapi uvicorn
+          # 根 lock 中 rocketmq-python-client 与 langfuse 存在 otlp 解析耦合（见 lock 注释），
+          # 沿用 services/{qc-service,data-platform}/Dockerfile 既定做法：排除该行装 lock 主体，
+          # 再单独安装 rocketmq + 对齐 langfuse 的 otlp（common.eventbus 测试也需要 rocketmq 可导入）
+          grep -vE '^rocketmq-python-client' ../../requirements.lock > /tmp/requirements.base.lock
+          pip install -r /tmp/requirements.base.lock
+          pip install 'rocketmq-python-client==5.1.1' 'opentelemetry-exporter-otlp>=1.33.1'
+          # 服务运行时增量依赖（当前仅 complaint、mcp-gateway 存在此文件）
+          if [ -f requirements.runtime.txt ]; then pip install -r requirements.runtime.txt; fi
+          # locust 仅 complaint 既有测试阶段需要（对齐旧 ci.yml）
+          if [ "$SERVICE" = "complaint-service" ]; then pip install locust; fi
 
-      - name: Optional lint (ruff/bandit/mypy — 有配置则启用)
-        continue-on-error: true
-        run: |
-          if command -v ruff >/dev/null 2>&1; then ruff check app tests || true; else echo "ruff skip"; fi
-          if command -v bandit >/dev/null 2>&1; then bandit -q -r app || true; else echo "bandit skip"; fi
-          if command -v mypy >/dev/null 2>&1; then mypy app || true; else echo "mypy skip"; fi
-
-      - name: Unit + Integration (D8 核心覆盖率 ≥85%)
+      # 非投诉服务统一入口（mcp-gateway 就近使用自带 pytest.ini；其余服务采用根 pytest.ini）
+      - name: Run tests
+        if: matrix.service != 'complaint-service'
         env:
-          PYTHONPATH: ../..:$PYTHONPATH
-          USE_REAL_INFRA: "0"
-        run: |
-          pytest tests/unit/ tests/integration/ \
-            --cov=app.models.state --cov=app.graph.edges \
-            --cov=app.mcp.client --cov=app.mcp.errors \
-            --cov=app.utils.evidence_helper --cov=app.service.recovery_service \
-            --cov-report=term-missing --cov-fail-under=85 -q
+          PYTHONPATH: ../..
+        run: pytest tests/ -q
 
-      - name: E2E tests
-        env:
-          PYTHONPATH: ../..:$PYTHONPATH
-        run: pytest tests/e2e/ -q
+      # 1.5 起补：complaint-service 四阶段（unit+integration/e2e/regression/smoke）
+      # 1.7 起补：ruff（仅 complaint、mcp-gateway，continue-on-error 非阻塞）
 
-      - name: Prompt regression
-        env:
-          PYTHONPATH: ../..:$PYTHONPATH
-        run: pytest tests/regression/ -q
+  # 公共 job：common 三个测试目录 + call/case/review 三个脚手架服务 health（1.6 落地）
+  common:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Smoke test
-        env:
-          PYTHONPATH: ../..:$PYTHONPATH
-          PORT: "8006"
-        run: |
-          uvicorn app.main:app --port 8006 &
-          sleep 4
-          bash ../../scripts/smoke/smoke_complaint_service.sh
-          kill %1 || true
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: PR self-check summary
-        if: always()
-        run: |
-          echo "## PR Self-Check" >> $GITHUB_STEP_SUMMARY
-          echo "- [ ] Unit + Integration（D8 核心 cov ≥85%，非整包 app）" >> $GITHUB_STEP_SUMMARY
-          echo "- [ ] E2E journey zero failure" >> $GITHUB_STEP_SUMMARY
-          echo "- [ ] Prompt regression（golden 真跑判责路径，一致率 ≥95%）" >> $GITHUB_STEP_SUMMARY
-          echo "- [ ] Smoke script exit 0" >> $GITHUB_STEP_SUMMARY
-          echo "- [ ] Error codes follow common.errors.codes" >> $GITHUB_STEP_SUMMARY
-          echo "- [ ] 未新建 app/service/event_publisher.py" >> $GITHUB_STEP_SUMMARY
+      - name: Skeleton placeholder (1.1)
+        run: echo "common job skeleton"
