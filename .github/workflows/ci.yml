@@ -19,7 +19,6 @@ jobs:
         service: [data-platform, rag-service, qc-service, mcp-gateway, complaint-service]
         # 逐批点亮期临时排除；对应任务本地验证+CI 转绿后即删除该行：
         exclude:
-          - service: qc-service         # 1.4 点亮后删除
           - service: complaint-service  # 1.5 迁入四阶段后删除
     defaults:
       run:
