@@ -129,7 +129,11 @@ jobs:
           pip install 'rocketmq-python-client==5.1.1' 'opentelemetry-exporter-otlp>=1.33.1'
 
       # 显式三目录：禁止裸跑 pytest——根 pytest.ini 的 testpaths 夹带 services/qc-service/tests
+      # PYTHONPATH=. 保证仓库根入 sys.path：pytest 7.4.x（lock 钉版）下根 pytest.ini addopts 的
+      # -p ai_collection_pytest_plugin 在 pythonpath ini 生效前导入，裸 pytest 脚本 cwd 不在 sys.path。
       - name: common tests
+        env:
+          PYTHONPATH: .
         run: pytest common/tests common/eventbus/tests common/security/tests -q
 
       - name: Scaffold services health (call/case/review)
