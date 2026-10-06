@@ -35,8 +35,13 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          # 基线（与旧 ci.yml 一致；locust 移到 complaint 条件安装）
+          # 基线（与旧 ci.yml 一致）
           pip install pytest pytest-asyncio pytest-cov httpx nest-asyncio fastapi uvicorn
+          # locust 仅 complaint 需要（对齐旧 ci.yml）；必须在根 lock 之前安装：
+          # lock 钉有 pytest==7.4.4 / pytest-asyncio==0.23.0，若在 lock 之后装 locust，
+          # 其宽松 pytest 依赖会把 pytest 重升到 9.x 而 pytest-asyncio 停在 0.23.0，
+          # 版本撕裂会在 collection 期报 'Package' object has no attribute 'obj'。
+          if [ "$SERVICE" = "complaint-service" ]; then pip install locust; fi
           # 根 lock 中 rocketmq-python-client 与 langfuse 存在 otlp 解析耦合（见 lock 注释），
           # 沿用 services/{qc-service,data-platform}/Dockerfile 既定做法：排除该行装 lock 主体，
           # 再单独安装 rocketmq + 对齐 langfuse 的 otlp（common.eventbus 测试也需要 rocketmq 可导入）
@@ -45,8 +50,6 @@ jobs:
           pip install 'rocketmq-python-client==5.1.1' 'opentelemetry-exporter-otlp>=1.33.1'
           # 服务运行时增量依赖（当前仅 complaint、mcp-gateway 存在此文件）
           if [ -f requirements.runtime.txt ]; then pip install -r requirements.runtime.txt; fi
-          # locust 仅 complaint 既有测试阶段需要（对齐旧 ci.yml）
-          if [ "$SERVICE" = "complaint-service" ]; then pip install locust; fi
 
       # 非投诉服务统一入口（mcp-gateway 就近使用自带 pytest.ini；其余服务采用根 pytest.ini）
       - name: Run tests
