@@ -105,7 +105,13 @@ jobs:
           echo "- [ ] Error codes follow common.errors.codes" >> $GITHUB_STEP_SUMMARY
           echo "- [ ] 未新建 app/service/event_publisher.py" >> $GITHUB_STEP_SUMMARY
 
-      # 1.7 起补：ruff（仅 complaint、mcp-gateway，continue-on-error 非阻塞）
+      # 1.7 D4：ruff 仅 complaint、mcp-gateway 两条目运行；咨询性输出，continue-on-error 不阻塞 job
+      - name: Ruff lint (advisory, non-blocking)
+        if: matrix.service == 'complaint-service' || matrix.service == 'mcp-gateway'
+        continue-on-error: true
+        run: |
+          pip install ruff
+          ruff check app tests
 
   # 公共 job：common 三个测试目录 + call/case/review 三个脚手架服务 health（1.6 落地）
   common:
