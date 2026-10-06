@@ -17,9 +17,6 @@ jobs:
       fail-fast: false # 任一条目失败不取消其余条目，暴露全部问题（ci-matrix spec：其余 job 仍执行完毕）
       matrix:
         service: [data-platform, rag-service, qc-service, mcp-gateway, complaint-service]
-        # 逐批点亮期临时排除；对应任务本地验证+CI 转绿后即删除该行：
-        exclude:
-          - service: complaint-service  # 1.5 迁入四阶段后删除
     defaults:
       run:
         working-directory: services/${{ matrix.service }}
@@ -58,7 +55,53 @@ jobs:
           PYTHONPATH: ../..
         run: pytest tests/ -q
 
-      # 1.5 起补：complaint-service 四阶段（unit+integration/e2e/regression/smoke）
+      # ── complaint-service 特有四阶段（D3：整体迁入旧 ci.yml 既有阶段，覆盖率门禁仅此条目）──
+      - name: Unit + Integration (D8 核心覆盖率 ≥85%)
+        if: matrix.service == 'complaint-service'
+        env:
+          PYTHONPATH: ../..
+          USE_REAL_INFRA: "0"
+        run: |
+          pytest tests/unit/ tests/integration/ \
+            --cov=app.models.state --cov=app.graph.edges \
+            --cov=app.mcp.client --cov=app.mcp.errors \
+            --cov=app.utils.evidence_helper --cov=app.service.recovery_service \
+            --cov-report=term-missing --cov-fail-under=85 -q
+
+      - name: E2E tests
+        if: matrix.service == 'complaint-service'
+        env:
+          PYTHONPATH: ../..
+        run: pytest tests/e2e/ -q
+
+      - name: Prompt regression
+        if: matrix.service == 'complaint-service'
+        env:
+          PYTHONPATH: ../..
+        run: pytest tests/regression/ -q
+
+      - name: Smoke test
+        if: matrix.service == 'complaint-service'
+        env:
+          PYTHONPATH: ../..
+          PORT: "8006"
+        run: |
+          uvicorn app.main:app --port 8006 &
+          sleep 4
+          bash ../../scripts/smoke/smoke_complaint_service.sh
+          kill %1 || true
+
+      - name: PR self-check summary
+        if: matrix.service == 'complaint-service' && always()
+        run: |
+          echo "## PR Self-Check" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] Unit + Integration（D8 核心 cov ≥85%，非整包 app）" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] E2E journey zero failure" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] Prompt regression（golden 真跑判责路径，一致率 ≥95%）" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] Smoke script exit 0" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] Error codes follow common.errors.codes" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] 未新建 app/service/event_publisher.py" >> $GITHUB_STEP_SUMMARY
+
       # 1.7 起补：ruff（仅 complaint、mcp-gateway，continue-on-error 非阻塞）
 
   # 公共 job：common 三个测试目录 + call/case/review 三个脚手架服务 health（1.6 落地）
