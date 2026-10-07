@@ -1,0 +1,64 @@
+name: CD
+
+# 触发器：
+# - push v* tag：门禁（gate）通过后构建 8 服务镜像并推送 ACR（design D7/D8）；普通分支推送不触发
+# - workflow_dispatch：手工补跑入口——运行时请选择目标 tag 的 ref（GITHUB_REF_NAME 即为该 tag，
+#   产出同名镜像 tag）；若从普通分支触发会以分支名作为镜像 tag，请避免
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# 最小权限：构建推送走 ACR secrets，不依赖 GITHUB_TOKEN 写权限
+permissions:
+  contents: read
+
+jobs:
+  # D7：门禁前置——以 reusable workflow 复用 ci.yml 的 6 job 门禁，对 tag 同一提交执行。
+  # ci.yml 的 workflow_call 未声明任何 secret、CI 测试也不消费 secrets，故不传 secrets: inherit，
+  # 避免把 ACR 凭证暴露给测试 job（secrets 按需透传：需求为零）。
+  gate:
+    uses: ./.github/workflows/ci.yml
+
+  # D8：8 服务矩阵构建推送。needs: gate 为流水线内强约束：gate 任一 job 失败则本 job 整组跳过，
+  # 不产生任何镜像。仅构建 services/ 下 8 个服务（gradio/infra/mock 等 services/ 外制品不在范围）。
+  build-push:
+    needs: gate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # 与 CI 同风格：任一服务失败不取消其余服务，一次暴露全部问题
+      matrix:
+        svc: [data-platform, rag-service, qc-service, mcp-gateway, complaint-service, call-service, case-service, review-service]
+    steps:
+      - uses: actions/checkout@v4
+
+      # ACR 登录：凭证仅经 GitHub secrets（ACR_USERNAME/ACR_PASSWORD）注入，
+      # login-action 对输出自动脱敏；本 workflow 严禁任何 echo/明文凭证
+      # registry 为 2024-09 后新个人版实例的独立域名（crpi- 前缀），
+      # 官方限制只能通过该域名访问，旧域名 registry.cn-hangzhou.aliyuncs.com 不适用（2026-10-07 实测核对）
+      - name: Login to Alibaba Cloud ACR
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: crpi-7ki4lc0lyjmk9zm7.cn-hangzhou.personal.cr.aliyuncs.com
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      # 双 tag：触发 tag（GITHUB_REF_NAME，如 v0.1.0-rc1）与 latest 指向同一次构建产物
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v6.2.0
+        with:
+          images: crpi-7ki4lc0lyjmk9zm7.cn-hangzhou.personal.cr.aliyuncs.com/ai-collection/${{ matrix.svc }}
+          tags: |
+            type=raw,value=${{ github.ref_name }}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: . # 仓库根 build context（4.1 清点：8 个 Dockerfile 均以根为 context）
+          file: services/${{ matrix.svc }}/Dockerfile
+          push: true
+          provenance: false # 产出单一 manifest：不附加 OCI attestation 索引，规避 ACR 个人版兼容风险
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
