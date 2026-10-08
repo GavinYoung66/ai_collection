@@ -11,8 +11,8 @@
 - [x] 1.5 complaint-service matrix 条目迁入既有四阶段：unit+integration（原精确 `--cov` 列表 + `--cov-fail-under=85`）、e2e、regression、smoke（后台 uvicorn + `scripts/smoke/smoke_complaint_service.sh`）及 PR self-check summary；验证四阶段与旧 ci.yml 行为等价，并人为验证覆盖率低于 85% 时 job 失败
 - [x] 1.6 `common` job：仓库根显式对 `common/tests`、`common/eventbus/tests`、`common/security/tests` 执行 pytest（不裸跑根 pytest，确认未夹带 qc-service 测试），再循环 call/case/review 三目录跑 health；验证该 job 绿
 - [x] 1.7 lint 按 D4 落地：仅 complaint、mcp-gateway 两个 job 安装并运行 ruff（`continue-on-error` 非阻塞），其余服务无 ruff 步骤；验证有配置的服务输出 ruff 结果但不改变 job 成败
-- [ ] 1.8 〔BLOCKED 2026-10-06：个人账户私有仓 + GitHub Free 不支持 branch protection/rulesets。证据：`GET /repos/GavinYoung66/ai_collection/branches/main/protection` 与 `GET /rulesets` 均 403「Upgrade to GitHub Pro or make this repository public to enable this feature.」；已由用户确认。解除条件：升级 GitHub Pro 或仓库转 public。〕原计划：仓库管理员手工在 Settings→Branches 对 main 启用 branch protection rule，勾选 Require status checks to pass before merging，将 6 个检查项全部设为 required——5 个 matrix 作业（`service-test (data-platform)`、`service-test (rag-service)`、`service-test (qc-service)`、`service-test (mcp-gateway)`、`service-test (complaint-service)`）与 `common`
-- [ ] 1.9 〔BLOCKED 2026-10-06：依赖 1.8，无 required checks 即无法验证 Merge 按钮被强制阻止；1.8 解除后执行，方案不变〕门禁语义验证：临时分支制造一次单服务测试失败推送并开 PR，确认对应 job 失败、整体 CI 失败，且 PR 页面 Merge 按钮因 required status check 未过而被阻止（非仅显示红色警告）；其余 job 仍执行完毕；验证后丢弃该临时提交与分支
+- [ ] 1.8 〔BLOCKED 2026-10-06：个人账户私有仓 + GitHub Free 不支持 branch protection/rulesets。证据：`GET /repos/GavinYoung66/ai_collection/branches/main/protection` 与 `GET /rulesets` 均 403「Upgrade to GitHub Pro or make this repository public to enable this feature.」；已由用户确认。解除条件：升级 GitHub Pro 或仓库转 public。**用户决定 2026-10-07：不升级、不转 public，本项永久搁置（除非未来账号/仓库形态变化），不阻塞 change 交付。**〕原计划：仓库管理员手工在 Settings→Branches 对 main 启用 branch protection rule，勾选 Require status checks to pass before merging，将 6 个检查项全部设为 required——5 个 matrix 作业（`service-test (data-platform)`、`service-test (rag-service)`、`service-test (qc-service)`、`service-test (mcp-gateway)`、`service-test (complaint-service)`）与 `common`
+- [ ] 1.9 〔BLOCKED 2026-10-06：依赖 1.8，无 required checks 即无法验证 Merge 按钮被强制阻止；1.8 解除后执行，方案不变。**用户决定 2026-10-07：随 1.8 一并永久搁置。**〕门禁语义验证：临时分支制造一次单服务测试失败推送并开 PR，确认对应 job 失败、整体 CI 失败，且 PR 页面 Merge 按钮因 required status check 未过而被阻止（非仅显示红色警告）；其余 job 仍执行完毕；验证后丢弃该临时提交与分支
 
 ## 2. 密钥管理 sops + age（secrets-sops）
 
@@ -90,10 +90,74 @@
   - 证据 2026-10-07（secrets 配置）：用户截图确认 GitHub 仓库 Settings→Secrets and variables→Actions 的 **Repository secrets** 下存在 ACR_USERNAME / ACR_PASSWORD 两行（带锁图标、值不可见）；曾误建在 Variables（明文）一处，已指导删除重建到 Secrets
   - 证据（凭证有效性冒烟）：用户本地终端 `docker login crpi-7ki4lc0lyjmk9zm7.cn-hangzhou.personal.cr.aliyuncs.com -u GavinYoung` 输入固定密码后 **Login Succeeded**（未触发批次 3 记录的 keychain 故障）；用户名/密码/域名三要素在打 tag 前已验证
   - 证据（文件侧复核）：`grep -rn 'secrets\.' .github/workflows/` 仅 cd.yml:43/44 两处 `${{ secrets.ACR_USERNAME }}`/`${{ secrets.ACR_PASSWORD }}` 引用；明文/登录命令/密码形态/echo secret 扫描均 CLEAN；实例命名空间 `ai-collection` 状态正常、自动创建仓库开启
-- [ ] 4.4 预演：推送 `v0.1.0-rc1`，确认 gate 全部门禁通过后才构建推送，8 个服务镜像双 tag 全部 push 成功；失败则按日志修复后重打 rc tag
-- [ ] 4.5 验收：对 8 个服务逐一 `docker pull crpi-7ki4lc0lyjmk9zm7.cn-hangzhou.personal.cr.aliyuncs.com/ai-collection/<svc>:v0.1.0-rc1` 成功（私有仓库先 docker login 同域名），`:latest` 指向同一镜像；确认普通 main 分支推送不触发 CD、流水线未执行任何服务器侧部署动作
+- [x] 4.4 预演：推送 `v0.1.0-rc1`，确认 gate 全部门禁通过后才构建推送，8 个服务镜像双 tag 全部 push 成功；失败则按日志修复后重打 rc tag
+  - 证据 2026-10-07（git 链路，经用户明确授权 3 commit）：工作区按能力拆 3 commit——6e3e9bd sops、c2694c1 backup、7f3519e cd+脚手架修复+openspec；`git push origin dev`（04530b5..7f3519e）后在 7f3519e（含 cd.yml，git cat-file -e 验证）打 annotated tag `v0.1.0-rc1` 并 push；明文 .env 经 check-ignore 确认未入库
+  - 证据（gate 门禁前置，run id 37611208303）：API 实测 job 顺序为 gate 先全部 completed/success——service-test(data-platform/rag-service/qc-service/mcp-gateway/complaint-service) + common 共 **6/6 success**（批次 1 六门禁首次 GitHub 云端真实运行全绿），其后 build-push 才进入 in_progress；gate 期间无任何镜像推送步骤启动
+  - 证据（8 服务双 tag push）：build-push matrix 8 job 轮询至 **8/8 completed success 零失败**，run 级 conclusion=success；data-platform job 日志含 `Login Succeeded!` 且结尾推送 manifest v0.1.0-rc1/latest
+  - 证据（凭证无泄漏）：下载 data-platform 完整 job 日志，截图曾出现的固定密码字符串命中 **0** 次；日志仅显示 registry 域名，结尾 `Removing login credentials`（login-action 自动 logout）
+  - 证据（仅构建分发）：grep cd.yml 无 ssh/scp/rsync/docker -H/kubectl/helm/deploy 任何远程动作，job 仅 gate、build-push 两个
+- [x] 4.5 验收：对 8 个服务逐一 `docker pull crpi-7ki4lc0lyjmk9zm7.cn-hangzhou.personal.cr.aliyuncs.com/ai-collection/<svc>:v0.1.0-rc1` 成功（私有仓库先 docker login 同域名），`:latest` 指向同一镜像；确认普通 main 分支推送不触发 CD、流水线未执行任何服务器侧部署动作
+  - 证据 2026-10-07（8 镜像可拉取）：私有仓同域名 `docker login` 后，8 个服务 `:v0.1.0-rc1` 与 `:latest` 共 16 个引用全部 `docker image inspect` 存在（拉取自 ACR，均带 crpi 域名 RepoDigests，非本地 tag）；逐服务比对两 tag 的 RepoDigest：**data-platform / rag-service / qc-service / mcp-gateway / complaint-service / call-service / case-service / review-service 全部 MATCH，SUMMARY PASS=8 FAIL=0 MISSING=0**（双 tag 指向同一次构建同一镜像）
+  - 环境注记：首次 pull 报 pull access denied——根因是本机 `~/.docker/config.json` 在两次登录间被重置为 `auths:{}`（与批次 3 Docker Desktop 凭证助手故障同类），用户重新 `docker login` 后凭证写入（auths 含 crpi 域名、token 在位），拉取即成功；非镜像/权限问题
+  - 证据（普通分支推送不触发 CD）：`GET /actions/workflows/cd.yml/runs` 实测 CD 历史**仅 1 次运行**（v0.1.0-rc1，event=push）；此前 `git push origin dev`（04530b5..7f3519e，含 cd.yml 本体）未产生任何 CD 运行——tag 匹配 v* 才触发的语义成立（本仓无 main 分支，主干为 dev/master，dev 推送即「普通分支推送」证据）
+  - 证据（无服务器侧部署）：cd.yml 静态扫描无 ssh/scp/rsync/docker -H/kubectl/helm/远程 deploy；job 仅 gate、build-push；未新增任何部署脚本；本 change 唯一产物为 ACR 中 8 组镜像
 
 ## 5. 整体验收
 
-- [ ] 5.1 运行 `openspec validate infra-production-readiness --strict` 通过
-- [ ] 5.2 输出四能力逐项 pass/fail 验收对照表（含每项证据命令与结果）：六 job 门禁、sops 四条验收、备份/恢复演练、8 镜像 pull；全部 pass 后交付
+- [x] 5.1 运行 `openspec validate infra-production-readiness --strict` 通过
+  - 证据 2026-10-07：`openspec validate infra-production-readiness --strict` → `Change 'infra-production-readiness' is valid`，exit 0（域名/脚手架修复等工件变更后复跑仍通过）
+- [x] 5.2 输出四能力逐项 pass/fail 验收对照表（含每项证据命令与结果）：六 job 门禁、sops 四条验收、备份/恢复演练、8 镜像 pull；全部 pass 后交付
+
+## 四能力验收对照表
+
+### 能力一：CI 六 job 门禁
+
+| 验收项 | 结果 | 证据 |
+|---|---|---|
+| ci.yml 语法校验通过 | PASS | actionlint/YAML 校验通过 |
+| service-test matrix 5 服务全绿 | PASS | data-platform/rag-service/qc-service/mcp-gateway/complaint-service 5/5 success（run id 37611208303） |
+| common job 全绿 | PASS | common tests + call/case/review health 通过 |
+| 1.8 branch protection required checks | **搁置（用户决定）** | GitHub Free 私有仓不支持（API 403，需 Pro 或 public）；用户 2026-10-07 明确不升级/不公开，永久搁置，不阻塞交付 |
+| 1.9 Merge 按钮强制阻止语义 | **搁置（随 1.8）** | 依赖 1.8；tag 制品路径已由 cd.yml reusable gate 强约束（gate 不过不产镜像，已实证），旁路仅为分支 PR 合并 |
+| complaint 四阶段（unit/integration/e2e/regression/smoke） | PASS | 四阶段等价迁入；覆盖率 <85% 时 job 失败已人为验证（1.5） |
+| ruff 非阻塞 lint | PASS | complaint/mcp-gateway 输出 ruff 结果但不影响 job 成败（continue-on-error，1.7） |
+
+### 能力二：sops 加密
+
+| 验收项 | 结果 | 证据 |
+|---|---|---|
+| `.sops.yaml` 配置生效 | PASS | age 公钥 recipient + path_regex + encrypted_regex 配置正确 |
+| `.env.enc` 密钥字段加密 | PASS | `grep -E '(PG_PASSWORD|LLM_API_KEY|...)=' .env.enc` 输出均为 `ENC[...]` |
+| 解密结果与原 `.env` 一致 | PASS | sops 解密逐行 diff 完全一致 |
+| `.env.example` 无真实密钥 | PASS | 全部密钥字段为 `<change_me>` 占位值 |
+| 启动方式验证 | PASS | 以 /tmp 下 `.env` 后缀符号链接 `sops exec-env <link>.env 'docker compose ... up -d'`（2.5 实测：exec-env 不识别 --input-type，直接传 .env.enc 会报 missing file），容器内 7/7 关键键为真实值、5 健康端点 200，down 后无新明文文件 |
+
+### 能力三：备份/恢复演练
+
+| 验收项 | 结果 | 证据 |
+|---|---|---|
+| backup_pg.sh 产物非空 | PASS | `backups/pg/pg_<ts>.sql.gz` 存在且非空 |
+| restore_pg.sh 恢复演练 | PASS | count(*) 一致 + 3 条样本字段完全相同 |
+| backup_es.sh 快照成功 | PASS | ES 可列出快照、宿主目录非空 |
+| restore_es.sh 恢复演练 | PASS | 删除索引后恢复可重新检索 |
+| backup_milvus.sh 产物非空 | PASS | etcd snapshot + minio mirror 打包成功 |
+| restore_milvus.sh 恢复演练 | PASS | dev 环境 collection 可查 |
+| backup_all.sh 全量备份 | PASS | pg→milvus→es 串行成功，同日连跑两次互不覆盖 |
+| 脚本含 cron 示例且未自动注册 | PASS | 注释含 `0 2 * * *`，系统 crontab 无变化 |
+
+### 能力四：CD 镜像分发
+
+目标仓库：`crpi-7ki4lc0lyjmk9zm7.cn-hangzhou.personal.cr.aliyuncs.com/ai-collection/<svc>`（2024-09 后新个人版独立域名），预演 tag `v0.1.0-rc1`，run id 37611208303。
+
+| 验收项 | 结果 | 证据 |
+|---|---|---|
+| cd.yml 仅 tag 触发 | PASS | `on: push: tags: ['v*']`；API 实测 CD 仅 1 次运行（tag），push dev 未触发 |
+| gate 门禁前置 | PASS | gate 6/6 success 后 build-push 才 in_progress，gate 期间无镜像步骤 |
+| 8 服务双 tag push 成功 | PASS | build-push matrix 8/8 completed success，run conclusion=success |
+| 8 服务 rc1/latest digest 一致 | PASS | 16 引用拉取自 ACR，RepoDigest 8/8 MATCH（PASS=8 FAIL=0） |
+| 凭证无泄漏 | PASS | 日志固定密码命中 0 次，仅显域名，结尾自动 Removing login credentials |
+| 无服务器侧部署动作 | PASS | 仅 gate + build-push，静态扫描无 ssh/scp/rsync/kubectl/helm/远程 deploy |
+
+### 整体结论
+
+**四能力验收：CI 六门禁云端运行、sops、备份/恢复演练、CD 8 镜像分发的全部功能性验收项均 PASS（2026-10-07 实测），change 功能交付完成。** 1.8/1.9 两项因个人账户私有仓 + GitHub Free 不支持 branch protection/rulesets（API 403）无法实现，**用户已于 2026-10-07 明确决定：不升级 Pro、不转 public，两项永久搁置、不视为交付缺口**（任务保留未勾选作为诚实记录，待未来账号/仓库形态变化时按既定方案补验）。对真实发布路径的防护未受影响：tag 制品门禁由 cd.yml reusable gate 在流水线内强约束（gate 不过不产镜像，本次已实证）。另：本批最小修复 call/case/review 三脚手架 Dockerfile（rocketmq/langfuse 依赖互斥，app 零引用，已报用户）。
