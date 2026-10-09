@@ -1,22 +1,8 @@
 ## Purpose
 
-CI 门禁与 PR 自检；覆盖率按 design D8。
+CI 门禁与 PR 自检：push/PR 触发单元与集成测试，核心模块覆盖率 ≥85% 门禁，其余检查项按项目既有配置启用；覆盖率口径见 design D8。
 
 ## Requirements
-
-### Requirement: CI workflow
-
-系统 SHALL 新增 `.github/workflows/ci.yml`，push/PR 执行：
-1. unit 测试
-2. integration 测试（默认 Fake）
-3. **核心模块**覆盖率 ≥85%（精确 `--cov` 列表，非整包强制）
-4. 冒烟可选（服务可用时）
-5. lint/type：项目已有配置则启用，否则跳过
-
-#### Scenario: CI 门禁可跑通
-
-- **WHEN** PR 触发 CI
-- **THEN** 约定检查项通过，否则失败阻塞合并
 
 ### Requirement: PR 自检清单
 

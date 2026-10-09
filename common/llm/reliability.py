@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import os
+import time
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
@@ -16,11 +17,16 @@ import structlog
 from redis.exceptions import RedisError
 
 from common.config.settings import settings
+from common.observability.llm_metrics import LLM_METRICS
 from common.resilience._redis import get_redis
 from common.resilience.breaker import BreakerRegistry, make_llm_breaker_key
 from common.resilience.rate_limit import allow as rate_limit_allow
 from common.resilience.timeout import Timeout
-from common.llm.transport import message_content_from_completions, post_chat_completions
+from common.llm.transport import (
+    _llm_last_usage,
+    message_content_from_completions,
+    post_chat_completions,
+)
 
 T = TypeVar("T")
 
@@ -311,6 +317,93 @@ async def mark_degraded_flag(key: str, *, ttl_seconds: int = _DEGRADE_TTL_SECOND
     await tracker.on_failure()
 
 
+# ---------------------------------------------------------------------------
+# LLM per-call 埋点：structlog event=llm_call + 六类 Prometheus 指标
+# ---------------------------------------------------------------------------
+# 当前 _call_model 候选在 fallback 链中的来源模型（primary 候选为 None）。
+# 用 ContextVar 传递替代给 _call_model 加参：保持其对外签名不变；
+# invoke_llm 在每次候选调用前置位、退出时复位。
+_llm_fallback_from: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "llm_fallback_from", default=None
+)
+
+
+def _record_llm_call(
+    *,
+    svc: str,
+    model: str,
+    fallback_from: str | None,
+    breaker_key: str,
+    status: str,
+    latency_seconds: float,
+    usage: dict | None = None,
+) -> None:
+    """LLM 每次编排终态埋点：structlog 日志 + Prometheus 指标。
+
+    口径（llm-usage-observability spec）：
+    - ``llm_calls_total`` / ``llm_call_latency_seconds`` 仅计真实 transport 调用
+      （``status ∈ {ok, timeout, error}``）；``breaker_open`` / ``rate_limited`` 不计入；
+    - ``llm_tokens_total`` 仅 ``status=ok`` 且 ``token_source=usage`` 时按真实值计数，其余 +0；
+    - ``latency_ms`` 由真实调用耗时换算；``breaker_open`` / ``rate_limited`` 传 0。
+    """
+    token_source = "usage" if isinstance(usage, dict) else "missing"
+    prompt_tokens = 0
+    completion_tokens = 0
+    if isinstance(usage, dict):
+        # 埋点不得影响主调用链：上游返回脏值（非数值 token 字段）时按 0 记，
+        # 绝不让埋点异常把成功的 transport 调用改判为失败。
+        try:
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            completion_tokens = int(usage.get("completion_tokens") or 0)
+        except (TypeError, ValueError):
+            prompt_tokens = 0
+            completion_tokens = 0
+
+    logger.info(
+        "llm_call",
+        svc=svc,
+        model=model,
+        fallback_from=fallback_from,
+        breaker_key=breaker_key,
+        status=status,
+        latency_ms=round(latency_seconds * 1000, 3),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+        token_source=token_source,
+    )
+
+    # 仅真实 transport 调用计入 calls/latency/tokens（拒绝态由独立计数器承载）
+    if status not in ("ok", "timeout", "error"):
+        return
+    LLM_METRICS.calls_total.labels(svc, model, status).inc()
+    LLM_METRICS.call_latency_seconds.labels(svc, model).observe(latency_seconds)
+    if status == "ok" and token_source == "usage":
+        LLM_METRICS.tokens_total.labels(svc, model, "prompt").inc(prompt_tokens)
+        LLM_METRICS.tokens_total.labels(svc, model, "completion").inc(completion_tokens)
+
+
+async def _invoke_transport_once(
+    transport: LLMTransport, model: str, messages: list[dict], timeout_seconds: float
+) -> tuple[str, dict | None]:
+    """单次真实 transport 调用，返回 ``(content, 本次 usage)``。
+
+    usage 必须在**与 transport 调用同一个 asyncio Task 上下文**内读取：
+    ``_call_model`` 用 ``asyncio.wait_for`` 包裹本协程，wait_for 会把协程包成新 Task
+    并复制 ContextVar 上下文——若在外层 ``_call_model`` 主体读取，
+    ``post_chat_completions`` 在子 Task 内写入的 usage 将不可见（实测恒为 None）。
+    读完立即清零，避免同一子 Task 内后续读取污染。
+    入口先清零：防御“写 usage 后失败”的残留——如 post_chat_completions
+    成功写入 usage 后 transport 侧校验抛错，读后清零不会执行；
+    若不预清，重试/下一候选成功但未写 usage 时会串到旧 token。
+    """
+    _llm_last_usage.set(None)
+    content = await transport(model, messages, timeout_seconds)
+    usage = _llm_last_usage.get()
+    _llm_last_usage.set(None)
+    return content, usage
+
+
 async def _call_model(
     transport: LLMTransport,
     model: str,
@@ -321,25 +414,66 @@ async def _call_model(
     """单模型完整调用：熔断检查 → 有界重试（仅业务错，超时不重试）。
 
     熔断计数口径：重试中间失败不计数，模型最终失败（重试耗尽或超时）计 1 次，
-    避免内部重试放大熔断。
+    避免内部重试放大熔断。每次候选终态同步打 llm_call 日志与指标（spec 三埋点之①②）。
     """
+    svc = resolve_service_name()
+    fallback_from = _llm_fallback_from.get()
     if not await breaker.before_call():
+        # 埋点②：熔断打开拒绝（transport 未被调用，token/latency 全 0）
+        _record_llm_call(
+            svc=svc,
+            model=model,
+            fallback_from=fallback_from,
+            breaker_key=breaker.key,
+            status="breaker_open",
+            latency_seconds=0.0,
+        )
+        LLM_METRICS.breaker_open_total.labels(svc, model).inc()
         raise LLMCircuitOpenError(f"LLM circuit open: {breaker.key}")
     for attempt in range(_LLM_MAX_ATTEMPTS):
+        started = time.perf_counter()
         try:
-            content = await asyncio.wait_for(
-                transport(model, messages, timeout.total), timeout.total
+            content, usage = await asyncio.wait_for(
+                _invoke_transport_once(transport, model, messages, timeout.total),
+                timeout.total,
             )
         except asyncio.TimeoutError:
-            # 超时不重试：直接判失败，交给上层换 fallback
+            # 超时不重试：直接判失败，交给上层换 fallback（埋点① status=timeout）
+            _record_llm_call(
+                svc=svc,
+                model=model,
+                fallback_from=fallback_from,
+                breaker_key=breaker.key,
+                status="timeout",
+                latency_seconds=time.perf_counter() - started,
+            )
             await breaker.record_failure()
             raise
         except Exception as e:
             if attempt >= _LLM_MAX_ATTEMPTS - 1:
+                # 埋点①：重试耗尽终态 error（中间失败不埋点，避免放大）
+                _record_llm_call(
+                    svc=svc,
+                    model=model,
+                    fallback_from=fallback_from,
+                    breaker_key=breaker.key,
+                    status="error",
+                    latency_seconds=time.perf_counter() - started,
+                )
                 await breaker.record_failure(e)
                 raise
             await asyncio.sleep(_LLM_RETRY_DELAY * (2**attempt))
         else:
+            # 埋点①：成功终态 ok（usage 由内层协程在同 Task 上下文读取透传）
+            _record_llm_call(
+                svc=svc,
+                model=model,
+                fallback_from=fallback_from,
+                breaker_key=breaker.key,
+                status="ok",
+                latency_seconds=time.perf_counter() - started,
+                usage=usage,
+            )
             await breaker.record_success()
             return content
     raise RuntimeError("unreachable")  # pragma: no cover
@@ -362,6 +496,8 @@ async def invoke_llm(
       transport 适配，向后兼容；缺省用 set_llm_transport 注入值或 DashScope 默认通道）；
     - primary 失败即置位其降级标志；全链失败返回 degraded outcome（不构造伪造结果）。
     """
+    # 入口第一行 reset：防上一次调用残留污染本次（成功/异常路径均由 finally 兜底清零）
+    _llm_last_usage.set(None)
     transport = transport or _llm_transport or _default_llm_transport
     svc = resolve_service_name()
     primary_breaker_key = breaker_key or make_llm_breaker_key(svc, model)
@@ -376,6 +512,16 @@ async def invoke_llm(
     if not await rate_limit_allow(
         rate_key, limit=rate_limit_value, window=rate_window_value
     ):
+        # 埋点③：限流拒绝（未进入 _call_model，token/latency 全 0；不计入 llm_calls_total）
+        _record_llm_call(
+            svc=svc,
+            model=model,
+            fallback_from=None,
+            breaker_key=primary_breaker_key,
+            status="rate_limited",
+            latency_seconds=0.0,
+        )
+        LLM_METRICS.rate_limited_total.labels(svc, model).inc()
         raise LLMRateLimitError(f"LLM rate limit exceeded: {rate_key}")
 
     # 置位编排标志：本函数内对 transport 的调用（含 fallback 换模型）都处于编排中，
@@ -386,12 +532,19 @@ async def invoke_llm(
         for index, candidate in enumerate(chain):
             key = primary_breaker_key if index == 0 else make_llm_breaker_key(svc, candidate)
             breaker = _llm_breakers.get_or_create(key)
+            # fallback_from：primary 候选为 None，第 i>0 候选为 chain[i-1]
+            _llm_fallback_from.set(None if index == 0 else chain[index - 1])
             try:
                 content = await _call_model(transport, candidate, messages, timeout, breaker)
             except Exception as e:
                 errors.append(f"{candidate}: {e}")
                 if index == 0:
                     await mark_degraded_flag(primary_breaker_key)
+                if index + 1 < len(chain):
+                    # fallback 链切换计数（仅在确有下一候选时记；continue 之前埋点）
+                    LLM_METRICS.fallback_total.labels(
+                        svc, candidate, chain[index + 1]
+                    ).inc()
                 continue
             return {
                 "model": candidate,
@@ -409,4 +562,8 @@ async def invoke_llm(
             "error": " | ".join(errors) or "all models failed",
         }
     finally:
+        # 残留兜底：读取并清零（成功路径已在 _call_model 内层协程读取；此处防异常路径残留）
+        _ = _llm_last_usage.get()
+        _llm_last_usage.set(None)
+        _llm_fallback_from.set(None)
         _llm_orchestration_active.reset(orchestration_token)

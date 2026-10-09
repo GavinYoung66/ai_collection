@@ -1,0 +1,53 @@
+# Prometheus 抓取拓扑（openspec change: observability-metrics-llm-usage，design D1/D6）
+# 目标锁定 docker-compose.dev.yml 单实例全栈；经宿主机端口映射抓取，
+# macOS 原生支持 host.docker.internal，Linux 由 compose 的 extra_hosts 补齐。
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # 1) Prometheus 自抓
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # 2) 8 个业务服务（metrics_path=/metrics 为默认值，显式声明以便审阅）
+  - job_name: data-platform
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8001"]
+
+  - job_name: rag-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8002"]
+
+  - job_name: qc-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8003"]
+
+  - job_name: call-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8004"]
+
+  - job_name: case-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8005"]
+
+  - job_name: complaint-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8006"]
+
+  - job_name: review-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8007"]
+
+  - job_name: mcp-gateway
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9009"]

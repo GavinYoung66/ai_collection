@@ -68,6 +68,9 @@ pybreaker==1.0.2
 # === 配置与日志 ===
 structlog==23.3.0
 
+# === 可观测性 ===
+prometheus-client==0.23.1   # 统一 /metrics 暴露（满足 mcp-gateway 声明的 >=0.19,<1 区间）
+
 # === 安全 ===
 cryptography==41.0.7
 pyahocorasick==2.0.0

@@ -1,10 +1,6 @@
 ## Purpose
 
-定义投诉服务 E2E 测试：接单→judge→review→close→Pub-Sub→回流关键旅程，0 失败。
-
-## Purpose
-
-定义投诉服务 E2E：接单→judge→status→verdict→review→close→Pub-Sub→回流；HTTP 方法对齐现网。
+定义投诉服务 E2E：接单→judge→status→verdict→review→close→Pub-Sub→回流关键旅程；HTTP 方法对齐现网，0 失败。
 
 ## Requirements
 

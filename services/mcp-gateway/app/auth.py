@@ -2,8 +2,8 @@
 
 作用范围：
 - ``POST /mcp``（tools/list + tools/call）：MCP 入站调用，始终为鉴权对象；
-- ``GET /metrics``：``ENABLE_AUTH=true`` 时同样要求有效凭证（Prometheus 抓取
-  端配置 Authorization Bearer 即可，spec「网关鉴权」scenario）；
+- ``GET /metrics``：SHALL 始终放行（Prometheus 拉取端点；指标不含 PII 且 path
+  已白名单化，spec platform/observability「/metrics 不被鉴权拦截」scenario）；
 - ``GET /health``：SHALL 始终放行（容器编排健康探针不带业务凭证）。
 
 行为：
@@ -19,8 +19,7 @@
 响应形态（spec「网关信封一致性」）：
 - ``POST /mcp`` 的拒绝使用 JSON-RPC error 信封（code=-32001，
   error.data.code=B0002，回显请求 id），与限流 429 同风格，MCP 端点不包
-  统一信封；
-- ``GET /metrics`` 非 MCP 协议端点，拒绝使用统一信封 B0002。
+  统一信封；/metrics 不再受保护，无拒绝响应（历史 metrics 信封分支保留为防御代码）。
 
 实现为纯 ASGI 中间件（与 MCPRateLimitMiddleware 同理由）：不使用
 BaseHTTPMiddleware，避免缓冲破坏 /mcp 的 SSE 流。/mcp 放行路径需读 body
@@ -84,14 +83,16 @@ def _requested_trace_id(scope: dict) -> str:
 
 
 def _protected_kind(scope: dict) -> str | None:
-    """返回受保护端点类别：``mcp`` / ``metrics``；非保护（含 /health）返回 None。"""
+    """返回受保护端点类别：仅 ``mcp``；非保护（/metrics、/health 及其余路径）返回 None。
+
+    ``GET /metrics`` 已移出保护（Prometheus 拉取端点，spec platform/observability
+    「/metrics 不被鉴权拦截」）：ENABLE_AUTH=true 时无 Bearer 同样直通返回 200。
+    """
     if scope.get("type") != "http":
         return None
     path = str(scope.get("path", "")).rstrip("/")
     if scope.get("method") == "POST" and path.endswith("/mcp"):
         return "mcp"
-    if scope.get("method") == "GET" and path.endswith("/metrics"):
-        return "metrics"
     return None
 
 
@@ -128,7 +129,7 @@ def _audit_target(items: list[dict[str, Any]]) -> tuple[str, str, Any, Any]:
 
 
 class MCPAuthMiddleware:
-    """鉴权闸门：默认关闭直通；开启后 /mcp 与 /metrics 无有效凭证返回 401/B0002。"""
+    """鉴权闸门：默认关闭直通；开启后仅 /mcp 无有效凭证返回 401/B0002（/metrics 始终直通）。"""
 
     def __init__(self, app) -> None:
         self.asgi_app = app
@@ -140,7 +141,7 @@ class MCPAuthMiddleware:
             return
         kind = _protected_kind(scope)
         if kind is None:
-            # 非保护端点（/health 及非 /mcp、非 /metrics 路径）直通
+            # 非保护端点（/health、/metrics 及其余非 /mcp 路径）直通
             await self.asgi_app(scope, receive, send)
             return
 

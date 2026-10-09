@@ -119,6 +119,7 @@ services:
       context: .
       dockerfile: services/data-platform/Dockerfile
     ports: ["8001:8000"]
+    restart: unless-stopped
     env_file: .env
     environment:
       PG_HOST: postgres
@@ -161,6 +162,7 @@ services:
       context: .
       dockerfile: services/rag-service/Dockerfile
     ports: ["8002:8000"]
+    restart: unless-stopped
     env_file: .env
     environment:
       PG_HOST: postgres
@@ -244,6 +246,7 @@ services:
       context: .
       dockerfile: services/qc-service/Dockerfile
     ports: ["8003:8000"]
+    restart: unless-stopped
     env_file: .env
     environment:
       PG_HOST: postgres
@@ -315,6 +318,7 @@ services:
       context: .
       dockerfile: services/call-service/Dockerfile
     ports: ["8004:8000"]
+    restart: unless-stopped
     env_file: .env
     environment:
       PG_HOST: postgres
@@ -349,6 +353,7 @@ services:
       context: .
       dockerfile: services/case-service/Dockerfile
     ports: ["8005:8000"]
+    restart: unless-stopped
     env_file: .env
     environment:
       PG_HOST: postgres
@@ -390,6 +395,7 @@ services:
       context: .
       dockerfile: services/mcp-gateway/Dockerfile
     ports: ["9009:9000"]
+    restart: unless-stopped
     env_file: .env
     environment:
       # 容器内 Redis 用服务名（根 .env 的 REDIS_HOST=localhost 是宿主机视角）；
@@ -438,6 +444,7 @@ services:
       context: .
       dockerfile: services/complaint-service/Dockerfile
     ports: ["8006:8000"]
+    restart: unless-stopped
     env_file: .env
     environment:
       PG_HOST: postgres
@@ -502,6 +509,7 @@ services:
       context: .
       dockerfile: services/review-service/Dockerfile
     ports: ["8007:8000"]
+    restart: unless-stopped
     env_file: .env
     environment:
       PG_HOST: postgres

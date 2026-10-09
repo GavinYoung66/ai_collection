@@ -1,9 +1,5 @@
 ## Purpose
 
-定义投诉服务多服务 compose 编排规范：端口 8006、依赖链、MCP 网关 inline/standalone 双模式、REQ-CJ-053 资源规格、prod 多实例。
-
-## Purpose
-
 定义投诉服务多服务 compose 编排规范：端口 8006、依赖链、MCP 网关 inline/standalone 双模式、REQ-CJ-053 资源规格、prod 具名多实例（非 Swarm replicas）。
 
 ## Requirements

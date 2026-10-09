@@ -1,10 +1,6 @@
 ## Purpose
 
-定义投诉服务压测：locust 脚本与准入指标，复用 docker-compose 基线。
-
-## Purpose
-
-locust 压测与 stub 基线准入；非 PRD 生产 SLA。
+定义投诉服务压测：locust 脚本与 stub 基线准入指标，复用 docker-compose 基线；非 PRD 生产 SLA。
 
 ## Requirements
 

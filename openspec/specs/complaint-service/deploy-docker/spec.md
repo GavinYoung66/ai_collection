@@ -2,10 +2,6 @@
 
 定义投诉服务生产 Dockerfile 规范：对齐 M0 统一模板，镜像可构建、健康检查可达，作为批次11 部署基线。
 
-## Purpose
-
-定义投诉服务生产 Dockerfile 规范：对齐 M0 统一模板，镜像可构建、健康检查可达，作为批次11 部署基线。
-
 ## Requirements
 
 ### Requirement: Dockerfile 对齐 M0 模板

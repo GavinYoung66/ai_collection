@@ -1,6 +1,6 @@
 ## Purpose
 
-Prompt 回归：golden set 与 verdict 一致率；枚举仅四值。
+Prompt 回归：以 golden set 校验 verdict 一致率，verdict 枚举仅允许四值，用于防止提示词变更引入判定漂移。
 
 ## Requirements
 

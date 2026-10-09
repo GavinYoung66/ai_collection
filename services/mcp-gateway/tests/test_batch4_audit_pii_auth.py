@@ -572,27 +572,32 @@ async def test_6_2_mcp_rejection_is_jsonrpc_b0002_not_b0007(isolate, auth_client
         assert r_bad.json()["id"] is None
 
 
-async def test_6_2_metrics_rejection_is_envelope_b0002(isolate, auth_client):
-    """/metrics 非 MCP 端点：拒绝使用统一信封 B0002。"""
+async def test_6_2_metrics_passthrough_when_auth_enabled(isolate, auth_client):
+    """/metrics 已移出鉴权保护：ENABLE_AUTH=true 时无凭证同样直通（spec platform/observability）。"""
     async with httpx.AsyncClient(transport=auth_client, base_url="http://t") as client:
         r = await client.get("/metrics")
-    assert r.status_code == 401
-    body = r.json()
-    assert body["code"] == "B0002"
-    assert body["data"] is None
-    assert "trace_id" in body
-    assert "B0007" not in r.text
+    assert r.status_code == 200
+    assert r.json() == {"metrics": "ok"}  # 请求直达 stub，未被鉴权拦截
+    assert "B0002" not in r.text
 
 
-async def test_p2_2_metrics_protected_when_auth_enabled(isolate, auth_client):
-    """整改 P2-2：ENABLE_AUTH=true 时 /metrics 需凭证，/health 始终放行。"""
+async def test_p2_2_metrics_open_when_auth_enabled(isolate, auth_client):
+    """整改 P2-2（已随可观测性变更更新）：ENABLE_AUTH=true 时 /metrics 无凭证直通，
+    /health 始终放行；POST /mcp 无凭证仍 401（保护不回归）。"""
     async with httpx.AsyncClient(transport=auth_client, base_url="http://t") as client:
         assert (await client.get("/health")).status_code == 200
-        assert (await client.get("/metrics")).status_code == 401
+        # /metrics 为 Prometheus 拉取端点：无 Bearer 直通 200
+        assert (await client.get("/metrics")).status_code == 200
         r = await client.get(
             "/metrics", headers={"Authorization": "Bearer ak-batch4-test-001"}
         )
         assert r.status_code == 200
+        # /mcp 保护不回归：无凭证仍 401/B0002
+        r_mcp = await client.post(
+            "/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        )
+        assert r_mcp.status_code == 401
+        assert "B0002" in r_mcp.text
 
 
 async def test_p2_4_auth_rejection_audited(isolate, auth_client):
@@ -628,12 +633,10 @@ async def test_p2_4_auth_rejection_audited(isolate, auth_client):
         assert entry_list["tool"] == "list_tools"
         assert entry_list["trace_id"] == "trace-authz-2"
 
-        # /metrics 拒绝记 metrics
+        # /metrics 已直通：不产生鉴权拒绝审计
         audit.reset_call_log()
         await client.get("/metrics", headers={"X-Trace-Id": "trace-authz-3"})
-        entry_metrics = audit.get_call_log()[-1]
-        assert entry_metrics["tool"] == "metrics"
-        assert entry_metrics["trace_id"] == "trace-authz-3"
+        assert audit.get_call_log() == []
 
 
 # 10 个线网工具的最小合法入参（data_platform/call_qc 的 session_id 是业务参数，
@@ -756,5 +759,12 @@ async def test_6_2_real_app_disabled_does_not_block_mcp(isolate):
             metrics = await client.get("/metrics")
             assert metrics.status_code == 200
             assert metrics.headers["content-type"].startswith("text/plain")
-            assert "mcp_gateway_requests_total" in metrics.text
+            # prometheus-client 0.23 exposition 按字母序规范化标签输出
+            # （method,path,status,svc），故断言与书写顺序无关：
+            # 校验 http_requests_total 样本携带本服务 svc 标签。
+            assert any(
+                line.startswith("http_requests_total{")
+                and 'svc="mcp-gateway"' in line
+                for line in metrics.text.splitlines()
+            )
             assert "code" not in metrics.text[:200]  # 未包统一信封

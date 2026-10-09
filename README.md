@@ -200,12 +200,12 @@ ai_collection/
 
 | # | 项 | 工作量（人天） | 状态 | 说明 |
 |---|---|---|---|---|
-| 1 | MCP 网关独立容器 | 5~8 | 🔴 ❌ | 项目硬性约束要求生产独立容器；当前 complaint-service 是进程内桥（伪 MCP 网关）；待 call-service 真成 MCP Server 再做 |
-| 2 | CI 全服务覆盖 | 1 | 🔴 ❌ | 当前 CI 只跑 complaint-service；common/rag/qc/data-platform 改动无门禁 |
-| 3 | 密钥管理（vault/sops 二选一） | 2 | 🔴 ❌ | .env 明文存 LLM API Key/PG 密码/JWT secret；对外暴露前必须移出 |
-| 4 | 数据库备份脚本（PG/Milvus/ES） | 1 | 🔴 ❌ | 无备份=数据丢了无法恢复 |
-| 5 | 服务 /metrics 端点 + Prometheus 抓取配置 + Grafana dashboard | 2~3 | 🔴 ❌ | 当前只有网关有 metrics，业务服务自身不暴露；Prometheus 无抓取配置；无 Grafana |
-| 6 | LLM 用量可观测（llm-usage-observability） | 1~2 | 🔴 ❌ | invoke_llm 内部无结构化 per-call 日志；先看清用量再调阈值 |
+| 1 | MCP 网关独立容器 | 5~8 | 🟢 ✅ | mcp-gateway-standalone change 已交付：独立服务 services/mcp-gateway（容器）接入 compose，Agent 工具调用统一经网关 MCP 协议路由 |
+| 2 | CI 全服务覆盖 | 1 | 🟢 ✅ | infra-production-readiness change 已交付：ci.yml 重构为 matrix（5 服务 job + common/脚手架 job，共 6 job 并行）；强制拦截合并受 GitHub Free 私有仓无 branch protection 限制未启用（change 1.8/1.9 搁置） |
+| 3 | 密钥管理（vault/sops 二选一） | 2 | 🟢 ✅ | infra-production-readiness change 已交付 sops + age：.sops.yaml 加密规则、.env 加密为入库的 .env.enc、明文不再入仓、经 sops exec-env 注入启动 |
+| 4 | 数据库备份脚本（PG/Milvus/ES） | 1 | 🟢 ✅ | infra-production-readiness change 已交付：scripts/backup/ 覆盖 PG/Milvus/ES 备份与恢复，backup_all.sh 编排、非空校验、保留 7 天 |
+| 5 | 服务 /metrics 端点 + Prometheus 抓取配置 + Grafana dashboard | 2~3 | 🟢 ✅ | observability-metrics-llm-usage change 已交付：8 服务统一 /metrics（svc 标签）+ Prometheus 9 job 抓取 + Grafana 内置 dashboard |
+| 6 | LLM 用量可观测（llm-usage-observability） | 1~2 | 🟢 ✅ | observability-metrics-llm-usage change 已交付：llm_call 结构化日志 + llm_* 指标族（限流/熔断/fallback） |
 
 #### 🟡 P1：强烈建议（不做能跑但要付出运维代价）
 
@@ -247,4 +247,4 @@ ai_collection/
 | M3 投诉研判 | 🟢 ✅ | complaint-service 深做 + 事件闭环 |
 | M3.5 投诉 V2 | 🟢 ✅ | real-llm + 事件化 + 图状态机修复 |
 | M4 复盘 | 🔴 ❌ | review-service 脚手架 |
-| 生产上线 | 🔴 ❌ | P0 六项未完成 |
+| 生产上线 | 🟢 ✅ | P0 六项硬门槛已清零（2026-10-10 infra-production-readiness + observability-metrics-llm-usage 两 change 归档） |

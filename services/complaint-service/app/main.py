@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from common.config.logging import setup_logging
 from common.errors.handlers import register_exception_handlers
+from common.observability.metrics import mount_metrics
 from common.trace.middleware import TraceMiddleware
 from app.api.health import router as health_router
 from app.api.routes.complaints import router as complaints_router
@@ -422,6 +423,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(TraceMiddleware)
+# 统一 Prometheus 指标：必须在所有 add_middleware 之后调用，
+# 确保 MetricsMiddleware 处于最外层（Metrics→Trace→CORS→路由）；
+# 同时注册无需鉴权的 GET /metrics（原生 exposition，不包统一信封）。
+mount_metrics(app, service_name="complaint-service")
 register_exception_handlers(app)
 
 # 健康检查：同时提供 /health 与 /api/v1/health

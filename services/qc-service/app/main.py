@@ -19,6 +19,7 @@ from app.routers.review import router as review_router
 from app.routers.rules import router as rules_router
 from common.config.logging import setup_logging
 from common.errors.handlers import register_exception_handlers
+from common.observability.metrics import mount_metrics
 from common.trace.middleware import TraceMiddleware
 
 setup_logging()
@@ -101,6 +102,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(TraceMiddleware)
+# 统一 Prometheus 指标：必须在所有 add_middleware 之后调用，
+# 确保 MetricsMiddleware 处于最外层（Metrics→Trace→CORS→路由）；
+# 同时注册无需鉴权的 GET /metrics（原生 exposition，不包统一信封）。
+mount_metrics(app, service_name="qc-service")
 register_exception_handlers(app)
 register_qc_exception_handlers(app)
 register_auth_handlers(app)
