@@ -8,7 +8,7 @@ import pytest
 
 from app.core.config import qc_settings
 from app.integrations.rag_client import RagClient
-from app.seeds.qc_rules_v1 import V1_SEED
+from app.seeds.qc_rules_v1 import PENALTY_V1, V1_SEED
 from app.services.ac_filter import ACFilter, SensitiveWord, WordHit
 from app.services.alert_service import AlertService
 from app.services.dedup_ac import DedupACWindow
@@ -107,8 +107,9 @@ class TestAssertion6:
             ),
         ]
         kept = DedupACWindow(30000).apply(hits)
-        scored = ScoringService().score(kept)
+        scored = ScoringService().score(kept, PENALTY_V1)
         assert len([h for h in kept if h.score_eligible]) == 1
+        assert scored.deduction_total == 2
         assert scored.compliance_score == 98
 
 
@@ -117,11 +118,11 @@ class TestAssertion19:
         ac = _hit(word="威胁", source="ac", severity="high", redline_tag="threat", word_id="w-threat", normalized_word="威胁")
         r11 = _hit(word="R11", source="rule", severity="medium", redline_tag="threat", rule_id="R11")
         merged = merge_hits([ac], [r11], [])
-        scored = ScoringService().score(merged)
+        scored = ScoringService().score(merged, PENALTY_V1)
         alerts = AlertService().on_high_risk(merged)
         assert len(merged) == 1
+        assert scored.deduction_total == 20
         assert scored.compliance_score == 80
-        assert scored.penalty_total == 20
         assert len(alerts) == 1
         assert alerts[0]["level"] == "high"
 
@@ -164,9 +165,9 @@ class TestAssertion22:
             redline_tag="threat",
             score_eligible=True,
         )
-        scored = ScoringService().score([r05])
+        scored = ScoringService().score([r05], PENALTY_V1)
         alerts = AlertService().on_high_risk([r05])
-        assert scored.compliance_score == 98
+        assert scored.deduction_total == 2
         assert scored.qc_result == "pending_review"
         assert scored.qc_status == "PENDING_REVIEW"
         assert alerts == []
@@ -262,5 +263,6 @@ class TestUserNotScored:
         for hits in (suicide, complaint, stop):
             assert hits
             assert all(hit.score_eligible is False for hit in hits)
-        scored = ScoringService().score([*suicide, *complaint, *stop])
+        scored = ScoringService().score([*suicide, *complaint, *stop], PENALTY_V1)
+        assert scored.deduction_total == 0
         assert scored.compliance_score == 100

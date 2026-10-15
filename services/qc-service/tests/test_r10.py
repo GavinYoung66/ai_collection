@@ -6,6 +6,7 @@ from app.services.alert_service import AlertService
 from app.services.merge_hits import merge_hits
 from app.services.r10 import evaluate_r10, PostMergeR10
 from app.services.scoring_service import ScoringService
+from app.seeds.qc_rules_v1 import PENALTY_V1
 
 
 def _agent_threat() -> WordHit:
@@ -28,7 +29,7 @@ class TestPostMergeR10:
         assert skipped is True
         assert hit is None
         assert not any(item.redline_tag == "unverified" for item in merged)
-        scored = ScoringService().score(merged)
+        scored = ScoringService().score(merged, PENALTY_V1)
         assert scored.compliance_score == 80
         alerts = AlertService().on_high_risk(merged)
         assert len(alerts) == 1

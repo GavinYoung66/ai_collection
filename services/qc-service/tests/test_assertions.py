@@ -20,6 +20,7 @@ from app.services.ac_filter import WordHit
 from app.services.dedup_ac import DedupACWindow
 from app.services.llm_reviewer import LLMReviewer
 from app.services.scoring_service import ScoringService
+from app.seeds.qc_rules_v1 import PENALTY_V1
 from common.db.session import get_session
 from common.security.mask import mask_text
 from common.security.rbac import create_token
@@ -246,7 +247,7 @@ class TestAssertions1to14:
         assert data["compliance_score"] <= 60
         assert data["compliance_score"] != 80
         assert data["risk"] == "high"
-        assert data["grade"] == "SERIOUS"
+        assert data["grade"] is None
         agent_high = [
             hit
             for hit in data["hits"]
@@ -266,7 +267,7 @@ class TestAssertions1to14:
         data = body["data"]
         assert data["compliance_score"] == 80
         assert data["risk"] == "high"
-        assert data["grade"] == "PASS"
+        assert data["grade"] is None
         rows = _qc_records(db)
         assert len(rows) == 1
         assert rows[0].high_count == 1
@@ -353,7 +354,7 @@ class TestAssertions1to14:
             ),
         ]
         kept = DedupACWindow(30000).apply(hits)
-        scored = ScoringService().score(kept)
+        scored = ScoringService().score(kept, PENALTY_V1)
         assert len([hit for hit in kept if hit.score_eligible]) == 1
         assert scored.compliance_score == 98
 

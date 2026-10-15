@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from app.core.config import qc_settings
 from app.repositories.job_store import QcJobStore, job_key
+from app.seeds.qc_rules_v1 import PENALTY_V1
 from app.services.ac_filter import WordHit
 from app.services.llm_reviewer import LLMReviewer
 from app.services.offline_qc_service import OfflineQcService, suspected_eligible
@@ -49,7 +50,7 @@ async def _empty_llm(_messages):
 
 
 class TestScoringIndependent:
-    def test_single_agent_high_is_80_high_pass_pending_review(self):
+    def test_single_agent_high_deducts_20_high_pending_review(self):
         hit = WordHit(
             speaker="agent",
             word="R01",
@@ -59,20 +60,25 @@ class TestScoringIndependent:
             rule_id="R01",
             redline_tag="privacy_leak",
         )
-        scored = ScoringService().score([hit])
+        scored = ScoringService().score([hit], PENALTY_V1)
+        assert scored.deduction_total == 20
         assert scored.compliance_score == 80
         assert scored.risk_level == "high"
-        assert scored.grade == "PASS"
         assert scored.qc_result == "pending_review"
         assert scored.qc_status == "PENDING_REVIEW"
         http = ScoringService().to_http(scored)
         event = ScoringService().to_event(scored)
+        assert http["deduction_total"] == 20
         assert http["compliance_score"] == 80
+        assert http["grade"] is None
         assert http["risk"] == "high"
         assert "risk_level" not in http
+        assert event["deduction"] == 20
         assert event["score"] == 80
+        assert event["grade"] is None
         assert event["risk"] == "high"
         assert "compliance_score" not in event
+        assert "deduction_total" not in event
 
     def test_risk_not_from_score_bands(self):
         med = WordHit(
@@ -83,11 +89,10 @@ class TestScoringIndependent:
             source="rule",
             rule_id="R11",
         )
-        scored = ScoringService().score([med, med, med])
-        assert scored.penalty_total == 24
+        scored = ScoringService().score([med, med, med], PENALTY_V1)
+        assert scored.deduction_total == 24
         assert scored.compliance_score == 76
         assert scored.risk_level == "medium"
-        assert scored.grade == "WARNING"
         assert scored.qc_result == "pending_review"
         assert scored.qc_status == "PENDING_REVIEW"
 
@@ -102,7 +107,8 @@ class TestScoringIndependent:
             redline_tag="threat",
         )
         assert suspected_eligible([r05]) is False
-        scored = ScoringService().score([r05])
+        scored = ScoringService().score([r05], PENALTY_V1)
+        assert scored.deduction_total == 2
         assert scored.compliance_score == 98
         assert scored.risk_level == "low"
         assert scored.qc_result == "pending_review"
@@ -110,20 +116,23 @@ class TestScoringIndependent:
 
 
 class TestOfflineQcService:
-    async def test_pipeline_single_high_80_high_pass(self):
+    async def test_pipeline_single_high_deducts_20_high(self):
         svc = OfflineQcService(llm=LLMReviewer(invoke=_empty_llm))
         result = await svc.run(_ready_session())
         assert result.code == "0"
         assert result.inserted is False
+        assert result.deduction_total == 20
         assert result.compliance_score == 80
         assert result.risk_level == "high"
-        assert result.grade == "PASS"
+        assert result.grade is None
         assert result.qc_result == "pending_review"
         assert result.qc_status == "PENDING_REVIEW"
         assert "R10" in result.skipped_rules
         assert not any(hit.redline_tag == "unverified" for hit in result.hits)
         assert not any(hit.rule_id == "R10" for hit in result.hits)
         assert result.to_http()["risk"] == "high"
+        assert result.to_http()["deduction_total"] == 20
+        assert result.to_event()["deduction"] == 20
         assert result.to_event()["score"] == 80
 
     async def test_no_agent_violation_is_compliant_done(self):
@@ -139,9 +148,10 @@ class TestOfflineQcService:
         assert result.code == "0"
         assert result.qc_result == "compliant"
         assert result.qc_status == "DONE"
+        assert result.deduction_total == 0
         assert result.compliance_score == 100
         assert result.risk_level == "low"
-        assert result.grade == "EXCELLENT"
+        assert result.grade is None
         assert result.alerts == []
         assert result.suspected_eligible is False
         assert not any(hit.speaker == "agent" and hit.score_eligible for hit in result.hits)

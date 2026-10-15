@@ -53,9 +53,11 @@ class FakeRecordsRepo:
 
 
 def _record(**kwargs) -> QcRecord:
+    score = kwargs.get("compliance_score", 80)
     row = QcRecord(
         session_id=kwargs.get("session_id", "sess_ok"),
-        compliance_score=kwargs.get("compliance_score", 80),
+        compliance_score=score,
+        deduction_total=kwargs.get("deduction_total", 100 - score),
         risk_level=kwargs.get("risk_level", "high"),
         qc_result=kwargs.get("qc_result", "pending_review"),
         qc_status=kwargs.get("qc_status", "PENDING_REVIEW"),
@@ -117,8 +119,23 @@ class TestRecordsList:
         assert item["risk"] == "high"
         assert "risk_level" not in item
         assert "score" not in item
+        assert item["deduction_total"] == 20
         assert item["compliance_score"] == 80
+        assert item["grade"] is None
         assert "skipped_rules" not in item
+
+    def test_grade_query_param_not_filtering(self):
+        """4.3：grade 过滤参数退役（响应字段保留恒 null，不再作为过滤维度）。"""
+        repo = FakeRecordsRepo()
+        repo.records["sess_ok"] = _record(grade="WARNING")
+        client = _client(repo)
+        resp = client.get("/api/v1/qc/records", params={"grade": "WARNING"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["code"] == "0"
+        assert body["data"]["total"] == 1
+        assert len(body["data"]["items"]) == 1
+        assert body["data"]["items"][0]["grade"] is None
 
 
 class TestRecordsStats:
@@ -178,6 +195,9 @@ class TestRecordsDetail:
             source="rule",
             word=None,
             kb_snippet=None,
+            points=20,
+            policy_clause="X1.2",
+            policy_text="不得冒充身份",
         )
         repo.records[row.session_id] = row
         repo.violations[str(row.id)] = [viol]
@@ -189,7 +209,9 @@ class TestRecordsDetail:
         assert data["qc_record_id"] == str(row.id)
         assert data["skipped_rules"] == ["R14"]
         assert data["risk"] == "high"
+        assert data["deduction_total"] == 20
         assert data["compliance_score"] == 80
+        assert data["grade"] is None
         assert "score" not in data
         assert "risk_level" not in data
         evidence = data["hits"][0]["evidence_text"]
@@ -198,6 +220,9 @@ class TestRecordsDetail:
         assert data["hits"][0]["source"] == "rule"
         assert "word" in data["hits"][0]
         assert "kb_snippet" in data["hits"][0]
+        assert data["hits"][0]["points"] == 20
+        assert data["hits"][0]["policy_clause"] == "X1.2"
+        assert data["hits"][0]["policy_text"] == "不得冒充身份"
 
     def test_detail_empty_skipped_rules_key_present(self):
         repo = FakeRecordsRepo()

@@ -241,7 +241,9 @@ def upgrade() -> None:
 
     rules_sql = _sql_json(V1_SEED["rules"])
     penalty_sql = _sql_json(V1_SEED["penalty"])
-    grade_sql = _sql_json(V1_SEED["grade_thresholds"])
+    # 0016 起 V1_SEED 移除 grade_thresholds（grade 退役）；此处冻结 0011 原值，
+    # 保证全新库回放 0011 结果与历史一致，不随种子演进漂移。
+    grade_sql = _sql_json({"EXCELLENT": 90, "PASS": 80, "WARNING": 60, "SERIOUS": 0})
     desc_sql = str(V1_SEED["description"]).replace("'", "''")
     op.execute(
         f"""

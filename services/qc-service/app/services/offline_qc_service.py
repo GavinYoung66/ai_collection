@@ -16,7 +16,8 @@ from app.integrations.qc_session import CaseSnapshot, QCSession
 from app.integrations.rag_client import RagClient
 from app.repositories.demo_store import DemoTraceStore
 from app.repositories.job_store import QcJobStore
-from app.seeds.qc_rules_v1 import R14_KEYWORDS
+from app.repositories.rule_repo import RulePackSnapshot
+from app.seeds.qc_rules_v1 import DEDUCTION_POLICY_V1, PENALTY_V1, R14_KEYWORDS
 from app.services.ac_filter import ACFilter, WordHit, get_shared_ac
 from app.services.demo_trace import (
     call_qc_skip_event,
@@ -109,6 +110,7 @@ def stop_call_eligible(hits: Sequence[WordHit]) -> bool:
 class QcRunResult:
     code: str = CODE_OK
     message: str = "ok"
+    deduction_total: int | None = None
     compliance_score: int | None = None
     risk_level: str | None = None
     grade: str | None = None
@@ -127,10 +129,14 @@ class QcRunResult:
     case_id: str | None = None
     call_id: str | None = None
     started_monotonic: float | None = None
+    # 本次运行实际生效的规则包快照（打分与落库同源）；不对外序列化。
+    penalty_snapshot: dict[str, int] | None = None
+    deduction_policy_snapshot: dict[str, Any] | None = None
 
     def to_http(self) -> dict[str, Any]:
-        """HTTP records：compliance_score + risk。不改库列名。"""
+        """HTTP records：deduction_total 主口径 + compliance_score 派生 + risk；grade 恒 null。不改库列名。"""
         return {
+            "deduction_total": self.deduction_total,
             "compliance_score": self.compliance_score,
             "risk": self.risk_level,
             "grade": self.grade,
@@ -139,19 +145,24 @@ class QcRunResult:
         }
 
     def to_event(self) -> dict[str, Any]:
-        """映射 score←compliance_score、risk←risk_level、grade，供落库后 qc.check.completed 使用；本方法本身不 redis.publish。"""
+        """事件键：deduction←deduction_total、score←compliance_score 派生、risk←risk_level、grade 恒 null。
+
+        供落库后 qc.check.completed 使用；本方法本身不 redis.publish。
+        """
         return {
+            "deduction": self.deduction_total,
             "score": self.compliance_score,
             "risk": self.risk_level,
             "grade": self.grade,
         }
 
     def to_envelope(self) -> dict[str, Any]:
-        """HTTP 200 信封：A2011 时 data 仍含 AC+规则分，不得 data=null。"""
+        """HTTP 200 信封：A2011 时 data 仍含 AC+规则结果，不得 data=null。"""
         return {
             "code": self.code,
             "message": self.message,
             "data": {
+                "deduction_total": self.deduction_total,
                 "compliance_score": self.compliance_score,
                 "risk": self.risk_level,
                 "grade": self.grade,
@@ -204,6 +215,7 @@ class OfflineQcService:
         call_records_exists: bool = True,
         text_retry_count: int = 0,
         persist: bool = False,
+        rule_pack: RulePackSnapshot | None = None,
     ) -> QcRunResult:
         del persist
         qc = _as_session(session)
@@ -246,7 +258,7 @@ class OfflineQcService:
             if self.job_store is not None:
                 await self.job_store.set_running(qc.session_id)
             emit_check_started(session_id=qc.session_id, call_id=qc.call_id)
-            result = await self._pipeline(qc)
+            result = await self._pipeline(qc, rule_pack=rule_pack)
         except Exception:
             return QcRunResult(
                 code=ErrorCode.A2001.value,
@@ -287,7 +299,13 @@ class OfflineQcService:
             ),
         )
 
-    async def _pipeline(self, qc: QCSession) -> QcRunResult:
+    async def _pipeline(self, qc: QCSession, *, rule_pack: RulePackSnapshot | None = None) -> QcRunResult:
+        # penalty/deduction_policy 单一事实源 = active 规则包快照；无 DB 装配时回退 v1.0 种子
+        #（种子即默认 active 包内容，双源等价），打分与落库共用同一快照。
+        penalty: dict[str, int] = dict(rule_pack.penalty) if rule_pack is not None else dict(PENALTY_V1)
+        policy: dict[str, Any] = (
+            dict(rule_pack.deduction_policy) if rule_pack is not None else DEDUCTION_POLICY_V1
+        )
         await safe_append(self.trace_store, qc.session_id, call_qc_skip_event())
         t0 = time.perf_counter()
         started = utc_now()
@@ -365,13 +383,13 @@ class OfflineQcService:
             _stamp_kb_snippet(merged, snippet)
         t0 = time.perf_counter()
         started = utc_now()
-        scored = self.scoring.score(merged)
+        scored = self.scoring.score(merged, penalty)
         await self._trace(
             qc.session_id,
             category="score",
             name="scoring",
             status="ok",
-            summary=f"compliance_score={scored.compliance_score} qc_status={scored.qc_status}",
+            summary=f"deduction_total={scored.deduction_total} qc_status={scored.qc_status}",
             duration_ms=elapsed_ms(t0),
             started_at=started,
         )
@@ -381,9 +399,10 @@ class OfflineQcService:
         return QcRunResult(
             code=code,
             message=message,
+            deduction_total=scored.deduction_total,
             compliance_score=scored.compliance_score,
             risk_level=scored.risk_level,
-            grade=scored.grade,
+            grade=None,
             qc_result=scored.qc_result,
             qc_status=scored.qc_status,
             hits=merged,
@@ -396,6 +415,8 @@ class OfflineQcService:
             session_id=qc.session_id,
             case_id=qc.case_id,
             call_id=qc.call_id,
+            penalty_snapshot=penalty,
+            deduction_policy_snapshot=policy,
         )
 
     async def _maybe_kb_search(self, qc: QCSession, ac_hits: Sequence[WordHit]) -> str | None:

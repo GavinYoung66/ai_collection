@@ -48,6 +48,7 @@ class FakeReviewRepo:
             qc_record_id=kwargs["qc_record_id"],
             action=kwargs["action"],
             revised_score=kwargs.get("revised_score"),
+            revised_deduction=kwargs.get("revised_deduction"),
             reason=kwargs.get("reason"),
             reviewer_id=kwargs.get("reviewer_id"),
         )
@@ -87,33 +88,68 @@ class TestReviewHttp:
         assert body["data"]["items"] == []
         assert body["data"]["total"] == 0
 
-    def test_correct_sets_reviewed_and_score(self, _mock_event_bus):
+    def test_dismiss_zeroes_deduction_and_marks_compliant(self):
+        """DISMISS：扣分归零、合规、REVIEWED，risk 不变。"""
         repo = FakeReviewRepo()
-        redis = MemoryRedis(db=3)
-        row = _record(compliance_score=80, qc_status="PENDING_REVIEW")
+        row = _record(compliance_score=64, qc_status="PENDING_REVIEW")
         repo.add(row)
-        client = _client(repo, redis)
+        assert row.deduction_total == 36
+        client = _client(repo)
         resp = client.post(
             f"/api/v1/qc/reviews/{row.id}",
-            headers=_token("SUPV"),
-            json={"action": "CORRECT", "revised_score": 72, "reason": "改分"},
+            headers=_token("QC"),
+            json={"action": "DISMISS", "reason": "误报"},
         )
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data["qc_status"] == "REVIEWED"
-        assert data["compliance_score"] == 72
+        assert data["deduction_total"] == 0
+        assert data["compliance_score"] == 100
+        assert data["qc_result"] == "compliant"
+        assert data["grade"] is None
+        assert data["risk"] == "high"  # D6：复核不改 risk
+        assert row.deduction_total == 0
+        assert row.compliance_score == 100
+        assert row.qc_result == "compliant"
+        assert repo.reviews[0].revised_deduction is None
+        assert repo.reviews[0].revised_score is None
+
+    def test_correct_sets_reviewed_and_deduction(self, _mock_event_bus):
+        repo = FakeReviewRepo()
+        redis = MemoryRedis(db=3)
+        row = _record(compliance_score=80, qc_status="PENDING_REVIEW")
+        repo.add(row)
+        assert row.deduction_total == 20
+        client = _client(repo, redis)
+        resp = client.post(
+            f"/api/v1/qc/reviews/{row.id}",
+            headers=_token("SUPV"),
+            json={"action": "CORRECT", "revised_deduction": 72, "reason": "改分"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["qc_status"] == "REVIEWED"
+        assert data["deduction_total"] == 72
+        assert data["compliance_score"] == 28
+        # G2 一致性：compliance_score == max(0, 100 - deduction_total)
+        assert data["compliance_score"] == max(0, 100 - data["deduction_total"])
         assert data["qc_result"] == "violation"
-        assert data["grade"] == "WARNING"
+        assert data["grade"] is None
         assert "score" not in data
-        assert data["risk"] == "high"
+        assert data["risk"] == "high"  # D6：复核不改 risk
         assert row.qc_status == "REVIEWED"
-        assert row.compliance_score == 72
+        assert row.deduction_total == 72
+        assert row.compliance_score == 28
+        assert row.risk_level == "high"
         assert repo.reviews and repo.reviews[0].action == "CORRECT"
+        assert repo.reviews[0].revised_deduction == 72
+        assert repo.reviews[0].revised_score == 28
         # 业务事件经 EventBus（mock）发布
         channels = [c.args[0] for c in _mock_event_bus.publish.await_args_list]
         assert CHANNEL_REVIEW_DONE in channels
 
-    def test_correct_100_sets_reviewed_and_score(self):
+    def test_correct_legacy_revised_score_keeps_risk(self):
+        """revised_score 灰度回退：等价换算为扣分，且 risk 仍不变。"""
         repo = FakeReviewRepo()
         redis = MemoryRedis(db=3)
         row = _record(compliance_score=80, qc_status="PENDING_REVIEW")
@@ -127,13 +163,15 @@ class TestReviewHttp:
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data["qc_status"] == "REVIEWED"
+        assert data["deduction_total"] == 0
         assert data["compliance_score"] == 100
         assert data["qc_result"] == "compliant"
-        assert data["grade"] == "EXCELLENT"
-        assert data["risk"] == "low"
-        assert row.qc_status == "REVIEWED"
+        assert data["grade"] is None
+        assert data["risk"] == "high"  # 旧实现会误降为 low，D6 不改 risk
+        assert row.deduction_total == 0
         assert row.compliance_score == 100
         assert row.qc_result == "compliant"
+        assert row.risk_level == "high"
 
     def test_confirm_does_not_change_score(self):
         repo = FakeReviewRepo()
@@ -148,13 +186,17 @@ class TestReviewHttp:
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data["qc_status"] == "REVIEWED"
+        assert data["deduction_total"] == 36
         assert data["compliance_score"] == 64
         assert data["qc_result"] == "violation"
-        assert data["grade"] == "WARNING"
+        assert data["grade"] is None
+        assert data["risk"] == "high"
         assert row.compliance_score == 64
+        assert row.deduction_total == 36
         assert row.qc_result == "violation"
         assert repo.reviews and repo.reviews[0].action == "CONFIRM"
         assert repo.reviews[0].revised_score is None
+        assert repo.reviews[0].revised_deduction is None
 
     def test_reviewed_again_is_a2007(self):
         repo = FakeReviewRepo()
@@ -191,6 +233,13 @@ class TestReviewHttp:
         )
         assert high.status_code == 400
         assert high.json()["code"] == "A2008"
+        negative = client.post(
+            f"/api/v1/qc/reviews/{row.id}",
+            headers=_token("QC"),
+            json={"action": "CORRECT", "revised_deduction": -1},
+        )
+        assert negative.status_code == 400
+        assert negative.json()["code"] == "A2008"
         missing = client.post(
             f"/api/v1/qc/reviews/{row.id}",
             headers=_token("QC"),
@@ -199,6 +248,7 @@ class TestReviewHttp:
         assert missing.status_code == 400
         assert missing.json()["code"] == "A2008"
         assert row.qc_status == "PENDING_REVIEW"
+        assert row.deduction_total == 20
 
     def test_sample_type_mappings_and_review_done(self, _mock_event_bus):
         redis = MemoryRedis(db=3)

@@ -10,7 +10,7 @@ from app.deps import get_job_store, get_rule_repo
 from app.main import app
 from app.models.qc import QcRule
 from app.repositories.rule_repo import RuleRepo
-from app.seeds.qc_rules_v1 import GRADE_THRESHOLDS_V1, PENALTY_V1
+from app.seeds.qc_rules_v1 import DEDUCTION_POLICY_V1, PENALTY_V1
 from common.security.rbac import create_token
 from tests.test_job_store import MemoryRedis
 from app.repositories.job_store import QcJobStore
@@ -20,14 +20,24 @@ def _token(role: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {create_token({'sub': str(uuid4()), 'role': role})}"}
 
 
-def _rule(version: str, status: str, *, penalty=None, grades=None, window: int = 30000) -> QcRule:
+def _policy(*exclude: str) -> dict:
+    policy = {
+        f"R{i:02d}": {"clause_no": "t", "clause_text": "t"} for i in range(1, 16)
+    }
+    policy["__ac_default__"] = {"by_redline_tag": {}, "by_severity": {}}
+    for rid in exclude:
+        policy.pop(rid, None)
+    return policy
+
+
+def _rule(version: str, status: str, *, penalty=None, policy=None, window: int = 30000, rules=None) -> QcRule:
     row = QcRule(
         version=version,
         status=status,
-        rules=[],
+        rules=rules if rules is not None else [],
         penalty=penalty if penalty is not None else dict(PENALTY_V1),
         same_word_window_ms=window,
-        grade_thresholds=grades if grades is not None else dict(GRADE_THRESHOLDS_V1),
+        deduction_policy=policy if policy is not None else _policy(),
     )
     row.id = uuid4()
     row.is_delete = "0"
@@ -102,6 +112,7 @@ class TestRulesHttp:
         assert data["penalty"]["high"] == 20
         assert data["same_word_window_ms"] == 30000
         assert "grade_thresholds" in data
+        assert "deduction_policy" in data
         assert "effective_at" in data
 
     def test_get_active_missing_is_a2009_http_200(self):
@@ -124,6 +135,25 @@ class TestRulesHttp:
         assert missing.status_code == 200
         assert missing.json()["code"] == "A2009"
         assert v1.status == "active"
+
+    def test_apply_rejects_package_missing_deduction_policy(self):
+        v1 = _rule("v1.0", "active")
+        bad_policy = {k: v for k, v in DEDUCTION_POLICY_V1.items() if k != "R07"}
+        bad = _rule(
+            "v9.8",
+            "draft",
+            policy=bad_policy,
+            rules=[{"rule_id": "R07", "type": "keyword", "enabled": True, "severity": "medium", "params": {}}],
+        )
+        repo = FakeRuleRepo([v1, bad])
+        client = _client(repo)
+        resp = client.post("/api/v1/qc/rules/apply", headers=_token("ADMIN"), json={"version": "v9.8"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["code"] == "A2009"
+        assert "R07" in body["message"]
+        assert v1.status == "active"
+        assert bad.status == "draft"
 
     def test_commit_failure_is_a2010_and_does_not_switch(self):
         v1 = _rule("v1.0", "active")

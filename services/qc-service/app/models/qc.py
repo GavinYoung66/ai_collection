@@ -44,6 +44,7 @@ class QcRecord(Base, PublicFieldsMixin):
     __tablename__ = "qc_records"
     __table_args__ = (
         CheckConstraint("compliance_score BETWEEN 0 AND 100", name="qc_records_compliance_score_check"),
+        CheckConstraint("deduction_total >= 0", name="qc_records_deduction_total_check"),
         CheckConstraint("risk_level IN ('low','medium','high')", name="qc_records_risk_level_check"),
         CheckConstraint(
             "qc_result IN ('compliant','violation','pending_review')",
@@ -79,6 +80,13 @@ class QcRecord(Base, PublicFieldsMixin):
     case_id = Column(UUID(as_uuid=True), ForeignKey("cases.id", ondelete="SET NULL"), nullable=True)
     agent_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     compliance_score = Column(Integer, nullable=False)
+    deduction_total = Column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+        comment="扣分合计（主口径）；compliance_score 为派生兼容列",
+    )
     risk_level = Column(String(10), nullable=False)
     qc_result = Column(String(20), nullable=False)
     grade = Column(String(20), nullable=True)
@@ -112,6 +120,7 @@ class QcViolation(Base, PublicFieldsMixin):
     __tablename__ = "qc_violations"
     __table_args__ = (
         CheckConstraint("severity IN ('high','medium','low')", name="qc_violations_severity_check"),
+        CheckConstraint("points >= 0", name="qc_violations_points_check"),
         CheckConstraint(
             "redline_tag IS NULL OR redline_tag IN "
             "('threat','fake_identity','stop_call','fake_commit','legal_overstate',"
@@ -143,6 +152,15 @@ class QcViolation(Base, PublicFieldsMixin):
     source = Column(String(10), nullable=True, comment="命中来源 ac|rule|llm")
     word = Column(String(255), nullable=True, comment="AC 命中词")
     kb_snippet = Column(Text, nullable=True, comment="检索条款原文")
+    points = Column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+        comment="本条扣分（severity→penalty 推出）",
+    )
+    policy_clause = Column(String(100), nullable=True, comment="制度条款号（静态表填充）")
+    policy_text = Column(Text, nullable=True, comment="制度条款原文（静态表填充）")
     evidence_text = Column(Text, nullable=True)
     start_offset_ms = Column(Integer, nullable=True)
     end_offset_ms = Column(Integer, nullable=True)
@@ -187,6 +205,10 @@ class QcReview(Base, PublicFieldsMixin):
             "revised_score IS NULL OR (revised_score BETWEEN 0 AND 100)",
             name="qc_reviews_revised_score_check",
         ),
+        CheckConstraint(
+            "revised_deduction IS NULL OR revised_deduction >= 0",
+            name="qc_reviews_revised_deduction_check",
+        ),
         CheckConstraint("is_delete IN ('0','1')", name="qc_reviews_is_delete_check"),
         Index("idx_qc_reviews_qc_record_id", "qc_record_id"),
         {"comment": "人工复核动作"},
@@ -200,6 +222,7 @@ class QcReview(Base, PublicFieldsMixin):
     reviewer_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     action = Column(String(20), nullable=False)
     revised_score = Column(Integer, nullable=True)
+    revised_deduction = Column(Integer, nullable=True, comment="人工改判扣分；revised_score 派生")
     reason = Column(Text, nullable=True)
 
     record = relationship("QcRecord", back_populates="reviews")
@@ -220,6 +243,11 @@ class QcRule(Base, PublicFieldsMixin):
     penalty = Column(JSONB, nullable=True)
     same_word_window_ms = Column(Integer, nullable=True, default=30000, server_default="30000")
     grade_thresholds = Column(JSONB, nullable=True)
+    deduction_policy = Column(
+        JSONB,
+        nullable=True,
+        comment="rule_id→{clause_no,clause_text} 静态制度条款映射，含 __ac_default__ 兜底",
+    )
     effective_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     effective_at = Column(DateTime(timezone=True), nullable=True)
     description = Column(String(255), nullable=True)

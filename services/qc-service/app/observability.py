@@ -79,7 +79,11 @@ def emit_check_completed(
     grade: str | None,
     violation_count: int,
 ) -> dict[str, Any]:
-    """日志事件名 qc.check.completed；MUST NOT Redis PUBLISH 该频道。"""
+    """日志事件名 qc.check.completed；MUST NOT Redis PUBLISH 该频道。
+
+    妥协记录（qc-deduction-scoring 批次2）：`score` 键名保留现网结构不变，
+    值口径已改为扣分（deduction_total）；design 未对该 structlog 键另行约定。
+    """
     return emit(
         "qc.check.completed",
         session_id=session_id,

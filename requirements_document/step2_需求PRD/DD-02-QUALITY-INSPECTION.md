@@ -33,6 +33,7 @@
 | V1.15 | 2026-09-10 | Ellis Guo | 审阅 34：A2003（HTTP 200 + code=A2003）指向 step5/02：`code!=="0"` 一律业务失败 |
 | V1.16 | 2026-09-10 | Ellis Guo | 审阅 40：§15.3 `rag.words.stale` 补 version / last_success_load_at 时钟公式（60s/2h 不改） |
 | V1.17 | 2026-09-10 | Ellis Guo | 审阅 51/52：`/health` `degraded` 绑定已有字段；增「本基线不单独验收的边界」短清单 |
+| V1.18 | 2026-09-12 | Ellis Guo | **扣分口径切换 + grade 退役 + 规则包双字段**：① 主口径从 `compliance_score` 反转为 `deduction_total`（起始 0 累加扣，`compliance_score = max(0, 100 - deduction_total)` 一致性断言恒成立）；② `grade` 退役：HTTP/事件/库列恒 null，`grade` 语义由 `qc_status=PENDING_REVIEW` 承接；③ 规则包 `penalty` 从种子常量迁回 `qc_rules` 表 active 行（`pkey=qc_rules.id` 仍为 active 单一事实源）；④ `deduction_policy`：`rule_id → {clause_no, clause_text}` 静态制度条款映射 + `__ac_default__` 兜底节点；⑤ 复核语义修正：DISMISS→`deduction_total=0`+`qc_result=compliant`；CONFIRM→不变；CORRECT→`deduction_total=revised_deduction`，三动作 MUST NOT 改 `risk_level`；⑥ Hits 每行补 `points` / `policy_clause` / `policy_text`，纯 AC 无 `rule_id` 的 hit 由 `__ac_default__` 兜底填充；⑦ 事件 payload 新增 `deduction`（键 `deduction_total` 库列），`grade` 键保留但恒 null；⑧ 迁移 0016 加列 + 回填 + CHECK 约束；⑨ 前端「合规分」→「扣分」，移除 grade 列；⑩ 登记 D2 偏差遗留：qc_result 三值语义冻结（无高危应落 violation）留待后续收口，详见 §3.1 末尾 |
 
 ---
 
@@ -43,7 +44,7 @@ AI 录音质检系统是整套生态的**事后合规审计与打分守门员**�
 1. **离线全量质检**（FR-QC-001）：工作人员与客户通话结束后，且双向 ASR/对话全文已落库，qc 才开工。数据来自 DP `qc-source`（JOIN `call_records`+`dialog_turns`）或 replay/raw QCSession，不旁路监听通话、不吃实时 turn 流。
 2. **MVP 独立可测**（通话回放模拟器）：`POST /qc/replay/{session_id}` 走 DP `qc-source`，或 `POST /qc/replay/raw` 喂 QCSession；种子须先有 `call_records`+`dialog_turns`；无需启动 call-service。
 3. **三层违规检测**：复用 `common/guardrails` + AC 敏感词（threat/abuse/induce，**仅坐席侧扣分**）+ 业务规则引擎（R01–R15）+ LLM 语义复核（整通文本齐了再跑，无 3s 事中约束）。
-4. **100 分制打分**（FR-QC-003）：起始 100 分，高危 −20 / 中危 −8 / 低危 −2；AC 同词窗口见 §5.4.1；存在 **agent 侧**高危 → risk=high。
+4. **扣分制打分**（FR-QC-003，V1.18 主口径切换）：起始 0 扣分累加，高危 +20 / 中危 +8 / 低危 +2；active 规则包 `penalty` 字段为单一事实源；`deduction_policy` 提供每条扣分对应的静态制度条款（`rule_id → {clause_no, clause_text}` + `__ac_default__` 兜底）。派生 `compliance_score = max(0, 100 - deduction_total)`（一致性断言恒成立）。grade 退役：HTTP/事件/库列恒 null；「高危应人工复核」语义由 `qc_status=PENDING_REVIEW` 承接。AC 同词窗口见 §5.4.1；存在 **agent 侧**高危合并后 hit → risk=high。
 5. **风险等级分档**：≥90 优秀 / 80–89 合格 / 60–79 警告 / <60 严重不合格。
 6. **事后高危告警**（FR-QC-002）：质检完成后，**仅**合并后 `speaker=agent` 且 `severity=high` 才写 `qc_alerts` + `qc.alert.raised` + `XADD alert:stream`（主管列表/订阅，**不**推送到通话工作台）。user 行与 R05（low）不告警。
 7. **人工复核 P1**（FR-QC-005）：PENDING_REVIEW 列表 + 复核员确认/驳回/修正，人工结论写回。
@@ -148,6 +149,8 @@ Redis qc:job:{session_id}
 
 > **状态术语约定**：`WAIT_TEXT / RUNNING / DONE` 是 **Redis 任务态**（`qc:job:{session_id}`）；数据库列 `qc_status` 只落 `DONE / PENDING_REVIEW / REVIEWED / PARTIAL`，**不落** `WAIT_TEXT / FAILED`。正文「保持 WAIT_TEXT」= Redis 等待，此时 **没有** `qc_records` 行。重试耗尽才落 `PARTIAL`。
 
+> **D2 偏差遗留项（V1.18 登记）**：qc_result 三值语义冻结——DD-02 原 §5.4 定义「无 agent 高危时应落 `violation`」，现网实现为「`deduction_total>0` → `pending_review`、`deduction_total=0` → `compliant/DONE`」。改映射会连带 `idx_qc_records_pending_review` 索引、`ReviewRepo.list_pending` 查询与前端队列，爆炸半径超本次范围。**本期冻结现网行为**，后续单独立项收口。
+
 ---
 
 ## 4. 对外接口详细说明
@@ -179,13 +182,14 @@ step4/01 DDL 列名 **不**改成 HTTP/事件用词。读写映射：
 | 库列（`qc_records` / 权威） | HTTP JSON / Query | 事件 payload（§9.3 / step4/03） |
 | :--- | :--- | :--- |
 | `id` | `qc_record_id` | `qc_record_id` |
-| `compliance_score` | `compliance_score` | `score`（仅 `qc.check.completed`） |
+| `deduction_total`（**V1.18 主口径**） | `deduction_total` | `deduction`（仅 `qc.check.completed`） |
+| `compliance_score` | `compliance_score` | `score`（派生值 `max(0, 100 - deduction_total)`） |
 | `risk_level` | `risk`（含列表 Query `risk`） | `risk` |
 | `qc_result` | `qc_result` | **不**进 completed payload |
 | `qc_status` | `qc_status` | **不**进 completed payload |
-| `grade` | `grade` | `grade` |
+| `grade`（库列保留，HTTP/事件**恒 null**） | `grade: null` | `grade: null` |
 
-禁止把库列改名为 `risk` / `score`。禁止事件 `score` 填 `session_id` 或用 `risk_level` 当 JSON 键。
+禁止把库列改名为 `risk` / `score`。禁止事件 `score` 填 `session_id` 或用 `risk_level` 当 JSON 键。`grade` 键保留是为了 JSON 结构稳定，**永远传 null**，不承载任何语义。
 
 #### 4.0.2 公共 Header
 
@@ -201,7 +205,7 @@ step4/01 DDL 列名 **不**改成 HTTP/事件用词。读写映射：
 
 `hits[]` 为 **§5.4.1 MergeHits 之后** 的列表。三条入口的规则引擎输入一律是 **§5.2 QCSession**。
 
-Hit 对象：
+Hit 对象（**V1.18 补扣分与制度依据**）：
 
 ```json
 {
@@ -211,7 +215,11 @@ Hit 对象：
   "severity": "high",
   "redline_tag": "fake_identity",
   "speaker": "agent",
-  "evidence_text": "我是法院的"
+  "evidence_text": "我是法院的",
+  "score_eligible": true,
+  "points": 20,
+  "policy_clause": "§3.2 第 3 款",
+  "policy_text": "严禁冒充司法机关工作人员"
 }
 ```
 
@@ -224,17 +232,22 @@ Hit 对象：
 | redline_tag | string \| null | 枚举见 step5/03 §3.4 |
 | speaker | agent \| user | |
 | evidence_text | string | **已脱敏** |
+| score_eligible | bool | **V1.18 新增**：不计分 hit（user 行等）为 false |
+| points | int \| null | **V1.18 新增**：本 hit 扣分分值（= active penalty[severity]）；不计分时 null |
+| policy_clause | string \| null | **V1.18 新增**：制度条款号（来自 deduction_policy，纯 AC 由 `__ac_default__` 兜底） |
+| policy_text | string \| null | **V1.18 新增**：制度条款正文摘要（来自 deduction_policy） |
 
-跑批成功 `data`（replay / replay/raw 同步响应共用，下称 QcRunResult）：
+跑批成功 `data`（replay / replay/raw 同步响应共用，下称 QcRunResult，**V1.18 扣分口径**）：
 
 ```json
 {
   "qc_record_id": "8f1a2b3c-4d5e-6789-abcd-ef0123456789",
   "session_id": "sess_xxx",
   "case_id": "case_xxx",
+  "deduction_total": 20,
   "compliance_score": 80,
   "risk": "high",
-  "grade": "PASS",
+  "grade": null,
   "qc_result": "pending_review",
   "qc_status": "PENDING_REVIEW",
   "hits": [
@@ -245,7 +258,11 @@ Hit 对象：
       "severity": "high",
       "redline_tag": "fake_identity",
       "speaker": "agent",
-      "evidence_text": "我是法院的"
+      "evidence_text": "我是法院的",
+      "score_eligible": true,
+      "points": 20,
+      "policy_clause": "§3.2 第 3 款",
+      "policy_text": "严禁冒充司法机关工作人员"
     }
   ]
 }
@@ -687,7 +704,7 @@ Query：
 
 Query：`page`（默认 1）、`page_size`（默认 20，最大 100）。必须分页，禁止全表。
 
-成功 `data` 示例：
+成功 `data` 示例（**V1.18 扣分口径 + grade 退役**）：
 
 ```json
 {
@@ -696,9 +713,10 @@ Query：`page`（默认 1）、`page_size`（默认 20，最大 100）。必须�
       "qc_record_id": "8f1a2b3c-4d5e-6789-abcd-ef0123456789",
       "session_id": "sess_xxx",
       "case_id": "case_xxx",
+      "deduction_total": 20,
       "compliance_score": 80,
       "risk": "high",
-      "grade": "PASS",
+      "grade": null,
       "qc_result": "pending_review",
       "qc_status": "PENDING_REVIEW"
     }
@@ -722,27 +740,37 @@ Query：`page`（默认 1）、`page_size`（默认 20，最大 100）。必须�
 
 路径参数：`qc_record_id` UUID 必填（=`qc_records.id`）。
 
-Body：
+Body（**V1.18 新增 revised_deduction + 三动作语义冻结**）：
 
 | 名 | 类型 | 必填 | 约束 |
 | :--- | :--- | :--- | :--- |
 | action | string | 是 | CONFIRM \| DISMISS \| CORRECT |
-| revised_score | int | CORRECT 时必填 | 0～100；其它 action 禁止传或忽略 |
+| revised_deduction | int | CORRECT 时必填 | **V1.18 主入参**：≥0 整数，不限 100；其它 action 禁止传或忽略 |
+| revised_score | int | 否 | **灰度保留**：兼容旧调用方，等价于 `100 - revised_deduction` |
 | reason | string | 否 | |
 
-`action=CORRECT` 且缺 `revised_score` 或不在 0–100 → A2008。
+`action=CORRECT` 且缺 `revised_deduction` 或 <0 → A2008。越界语义：A2008 HTTP 400。
 
-发布 `qc.review.done` 时 `sample_type` 由 action 映射（写死）：`CONFIRM`→`positive`，`DISMISS`→`negative`，`CORRECT`→`corrected`。禁止其它取值。
+#### 复核语义（V1.18 修正，冻结）
 
-成功 `data` 示例：
+| action | 写库口径 | sample_type | risk_level 处理 |
+| :--- | :--- | :--- | :--- |
+| DISMISS（误报） | `deduction_total=0` → `compliance_score=100`、`qc_result=compliant` | `negative` | **MUST NOT 改**（risk 由 hits 决定，复核不重跑引擎） |
+| CONFIRM（扣分正确） | `deduction_total` 不变 | `positive` | 同上 |
+| CORRECT（改扣分） | `deduction_total = revised_deduction` → `compliance_score = max(0, 100 - deduction_total)` | `corrected` | 同上 |
+
+三动作统一置 `qc_status=REVIEWED`。**复核过程永不重跑评分引擎、永不改 `risk_level`**；risk 只由合并后 hits 的 severity 决定。
+
+成功 `data` 示例（**V1.18**）：
 
 ```json
 {
   "qc_record_id": "8f1a2b3c-4d5e-6789-abcd-ef0123456789",
   "action": "CORRECT",
   "qc_status": "REVIEWED",
-  "compliance_score": 80,
-  "qc_result": "violation"
+  "deduction_total": 15,
+  "compliance_score": 85,
+  "qc_result": "pending_review"
 }
 ```
 
@@ -768,7 +796,7 @@ Body：
 
 无路径参数、无 Body。
 
-成功 `data` 示例：
+成功 `data` 示例（**V1.18 grade_thresholds 退役 + deduction_policy 新增**）：
 
 ```json
 {
@@ -776,10 +804,15 @@ Body：
   "status": "active",
   "penalty": {"high": 20, "medium": 8, "low": 2},
   "same_word_window_ms": 30000,
-  "grade_thresholds": {"EXCELLENT": 90, "PASS": 80, "WARNING": 60, "SERIOUS": 0},
+  "deduction_policy": {
+    "R12": {"clause_no": "§3.2 第 3 款", "clause_text": "严禁冒充司法机关工作人员"},
+    "__ac_default__": {"clause_no": "§3.1 总则第 1 款", "clause_text": "严禁使用威胁/辱骂/诱导语言"}
+  },
   "effective_at": "2026-09-01T00:00:00+08:00"
 }
 ```
+
+> **V1.18 注**：`grade_thresholds` 字段从响应中移除（DB 列保留不 DROP，回滚需要）。规则包有效性校验：POST apply 时缺失 `penalty`（high/medium/low 三键齐全）或缺失 `deduction_policy`（含 `__ac_default__` 兜底节点）→ 判非法版本回退（A2009）。
 
 失败：`A2009` HTTP 200（无合法 active 版本，回退上一版）、`B0003` HTTP 403。
 
@@ -1143,19 +1176,18 @@ class LLMReviewer:
 
 ### 5.4 ScoringService
 
-> **V1.4 枚举**：`qc_result` 与 step4/01 / step5/03 对齐为 `compliant / violation / pending_review`。`grade`（EXCELLENT/PASS/WARNING/SERIOUS）与 `qc_status`（DONE/PENDING_REVIEW/REVIEWED/PARTIAL）为扩展列，须在 step5/03 §3.4 登记（本版同步提交）。
->
-> 映射（判定优先级从高到低）：① 存在 **agent 侧**违规命中（AC/规则/LLM，user 侧 context 不计）且未复核 → 含高危 `pending_review`，否则 `violation`；② 无 agent 侧违规命中 → `compliant`；③ 复核（CONFIRM/DISMISS/CORRECT）后保持人工结论。score 只决定 `grade` 与 risk 档位参考，不直接改写 `qc_result`。
->
-> **grade 与 risk 两维独立**：`grade` 由扣分后的 score 决定，`risk` 由合并后是否存在 **agent + severity=high** 决定——单条高危（−20）会出现 score=80 → `risk=high` 且 `grade=PASS` 并存，配合 `qc_result=pending_review` 表示「已触发高危人工复核、尚未形成合格终态」；复核确认后 `qc_status=REVIEWED` 才是终态。若业务要求「高危一律不可判合格」，可在 `qc_rules.grade_thresholds` 增加 high_risk_floor 配置（本文默认不启用）。user 行与 R05(low) 不把 risk 打成 high。**根 PRD（需求文档.md）不得用合规分数切 risk_level。**
+> **V1.18 扣分口径切换 + grade 退役**：主口径从 `compliance_score`（100 分制）反转为 `deduction_total`（起始 0 累加扣，派生 `compliance_score = max(0, 100 - deduction_total)` 一致性断言恒成立）。`grade` 退役：**HTTP/事件/库列恒 null**，不再由 ScoringService 计算；「高危应人工复核」语义由 `qc_status=PENDING_REVIEW` 承接。**risk_level 的判定逻辑不变**：由合并后是否存在 `agent + severity=high` 决定。
 
 ```python
 class ScoringService:
-    def score(self, hits: list[AnyHit], active_rules: ActiveRules) -> ScoreResult
+    def score(self, hits: list[AnyHit], penalty: dict[str, int]) -> ScoreResult
     # hits 必须是 MergeHits 之后的列表（§5.4.1）
-    # 100 分制：仅 score_eligible=true；高危 -20 / 中危 -8 / 低危 -2；下限 0
-    # 风险等级：合并后存在 agent+high → high；累计扣≥20→medium；否则 low
-    # 合规档：≥90 EXCELLENT / ≥80 PASS / ≥60 WARNING / <60 SERIOUS
+    # penalty = active 规则包的 penalty 字段（单一事实源）
+    # 扣分制（V1.18 主口径）：仅 score_eligible=true 的 hit；deduction_total = Σ penalty[severity]
+    #   高危 +20 / 中危 +8 / 低危 +2（penalty 值来自 active 规则包）
+    #   compliance_score = max(0, 100 - deduction_total)（派生值）
+    # risk_level：合并后存在 agent+high → high；累计 deduction≥20→medium；否则 low
+    # grade：恒 None（退役，不计算）
     # qc_status：跑完 DONE/PENDING_REVIEW；崩溃或重试耗尽才 PARTIAL；WAIT_TEXT 不落库
     # skip 的规则不进 hits，也不把任务打成 PARTIAL
 ```
@@ -1205,17 +1237,17 @@ class ScoringService:
 5. **同一键/冲突组多条**：保留 **severity 最高**（high>medium>low）。同级时来源顺序 **AC > 规则 > LLM**。证据用规则或 AC 的原文，**不用** LLM 编的 `evidence`/`reason`。若冲突组内规则层有 `rule_id`，合并结果 **保留该 rule_id**（即使 severity 取自 AC），以便 suspected 白名单仍能命中 R11。
 6. **user 行**：可写入 `qc_violations`（R13 前置上下文），**不进入** `compliance_score`，**不进入** `high_count` / `med_count` / `low_count`。
 
-**C. 扣分**
+**C. 扣分（V1.18 主口径切换）**
 
 ```
-score = 100
+deduction_total = 0
 for hit in 最终 hits:
     if not hit.score_eligible: continue
-    score -= {high:20, medium:8, low:2}[hit.severity]
-score = max(0, score)
+    deduction_total += active_penalty[hit.severity]  # {high:20, medium:8, low:2}
+compliance_score = max(0, 100 - deduction_total)
 ```
 
-例：同一 turn AC `threat` + R11 → 合并后 1 条 high，只扣 20，不是 20+8。
+例：同一 turn AC `threat` + R11 → 合并后 1 条 high，只扣 20，不是 20+8。单通累计 deduction_total 可 >100（多条 agent-high 累加），此时 compliance_score 下限 0。
 
 **D. `qc.complaint.suspected` 发布条件（与 tag 解耦）**
 
@@ -1296,15 +1328,17 @@ class WordLoader:
 
 | 表名 | 主键 | 关键列 | 数据闭环 |
 | :--- | :--- | :--- | :--- |
-| qc_records | id | **session_id VARCHAR(100) UNIQUE REFERENCES call_records(session_id)** + case_id + agent_id + compliance_score(INT 0-100) + risk_level(low/medium/high) + qc_result(compliant/violation/pending_review) + grade(EXCELLENT/PASS/WARNING/SERIOUS) + qc_status(DONE/PENDING_REVIEW/REVIEWED/PARTIAL) + high_count/med_count/low_count | qc.check.completed → DP ETL → dw.dws_call_result |
-| qc_violations | id | qc_record_id FK + turn_id + rule_id/word_id + severity + **redline_tag** + speaker(agent/user) + evidence_text(脱敏) + start_offset_ms + end_offset_ms + hit_ts | DP → dw.dwd_call_records |
+| qc_records | id | **session_id VARCHAR(100) UNIQUE REFERENCES call_records(session_id)** + case_id + agent_id + **deduction_total INT NOT NULL DEFAULT 0 CHECK (deduction_total >= 0)**(V1.18 主口径) + compliance_score INT(派生 max(0,100−deduction_total)) + risk_level(low/medium/high) + qc_result(compliant/violation/pending_review) + **grade NULLABLE 恒 null**(V1.18 退役) + qc_status(DONE/PENDING_REVIEW/REVIEWED/PARTIAL) + high_count/med_count/low_count | qc.check.completed → DP ETL → dw.dws_call_result |
+| qc_violations | id | qc_record_id FK + turn_id + rule_id/word_id + severity + **redline_tag** + speaker(agent/user) + evidence_text(脱敏) + start_offset_ms + end_offset_ms + hit_ts + **points INT**(V1.18，本 hit 扣分) + **policy_clause VARCHAR(64)** + **policy_text TEXT**(V1.18，制度依据) | DP → dw.dwd_call_records |
 | qc_alerts | id | qc_record_id + violation_id + level(=high) + status(NEW/ACKED) + acked_by/at | qc.alert.raised + alert:stream（事后主管） |
-| qc_reviews | id | qc_record_id FK + reviewer_id + action(CONFIRM/DISMISS/CORRECT) + revised_score(INT 0-100) + reason + 四公共字段 | qc.review.done → DP + RAG |
-| qc_rules | id/version UNIQUE | status(draft/active/archived) + penalty_high=20/med=8/low=2(JSONB) + same_word_window_ms=30000 + grade_thresholds + effective_by/at | DP 策略版本管理 |
+| qc_reviews | id | qc_record_id FK + reviewer_id + action(CONFIRM/DISMISS/CORRECT) + **revised_deduction INT**(V1.18 主入参，≥0) + revised_score INT(灰度保留，=100−revised_deduction) + reason + 四公共字段 | qc.review.done → DP + RAG |
+| qc_rules | id/version UNIQUE | status(draft/active/archived) + penalty JSONB({high,medium,low}) + same_word_window_ms=30000 + **deduction_policy JSONB**(V1.18，rule_id→{clause_no,clause_text}+`__ac_default__`) + grade_thresholds JSONB(V1.18 退役，保留不删) + effective_by/at | DP 策略版本管理 |
 
 > 公共字段：id / create_time / update_time / is_delete，与 step4/01 §1.1 对齐。明细表 FK → qc_records.id ON DELETE CASCADE。
 >
-> `skipped_rules` **不**新增 `qc_records` 列、**不**改 CHECK 枚举。持久化：① Redis `qc:job:{session_id}` JSON 字段（TTL=24h）；② `audit_logs.action='qc.skip.recorded'`（耐久，GET 回源）。详见 §6.2。
+> **V1.18 新增列（迁移 0016）**：`qc_records.deduction_total INT NOT NULL DEFAULT 0 CHECK (deduction_total >= 0)`（主扣分列，派生 `compliance_score = max(0, 100 - deduction_total)`）；`qc_violations.points INT` + `policy_clause VARCHAR(64)` + `policy_text TEXT`；`qc_rules.deduction_policy JSONB`（`rule_id → {clause_no, clause_text}` + `__ac_default__` 兜底）。
+>
+> **V1.18 退役列**：`qc_records.grade` **保留不 DROP**（回滚需要），运行时恒 NULL；`qc_rules.grade_thresholds` 同上。HTTP/事件仍保留 `grade` 键位但值恒 null。
 
 ### 6.2 Redis（DB 3，与 step4/03 对齐）
 
@@ -1452,21 +1486,21 @@ sequenceDiagram
 | DashScope LLM | Mock(MOCK_LLM=1) | LLMReviewer 注入固定响应 |
 | call-service | 不需要 | 用 replay/raw 或 etl.task.done 种子 |
 
-### 8.2 独立可测断言清单
+### 8.2 独立可测断言清单（**V1.18 扣分口径**）
 
 ```
-1.  POST /qc/replay/raw（含坐席高危话术，call_ended=true）→ score≤60, risk=high, grade=SERIOUS
+1.  POST /qc/replay/raw（含多条 agent-high 可计分命中，call_ended=true）→ deduction_total≥40，risk=high，grade=null
 2.  qc_records 高危计数=1
 3.  GET /qc/alerts → 1 条 NEW 高危告警（主管侧）
 4.  redis-cli PSUBSCRIBE qc.alert.raised 收到告警事件
 5.  不发布 qc.escalate.human（订阅该频道应无消息）
-6.  同词 20s 重复 2 次 → 30s 去重，100-2=98
-7.  构造 23:30 通话 → R02 时段违规命中，扣 -8
+6.  同词 20s 重复 2 次 → 30s 去重，deduction_total=2
+7.  构造 23:30 通话 → R02 时段违规命中，deduction_total 累加 8
 8.  用户说「不要再打了」后 agent 继续催收 → R13 + qc.stop_call.detected；user 行不扣分
-9.  自称「我是法院的」→ R12 fake_identity high
-10. POST /qc/reviews/{qc_record_id} CORRECT → score 更新，qc_status=REVIEWED
+9.  自称「我是法院的」→ R12 fake_identity high，deduction_total 累加 20
+10. POST /qc/reviews/{qc_record_id} CORRECT revised_deduction=15 → deduction_total=15，qc_status=REVIEWED，risk_level 不变
 11. POST /qc/replay/{session_id} → 从 DP 拉种子重放成功
-12. LLM mock 熔断 → 降级为规则+敏感词，打分仍正常
+12. LLM mock 熔断 → 降级为规则+敏感词，扣分仍正常
 13. evidence_text 落表不含完整手机号/身份证
 14. call_ended=false 或 turns 空 → A2002，不创建 DONE 记录
 15. 用户只说「我想自杀」且 agent 转为安抚、不再催收 → 不扣坐席分、不发 qc.complaint.suspected
@@ -1483,6 +1517,12 @@ sequenceDiagram
 26. DP qc-source：响应含 `result` 键（可 JSON null）；无 `dial_history_24h` 则 R05 skip；`ptp_amount` 恒 null 则 R08 skip
 27. R04：user 未确认本人 + agent 说「你欠款逾期了」→ R04；user 已说「是我」后再披露 → 不命中 R04
 28. GET 详情：写 `skipped_rules=["R14"]` 后 DEL Redis `qc:job` → 仍能从 `audit_logs` 读回同一数组
+
+#### V1.18 新增一致性断言（与 acceptance spec 同步）
+
+A1. 扣分一致性：任意记录落库后 `compliance_score == max(0, 100 - deduction_total)` 恒成立（含 `deduction_total>100` 多 high 累加场景）
+A2. 违规行制度依据：GET 详情每条 `score_eligible=true` 的 hit 含 `points` / `policy_clause` / `policy_text`；纯 AC 无 `rule_id` 的 hit 由 `__ac_default__` 兜底填充
+A3. DISMISS 归零：对 `deduction_total>0` 的记录 POST 复核 DISMISS → `deduction_total=0`、`qc_result=compliant`、`qc_status=REVIEWED`
 ```
 
 ---
@@ -1525,7 +1565,7 @@ Payload **必须**含 `ts`（Unix 秒）与 `trace_id`。字段集以 step4/03 �
 
 **`call_id` 策略（写死）**：有 `QCSession.call_id`（=`call_records.id`）则填 UUID 字符串；M1 / raw 没有则填 JSON `null`。**禁止**用 `session_id` 冒充 `call_id`。**禁止**把 `POST /qc/replay/{session_id}` 路径参数写入 `call_id`。
 
-**库列 ↔ 事件键（与 §4.0.1.1 同一张表）**：`qc.check.completed.score` ← `qc_records.compliance_score`；`risk` ← `risk_level`。JSON 键保持 `score` / `risk`，不把列名 `risk_level` / `compliance_score` 写进事件。
+**库列 ↔ 事件键（与 §4.0.1.1 同一张表，**V1.18 增补 deduction + grade 退役**）**：`qc.check.completed.deduction` ← `qc_records.deduction_total`（V1.18 新增）；`score` ← `compliance_score`（派生 `max(0,100 - deduction_total)`）；`risk` ← `risk_level`；`grade` 键保留但 **恒 null**（退役，见 §3.1 D2 偏差遗留）。
 
 **`qc.review.done.sample_type` 枚举（写死）**：`positive` \| `negative` \| `corrected`。映射：`CONFIRM`→`positive`，`DISMISS`→`negative`，`CORRECT`→`corrected`。禁止空词或其它取值。
 
@@ -1536,10 +1576,10 @@ Payload **必须**含 `ts`（Unix 秒）与 `trace_id`。字段集以 step4/03 �
 | Channel | Payload | 订阅者 | 数据闭环 |
 | :--- | :--- | :--- | :--- |
 | `qc.alert.raised` | `{alert_id, session_id, call_id, level, evidence, trace_id, ts}` | **事后主管/运营**（非通话页） | 同时 XADD `alert:stream` |
-| `qc.check.completed` | `{qc_record_id, session_id, call_id, case_id, score, risk, grade, trace_id, ts}` | DP + review | 宽表/复盘。**不**用本事件自动建投诉工单。`call_id` 可 JSON null |
+| `qc.check.completed` | `{qc_record_id, session_id, call_id, case_id, deduction, score, risk, grade, trace_id, ts}` | DP + review | **V1.18 新增 `deduction`**（← `qc_records.deduction_total`）；`grade` 键保留但 **恒 null**。宽表/复盘。`call_id` 可 JSON null |
 | `qc.complaint.suspected` | `{qc_record_id, session_id, case_id, redline_tags[], trace_id, ts}` | complaint-service | **发布条件**（V1.8 白名单，本步不改）：MergeHits 后存在 agent + severity=high + `rule_id ∈ {R11, R12, R13}`。**不是** tag 集合。`redline_tags[]` 仅审计。R05 / R01 / R10 / 客户提及投诉或自杀本身 **不发**。追加 `qc_record_id` 供投诉 SETNX 幂等 |
 | `qc.stop_call.detected` | `{session_id, case_id, evidence, trace_id, ts}` | case-service（call 可旁听） | 写 `cases.stop_call_status`；通话已结束，不是事中强拆 |
-| `qc.review.done` | `{qc_record_id, action, revised_score, redline_tags, evidence_masked, sample_type, trace_id, ts}` | rag-service + DP | 样本治理；`sample_type`∈{positive,negative,corrected} |
+| `qc.review.done` | `{qc_record_id, action, revised_deduction, revised_score, redline_tags, evidence_masked, sample_type, trace_id, ts}` | rag-service + DP | **V1.18 主入参改 `revised_deduction`**（≥0 扣分）；`revised_score` 灰度保留；`sample_type`∈{positive,negative,corrected} |
 | `system.alert.raised` | `{alert_id, level, event, service, description, error_code, trace_id, ts}` | 告警订阅（step6/02） | LLM 熔断等运维告警（**不再**使用 `qc.llm.degraded` 频道） |
 
 > V1.5 **删除频道** `qc.escalate.human`（step4/03 v1.7 已同步删除）。
@@ -1560,7 +1600,7 @@ JSON 示例（`ts` 为 Unix 秒；`call_id` 无主数据时改为 `null`）：
 }
 ```
 
-`qc.check.completed`：
+`qc.check.completed`（**V1.18 扣分口径**）：
 
 ```json
 {
@@ -1568,9 +1608,10 @@ JSON 示例（`ts` 为 Unix 秒；`call_id` 无主数据时改为 `null`）：
   "session_id": "sess_xxx",
   "call_id": "22222222-3333-4444-5555-666666666666",
   "case_id": "case_xxx",
+  "deduction": 20,
   "score": 80,
   "risk": "high",
-  "grade": "PASS",
+  "grade": null,
   "trace_id": "trace_01H8XK7P9M2Q3R4S5T6U7V8W9X",
   "ts": 1757412600
 }
@@ -1603,13 +1644,14 @@ M1 / raw 无 `call_records.id` 时同一频道：`"call_id": null`。
 }
 ```
 
-`qc.review.done`：
+`qc.review.done`（**V1.18 主入参改 revised_deduction**）：
 
 ```json
 {
   "qc_record_id": "8f1a2b3c-4d5e-6789-abcd-ef0123456789",
   "action": "CORRECT",
-  "revised_score": 80,
+  "revised_deduction": 15,
+  "revised_score": 85,
   "redline_tags": ["fake_identity"],
   "evidence_masked": "***（脱敏）",
   "sample_type": "corrected",
