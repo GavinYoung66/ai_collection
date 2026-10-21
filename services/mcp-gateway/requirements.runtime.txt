@@ -1,0 +1,15 @@
+# mcp-gateway Docker 运行时增量依赖（全局 requirements.lock 之外）
+# mcp SDK pin 1.x 稳定线：FastMCP 高层 API 成熟，支持 streamable-http / sse transport；
+# 2.x 为重写版（API 重构 + mcp-types 独立包），成熟度风险见 change design.md Risks。
+# 注意：mcp 1.x 要求 pydantic>=2.11 / uvicorn>=0.31 / httpx>=0.27 / pydantic-settings>=2.5，
+# 安装时会升级 lock 中的旧 pin——仅发生在网关容器内，不影响其他服务镜像。
+mcp>=1.16,<2
+# mcp 1.x 的 sse-starlette 依赖 starlette>=1.0，与 lock 中 fastapi==0.104.1（要求 starlette<0.28）
+# 不兼容；在此显式升级 fastapi 至兼容 starlette 1.x 的版本（仅影响网关容器）。
+fastapi>=0.115,<1
+# Prometheus 指标端点（/metrics），lock 中无此依赖
+prometheus-client>=0.19,<1
+# Batch 3 可靠性层：common.resilience.rate_limit 依赖 redis asyncio 客户端
+redis>=5.0.1,<6
+# common.mcp.reliability 经 common.llm 链路引入 pybreaker（熔断器原语）
+pybreaker>=1.0.2,<2

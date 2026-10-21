@@ -13,9 +13,13 @@ import pytest
 from app.events.publisher import publisher
 from app.graph.checkpointer import (
     archive_expired_sessions,
+    checkpointer_kind,
     get_checkpointer,
     get_pg_dsn,
     handle_suspended_sessions,
+    init_checkpointer,
+    is_checkpointer_degraded,
+    reset_checkpointer_for_tests,
 )
 from app.graph.nodes.human_review import human_review_node
 from app.models.state import ComplaintSessionState, ReviewAction, TaskStatus, VerdictType
@@ -61,8 +65,50 @@ class TestCheckpointer:
         del os.environ["COMPLAINT_PG_DSN"]
 
     def test_stubs_return_zero(self):
-        assert asyncio.run(archive_expired_sessions()) == 0
         assert asyncio.run(handle_suspended_sessions()) == 0
+
+    def test_archive_delegates_to_prune_without_dry_run(self, monkeypatch):
+        """archive_expired_sessions 是**破坏性**入口，须走 prune(dry_run=False)。
+
+        测试只断言参数传递正确，**不真的调库**——否则本机 dev 库有匹配行时
+        会被测试删掉真实 checkpoint 数据。
+        """
+        from app.graph import checkpointer as ck_module
+
+        calls: list[tuple] = []
+
+        async def _spy(retention_days=90, *, dry_run=True):
+            calls.append((retention_days, dry_run))
+            return {"threads": ["t1", "t2"], "deleted": {}}
+
+        monkeypatch.setattr(ck_module, "prune_checkpoints", _spy)
+        assert asyncio.run(archive_expired_sessions(older_than_days=30)) == 2
+        assert calls == [(30, False)]
+
+    def test_kind_and_degraded_are_distinct_signals(self):
+        """未配置 DSN：kind=memory 且 degraded=False。
+
+        这两者是**不同**的信号：kind 描述实际 saver 类型（供 /health 判断
+        断点会不会丢），degraded 描述「期望 PG 但退回了内存」。
+        回归：main.py 曾用 `is_checkpointer_degraded()` 取反来推导 kind，
+        导致未配置 DSN 时误报 postgres——监控会以为断点已持久化。
+        """
+        reset_checkpointer_for_tests()
+        asyncio.run(init_checkpointer())
+        assert checkpointer_kind() == "memory"
+        assert is_checkpointer_degraded() is False
+        reset_checkpointer_for_tests()
+
+    def test_shutdown_and_reset_are_idempotent(self):
+        """shutdown / reset 重复调用不抛（lifespan 与测试清理都会调）。"""
+        from app.graph.checkpointer import shutdown_checkpointer
+
+        reset_checkpointer_for_tests()
+        asyncio.run(shutdown_checkpointer())
+        asyncio.run(shutdown_checkpointer())
+        reset_checkpointer_for_tests()
+        reset_checkpointer_for_tests()
+        assert checkpointer_kind() == "memory"
 
     def test_pg_import_failure_falls_back(self, monkeypatch):
         """PG 依赖 import 失败 → fallback MemorySaver。"""
@@ -81,32 +127,73 @@ class TestCheckpointer:
         finally:
             del os.environ["COMPLAINT_PG_DSN"]
 
-    def test_pg_success_path(self, monkeypatch):
-        """PG 依赖可用 → 返回 AsyncPostgresSaver（mock）。"""
-        os.environ["COMPLAINT_PG_DSN"] = "postgresql://fake"
+    @staticmethod
+    def _patch_pg_modules(probe_row):
+        """注入 mock 的 PG 模块。
+
+        返回 (mock_saver, mock_pool, saved)；调用方须在 finally 里用 saved 还原 sys.modules。
+        probe_row 为 schema 探针的返回行（dict，如 {"t": "checkpoints"}；None 表示表缺失）。
+        """
         from unittest.mock import AsyncMock, MagicMock
         import sys
-        mock_saver = MagicMock()
-        mock_saver.setup = AsyncMock()
+
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone = AsyncMock(return_value=probe_row)
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(return_value=mock_cursor)
+
         mock_pool = MagicMock()
         mock_pool.open = AsyncMock()
+        mock_pool.close = AsyncMock()
+        mock_pool.connection = MagicMock()
+        mock_pool.connection.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.connection.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        mock_saver = MagicMock()
         mock_pg = MagicMock()
         mock_pg.AsyncPostgresSaver = MagicMock(return_value=mock_saver)
         mock_pool_mod = MagicMock()
         mock_pool_mod.AsyncConnectionPool = MagicMock(return_value=mock_pool)
         mock_rows = MagicMock()
         mock_rows.dict_row = "dict_row_mock"
+
         saved = {}
         for name, mod in [("langgraph.checkpoint.postgres.aio", mock_pg),
                           ("psycopg_pool", mock_pool_mod),
                           ("psycopg.rows", mock_rows)]:
             saved[name] = sys.modules.get(name)
             sys.modules[name] = mod
+        return mock_saver, mock_pool, saved
+
+    def test_pg_success_path(self, monkeypatch):
+        """PG 依赖可用且 schema 探针通过 → 返回 AsyncPostgresSaver（mock）。"""
+        os.environ["COMPLAINT_PG_DSN"] = "postgresql://fake"
+        import sys
+        mock_saver, mock_pool, saved = self._patch_pg_modules({"t": "checkpoints"})
         try:
             cp = asyncio.run(get_checkpointer())
             assert cp is mock_saver
             mock_pool.open.assert_awaited_once()
-            mock_saver.setup.assert_awaited_once()
+        finally:
+            del os.environ["COMPLAINT_PG_DSN"]
+            for name, mod in saved.items():
+                if mod is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = mod
+
+    def test_schema_probe_missing_falls_back(self, monkeypatch):
+        """迁移未跑（探针返回 NULL）→ 降级 MemorySaver，而非在 graph 内部才炸。"""
+        os.environ["COMPLAINT_PG_DSN"] = "postgresql://fake"
+        import sys
+        mock_saver, mock_pool, saved = self._patch_pg_modules({"t": None})
+        try:
+            cp = asyncio.run(get_checkpointer())
+            from langgraph.checkpoint.memory import MemorySaver
+            assert isinstance(cp, MemorySaver)
+            assert cp is not mock_saver
+            # 降级时必须关掉已开的池，避免连接泄漏
+            mock_pool.close.assert_awaited_once()
         finally:
             del os.environ["COMPLAINT_PG_DSN"]
             for name, mod in saved.items():

@@ -1,0 +1,12 @@
+# Grafana datasource 自动装配（openspec change: observability-metrics-llm-usage，design D7）
+# url 用 compose 默认网络内服务名解析（prometheus 与 grafana 同属主 compose 项目）
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true

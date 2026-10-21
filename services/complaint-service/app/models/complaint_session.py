@@ -11,7 +11,8 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from common.db.base import Base, PublicFieldsMixin
 
-# ── task_status 合法值（PRD 6.1 TaskStatus） ──
+# ── task_status 合法值（须与 app/models/state.py 的 TaskStatus 逐字一致） ──
+# 与迁移 0015 的 CHECK 约束同源；新增状态时三处（此处 / state.py / 新迁移）必须同改。
 _TASK_STATUSES = (
     "pending",
     "evidence_gathering",
@@ -20,6 +21,7 @@ _TASK_STATUSES = (
     "draft_generated",
     "pending_review",
     "pending_senior_review",
+    "pending_callback",  # V4 定责完成、待回电处置
     "resolved",
     "closed",
     "archived",
@@ -27,7 +29,16 @@ _TASK_STATUSES = (
 
 
 class ComplaintSession(Base, PublicFieldsMixin):
-    """投诉研判会话表。"""
+    """投诉研判会话表。
+
+    权威边界（重要）：
+    - **状态机列**（task_status / updated_at / status_changed_at）由
+      SessionService.transition 唯一写入，本表是这部分数据的权威来源。
+    - **图产出列**（case_evidence / verdict_draft / judgment_package 等 JSONB）
+      仅作只读快照，**不得**用于反推 LangGraph 的 resume 状态。
+      图执行态（含 interrupt 断点、pending_writes）的唯一权威是 LangGraph
+      的 checkpoints / checkpoint_blobs / checkpoint_writes 三表。
+    """
 
     __tablename__ = "complaint_sessions"
 

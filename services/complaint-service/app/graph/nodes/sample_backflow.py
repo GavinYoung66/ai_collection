@@ -59,10 +59,16 @@ async def sample_backflow_node(state: ComplaintSessionState) -> dict:
     """样本回流：回写会话与人工复核真值，桥失败入队、节点不阻塞图。"""
     mcp = get_mcp_client()
     task_status = _task_status_value(state.task_status)
+    # 网关跨进程无法反查 session→case 映射，必须直带 case_id/complaint_id
+    # （design D1 ①），否则 write_session 走 backflow_resolve_miss 无法定位快照行。
+    case_id = state.case_ids[0] if state.case_ids else ""
+    complaint_id = state.complaint_id or ""
     payload = {
         "session_id": state.session_id,
         "task_status": task_status,
         "verdict": state.verdict_draft.verdict.value if state.verdict_draft else None,
+        "case_id": case_id,
+        "complaint_id": complaint_id,
     }
     logger.info(
         "sample_backflow_start",
@@ -75,7 +81,10 @@ async def sample_backflow_node(state: ComplaintSessionState) -> dict:
         # 单层重试：桥内 3 次 HTTP + 用尽入队（A5013），节点每 tool 只调一次。
         # 桥正常路径永不抛异常；此处仅兜底桥外传输/分发故障，保证图不中断。
         try:
-            result = await mcp.call(_SERVER, tool, payload)
+            result = await mcp.call(
+                _SERVER, tool, payload,
+                trace_id=state.trace_id, session_id=state.session_id,
+            )
             logger.info("sample_backflow_ok", session_id=state.session_id, tool=tool)
             if tool == "write_session" and isinstance(result, dict) and result.get(
                 "persisted"

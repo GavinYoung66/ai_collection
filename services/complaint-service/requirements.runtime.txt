@@ -1,10 +1,74 @@
 # complaint-service Docker 运行时增量依赖
-# 全局 requirements.lock 仍注释旧版 langgraph；真图编排在此单独安装。
-# 版本对齐本机 conda ai_collection（已验证可 ainvoke）
+#
+# 为什么单独一份：全局 requirements.lock 仍注释掉旧版 langgraph，真图编排
+# （LangGraph + PG checkpointer）在此单独安装，见 Dockerfile 第 14-17 行。
+#
+# 为什么全部钉死（==）而非范围：
+#   范围（如 >=3.2,<4）下每次 docker build 可能解析到不同的具体版本，
+#   某次上游发新版即可让镜像「构建成功但运行时炸」——这类问题最难排查。
+#   以下版本取自**已验证可用**的容器环境（本机 dev 容器实测可 ainvoke /
+#   可写 PG checkpoint / /health 报 checkpointer=postgres）。
+#
+# ⚠️ 升级须知：langgraph 与其 checkpoint 链必须**整体同步升级**。
+#   只升 langgraph 而 langgraph-checkpoint 落后，会因 saver ABC 版本错配
+#   直接破坏 checkpoint 持久化。
+#
+# 重新生成/校对：在跑通的容器里执行
+#   docker exec ai_collection-complaint-service-1 python -m pip list
+
+# ── LangGraph 编排链（版本互相耦合，须整体升级）──
 langgraph==1.2.11
+langgraph-checkpoint==4.2.0
 langgraph-checkpoint-postgres==3.1.2
-psycopg[binary]>=3.2,<4
-psycopg-pool>=3.2,<4
-jinja2>=3.1,<4
+langgraph-prebuilt==1.1.0
+langgraph-sdk==0.4.4
+# langgraph 的下游传递依赖：不在全局 lock 里，不钉就会随风漂移
+langchain-core==1.6.3
+ormsgpack==1.12.2
+orjson==3.12.0
+
+# ⚠️ pydantic 与全局 lock 存在版本张力：
+#   requirements.lock 钉的是 2.5.3，但 langgraph 要求更高的 pydantic，
+#   而本文件在 lock **之后**安装，实际会把 pydantic 顶到 2.13.5。
+#   此处显式钉到实装版本，把这个隐式顶版变成显式事实，避免「lock 说 2.5.3、
+#   实际跑 2.13.5」的认知错位。根治办法是用 pip-compile 为本服务单独产一份
+#   完整 lock（见文件末尾说明），而不是继续手补传递依赖。
+pydantic==2.13.5
+
+# ── PG checkpointer 驱动（psycopg3 + 连接池）──
+# psycopg-binary 与 psycopg 同版本：前者提供自带 libpq 的 C 实现，
+# 缺了会退化为纯 Python 实现并报 "libpq library not found"。
+psycopg[binary]==3.3.6
+psycopg-binary==3.3.6
+psycopg-pool==3.3.2
+
+# ── 提示词模板渲染 ──
+jinja2==3.1.6
+
 # 真 LLM 默认走 httpx（lock 已有）；openai 可选（common.llm / 本机调试）
-openai>=1.40,<3
+openai==2.54.0
+
+# ── MCP SDK client（Batch 5：Agent → 独立 mcp-gateway，streamable-http）──
+# 与 services/mcp-gateway/requirements.runtime.txt 同一条 1.x 稳定线；
+# 2.x 为重写版（API 重构 + mcp-types 独立包），成熟度风险见 change design.md。
+# 注意：mcp 1.x 要求 uvicorn>=0.31 / starlette>=0.27（lock 的 uvicorn 0.24 会被
+# 顶到 0.31+，starlette 0.27 与 fastapi 0.104 兼容故保持不动），仅影响本服务镜像。
+mcp>=1.16,<2
+# mcp 传递依赖的兼容钉版（pip 解 mcp 时会把 httpx 顶到 0.28+，与本服务测试基建冲突）：
+# - httpx 0.28 移除 Client(app=...)，starlette 0.27 的 TestClient 仍传该参数 →
+#   TestClient 直接 TypeError（test_health / test_api_routes 等全部受影响）；
+# - starlette>=0.45 与 fastapi 0.104 的 Router(on_startup=...) 不兼容；
+# - sse-starlette 2.2+ 要求 starlette>=0.40。mcp 本身接受这些下限版本。
+httpx==0.27.2
+starlette==0.27.0
+sse-starlette==2.1.3
+uvicorn==0.34.0
+
+# ── 关于「这份文件算不算完整 lock」──
+# 不算。这里钉的是**直接依赖 + LangGraph 一级传递链**，更下游的传递依赖
+# （typing-extensions / tenacity / jsonpatch 等）仍由 pip 解析决定。
+# 要得到真正可复现的闭包，应为本服务单独生成一份完整 lock：
+#   pip-compile --strip-extras -o requirements.complaint.lock requirements.runtime.txt
+# 再做一次「装完锁文件后镜像内 ainvoke + PG checkpoint 冒烟」验证后替换。
+# 当前手钉版本已覆盖「会导致 checkpointer 直接坏掉」的关键包（langgraph 链、
+# psycopg3 + psycopg-binary），收益/成本比最高；完整闭包留作独立任务。

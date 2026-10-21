@@ -62,7 +62,7 @@ class _FailingProvider:
 class _StubMCP:
     """MCP 客户端 stub：检索恒返回空列表。"""
 
-    async def call(self, server, action, payload):
+    async def call(self, server, action, payload, *, trace_id="", session_id=""):
         return []
 
 

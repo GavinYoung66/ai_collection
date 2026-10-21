@@ -40,7 +40,11 @@ htmlcov/
 .env
 .env.*
 !.env.example
+# sops 密文产物入库（唯一入库的密钥载体）；明文 .env/.env.bak 仍被忽略
+!.env.enc
 *.local
+# 网关自签 TLS 私钥/证书（gen-self-signed.sh 本地生成；生产替换正式证书且严禁入库）
+deploy/gateway/tls/
 
 # ── Docker 数据卷（仅根目录挂载）──────────────────────
 # 注意：必须锚定 /data/，否则会误伤 services/rag-service/data/sensitive_words.dict
@@ -52,6 +56,9 @@ es_data/
 etcd_data/
 minio_data/
 docker-compose.override.yml
+
+# ── 备份产物（scripts/backup 输出；仅本地，不入仓）────────
+/backups/
 
 # ── 前端（Vue3 + Vite，M3 引入）───────────────────────
 node_modules/
@@ -70,6 +77,8 @@ pnpm-debug.log*
 *.swp
 *.swo
 *.swn
+.vscode/
+
 
 # ── 操作系统 ───────────────────────────────────────────
 .DS_Store

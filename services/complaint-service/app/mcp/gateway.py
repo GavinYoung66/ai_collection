@@ -1,8 +1,9 @@
 """MCP 网关连接管理。
 
-支持两种模式（由 ComplaintSettings.MCP_GATEWAY_MODE 决定）：
-- inline + USE_MOCK_MCP=true（dev）：进程内 MockMCPClient
-- USE_MOCK_MCP=false：RealMCPTransport（D2 进程内 rag_kb bridge；standalone 等价）
+支持两种模式（由 ComplaintSettings.USE_MOCK_MCP 决定，design D6）：
+- USE_MOCK_MCP=true（dev，默认）：进程内 MockMCPClient，SHALL NOT 连接网关
+- USE_MOCK_MCP=false（prod）：RealMCPTransport 经 MCP SDK client 连独立容器
+  mcp-gateway（地址由 MCP_GATEWAY_URL 注入），SHALL NOT 进程内嵌桥
 
 提供 get_client(server) -> MCPClient 工厂方法，与 MCPClient 联动。
 """
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import httpx
 import structlog
 
 from app.config import settings
@@ -53,30 +55,70 @@ class MCPGateway:
             from tests.mock.mcp.mock_client import MockMCPClient
 
             return MockMCPClient()
+        # Batch 5：真路径经 MCP SDK client 连独立网关，不再传任何进程内桥
         from app.mcp.real_transport import RealMCPTransport
 
         return RealMCPTransport(gateway_url=self._gateway_url)
 
-    def health_check(self) -> dict[str, str]:
-        """健康检查钩子：返回各 server 状态。
+    async def ahealth_check(self) -> dict[str, str]:
+        """异步健康检查钩子（MCP 协议级探活）。
 
-        Mock：全部 healthy。
-        真路径：有 RAG_SERVICE_URL 则 rag_kb 视为配置就绪；网关 URL 可选探活。
+        Mock：全部 healthy，不发起网络请求。
+        真路径：对网关 MCP server 做 initialize + list_tools 短探活（5s）。
+        网关是 4 server 的统一入口，探活结果对 4 server 一致：
+        握手成功 → healthy；权限/协议错 → degraded；连不上/超时 → unavailable。
         """
         if getattr(settings, "USE_MOCK_MCP", True):
             for server in ALLOWED_SERVERS:
                 self._health[server] = "healthy"
             return dict(self._health)
 
-        rag_url = (getattr(settings, "RAG_SERVICE_URL", "") or "").strip()
-        dp_url = (getattr(settings, "DATA_PLATFORM_URL", "") or "").strip()
-        qc_url = (getattr(settings, "QC_SERVICE_URL", "") or "").strip()
-        from common.llm.reliability import is_placeholder_secret
+        from app.mcp.errors import MCPError, MCPPermissionDeniedError
+        from app.mcp.real_transport import RealMCPTransport
 
-        rag_ok = not is_placeholder_secret(rag_url)
-        # 批次③：三 server 走进程内桥，就绪看各自下游 URL，与 MCP_GATEWAY_URL 无关
-        self._health["rag_kb"] = "healthy" if rag_ok else "unavailable"
-        self._health["business_ticket"] = "healthy" if dp_url else "unavailable"
-        self._health["data_platform"] = "healthy" if dp_url else "unavailable"
-        self._health["call_qc"] = "healthy" if dp_url and qc_url else "unavailable"
+        status = "healthy"
+        try:
+            await RealMCPTransport(gateway_url=self._gateway_url).probe()
+        except MCPPermissionDeniedError:
+            # 网关可达但鉴权拦截：凭证问题，标记 degraded 而非不可达
+            status = "degraded"
+        except MCPError as e:
+            logger.warning("mcp_gateway_probe_failed", error=str(e))
+            status = "unavailable"
+        for server in ALLOWED_SERVERS:
+            self._health[server] = status
+        return dict(self._health)
+
+    def health_check(self) -> dict[str, str]:
+        """同步健康检查钩子：返回各 server 状态（healthy / degraded / unavailable）。
+
+        Mock：全部 healthy，不发起网络请求。
+        真路径：HTTP GET 网关 ``/health`` 短探活（3s）。``/health`` 与 MCP 端点
+        同属网关一个 FastAPI 进程，进程存活即 MCP server 在；需要协议级深探活
+        （initialize/list_tools）用异步 ``ahealth_check``。
+        """
+        if getattr(settings, "USE_MOCK_MCP", True):
+            for server in ALLOWED_SERVERS:
+                self._health[server] = "healthy"
+            return dict(self._health)
+
+        base = (self._gateway_url or "").strip().rstrip("/")
+        if not base:
+            for server in ALLOWED_SERVERS:
+                self._health[server] = "unavailable"
+            return dict(self._health)
+
+        try:
+            resp = httpx.get(f"{base}/health", timeout=3.0)
+            if resp.status_code == 200:
+                status = "healthy"
+            elif resp.status_code in (401, 403):
+                status = "degraded"
+            else:
+                status = "unavailable"
+        except httpx.HTTPError as e:
+            logger.warning("mcp_gateway_health_probe_failed", error=str(e))
+            status = "unavailable"
+        for server in ALLOWED_SERVERS:
+            self._health[server] = status
         return dict(self._health)

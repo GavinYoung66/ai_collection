@@ -22,9 +22,11 @@ from typing import Any, Mapping, Optional
 import structlog
 from redis.exceptions import RedisError
 
+from app.config import settings
 from app.utils.redis_keys import (
     TTL_COMPLAINT_LOCK,
     TTL_EXEC_START,
+    deferred_queue_key,
     exec_start_key,
     judge_lock_key,
     queue_start_key,
@@ -48,6 +50,18 @@ OUTCOME_FULL = "full"
 # 维4 动态消费阈值（队列绝对深度，design §4）
 _DYNAMIC_X2_DEPTH = 250
 _DYNAMIC_X3_DEPTH = 400
+
+# 溢出接入原子脚本（design D4）：LLEN 容量判定与 LPUSH 单次 EVAL 内完成，
+# 消除「检查-入队」窗口，高并发下不软超限。KEYS[1]=延迟队列 key；
+# ARGV[1]=兜底容量；ARGV[2]=complaint_id。返回新深度；-1 = 容量满。
+_DEFERRED_OFFER_LUA = """
+local depth = redis.call('LLEN', KEYS[1])
+if depth >= tonumber(ARGV[1]) then
+  return -1
+end
+redis.call('LPUSH', KEYS[1], ARGV[2])
+return depth + 1
+"""
 
 
 def _event_context(trace_id: str = "", *, node: str = "") -> dict | None:
@@ -115,6 +129,9 @@ class RateLimiter:
         self._user_qps = int(ucfg.get("qps", 200))
         self._user_window = int(ucfg.get("window", 1))
         self._mcp_qps: dict[str, int] = dict(self._cfg["mcp"]["qps"])
+        # 溢出延迟队列（design D4）：容量默认走 settings（env 驱动），yaml deferred.max 可选覆盖
+        dcfg = self._cfg.get("deferred") or {}
+        self._deferred_max = int(dcfg.get("max", settings.COMPLAINT_DEFERRED_QUEUE_MAX))
 
         # 维1/维2：进程内有界零件
         self._sem = Semaphore(self._max_active)
@@ -248,6 +265,10 @@ class RateLimiter:
         return ready, expired
 
     # ── 维3：MCP server 分桶令牌（window=1s）──────────────
+    # 生产链路的 MCP per-server QPS 统一由 mcp-gateway 的 MCPRateLimitMiddleware
+    # 治理（key=csmp:mcp_ratelimit:{server}，超限 429 拒绝且不触达下游 server）。
+    # 本方法为备用/单元测试用途，未接入 real_transport.call 调用链，
+    # 避免与网关双重计数导致误限流。
 
     async def acquire_mcp(self, server: str, trace_id: str = "") -> bool:
         qps = self._mcp_qps.get(server)
@@ -322,6 +343,64 @@ class RateLimiter:
             await get_redis().delete(exec_start_key(complaint_id))
         except (RedisError, OSError) as e:
             logger.warning("rate_limiter_exec_finish_failed", error=str(e))
+
+    # ── 溢出延迟队列（surge hardening 阶段3，design D4）──────────────
+
+    async def deferred_offer(self, complaint_id: str) -> bool:
+        """满溢出接入：原子「容量判定 + LPUSH」入 Redis 延迟队列（FIFO）并返回 True。
+
+        返回 False（路由层回退 B0006，fail-closed）：兜底容量已满（脚本返回 -1），
+        或 Redis 故障。容量检查与入队在单次 EVAL 内完成，高并发下不软超限。
+        """
+        try:
+            depth = await get_redis().eval(
+                _DEFERRED_OFFER_LUA,
+                1,
+                deferred_queue_key(),
+                self._deferred_max,
+                complaint_id,
+            )
+            if depth < 0:
+                logger.warning(
+                    "deferred_queue_full",
+                    complaint_id=complaint_id,
+                    depth=self._deferred_max,
+                )
+                return False
+            logger.info("deferred_queue_offered", complaint_id=complaint_id, depth=depth)
+            return True
+        except (RedisError, OSError) as e:
+            logger.warning(
+                "deferred_offer_failed", complaint_id=complaint_id, error=str(e)
+            )
+            return False
+
+    async def deferred_pop(self, timeout: int = 5) -> Optional[str]:
+        """BRPOP 取单（LPUSH 左进、BRPOP 右出 = FIFO）。
+
+        None 表示超时或 Redis 故障（故障日志已 warn，由调用方退避防空转）。
+        """
+        try:
+            item = await get_redis().brpop(deferred_queue_key(), timeout=timeout)
+            if not item:
+                return None
+            return item[1]
+        except (RedisError, OSError) as e:
+            logger.warning("deferred_pop_failed", error=str(e))
+            return None
+
+    async def deferred_requeue(self, complaint_id: str) -> None:
+        """重塞回延迟队列（指数退避 sleep 由调用方控制，方法内不阻塞）。
+
+        Redis 故障仅 warn——Redis 挂时整个延迟队列本身不可用，无可回塞目的地，
+        由维5锁 TTL/调用方重试兜底，不阻断补偿循环。
+        """
+        try:
+            await get_redis().lpush(deferred_queue_key(), complaint_id)
+        except (RedisError, OSError) as e:
+            logger.warning(
+                "deferred_requeue_failed", complaint_id=complaint_id, error=str(e)
+            )
 
     # ── 内部：Redis 操作（统一故障口径） ───────────────────
 

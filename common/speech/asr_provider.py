@@ -11,6 +11,7 @@ import structlog
 from common.config.settings import settings
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
+from common.llm.reliability import is_placeholder_secret
 from common.utils.retry import retry
 
 logger = structlog.get_logger()
@@ -44,7 +45,7 @@ class ASRProvider:
         Returns:
             ASRResult: text + confidence。
         """
-        if settings.ENV == "dev" and self._app_key == "change_me":
+        if settings.ENV == "dev" and is_placeholder_secret(self._app_key):
             logger.info("asr_mock_mode", length=len(audio_stream))
             return ASRResult(text="[mock]语音识别结果", confidence=0.95)
 

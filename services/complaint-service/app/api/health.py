@@ -20,4 +20,18 @@ async def health_check(request: Request) -> dict:
         "pg": "degraded" if getattr(app_state, "pg_degraded", False) else "ok",
         "redis": "degraded" if getattr(app_state, "redis_degraded", False) else "ok",
         "mcp": "degraded" if getattr(app_state, "mcp_degraded", False) else "ok",
+        # postgres = 图断点跨进程/重启可恢复；memory = 仅进程内，重启即丢。
+        # 这是生产上唯一能区分「真持久化」与「断点会丢」的信号，勿删。
+        "checkpointer": getattr(app_state, "checkpointer_kind", "memory"),
+        # session 写穿是否已降级（连续失败）。degraded 时状态机变更只在内存。
+        "session_persist": "degraded" if _session_persist_degraded() else "ok",
     }
+
+
+def _session_persist_degraded() -> bool:
+    try:
+        from app.service.session_service import session_service
+
+        return session_service.persist_degraded
+    except Exception:  # noqa: BLE001
+        return False

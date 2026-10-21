@@ -2,6 +2,7 @@
 import asyncio
 
 import pytest
+from redis.exceptions import RedisError
 
 from common.llm import reliability as reliability_mod
 from common.llm.reliability import (
@@ -21,6 +22,7 @@ from common.resilience.timeout import Timeout
 
 def test_placeholder_secrets():
     assert is_placeholder_secret("change_me")
+    assert is_placeholder_secret("placeholder")
     assert is_placeholder_secret("")
     assert not is_placeholder_secret("sk-real")
     with pytest.raises(RuntimeError, match="placeholder"):
@@ -290,3 +292,117 @@ async def test_resolve_service_name_unconfigured_raises():
 def test_llm_total_exceeds_mcp_total():
     # 超时层级约束：LLM total(120s) > MCP total(30s)
     assert Timeout().total > Timeout(total=30.0).total
+
+
+# ---------------------------------------------------------------------------
+# LLM 限流阈值：环境变量可配置 + 单一事实源 + 非法值保守回退
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def _rate_config_restore():
+    """用例后按（已被 monkeypatch 还原的）环境变量重载模块级阈值，避免污染其他用例。"""
+    yield
+    reliability_mod.load_llm_rate_limit()
+
+
+def test_llm_rate_limit_defaults_when_env_unset(monkeypatch, _rate_config_restore):
+    # spec Scenario：未设置 LLM_RATE_LIMIT / LLM_RATE_WINDOW → 60 次 / 60 秒
+    monkeypatch.delenv("LLM_RATE_LIMIT", raising=False)
+    monkeypatch.delenv("LLM_RATE_WINDOW", raising=False)
+
+    assert reliability_mod.load_llm_rate_limit() == (60, 60)
+    assert reliability_mod.get_llm_rate_limit() == (60, 60)
+    assert reliability_mod.LLM_RATE_LIMIT_DEFAULT == 60
+    assert reliability_mod.LLM_RATE_WINDOW_DEFAULT == 60
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-5", "abc", "   "])
+def test_llm_rate_limit_invalid_env_falls_back_to_default(
+    monkeypatch, bad_value, _rate_config_restore
+):
+    # 0 / 负数 / 非数字 / 纯空白：保守回退默认 60/60，绝不抛异常阻断启动
+    monkeypatch.setenv("LLM_RATE_LIMIT", bad_value)
+    monkeypatch.setenv("LLM_RATE_WINDOW", bad_value)
+
+    assert reliability_mod.load_llm_rate_limit() == (60, 60)
+    assert reliability_mod.get_llm_rate_limit() == (60, 60)
+
+
+@pytest.mark.asyncio
+async def test_invoke_llm_env_threshold_600_allows_past_old_limit(
+    monkeypatch, _isolate, _rate_config_restore
+):
+    # spec Scenario：LLM_RATE_LIMIT=600 时超过旧阈值(60)但低于新阈值的请求不被拒绝
+    monkeypatch.setenv("LLM_RATE_LIMIT", "600")
+    monkeypatch.setenv("LLM_RATE_WINDOW", "60")
+    assert reliability_mod.load_llm_rate_limit() == (600, 60)
+
+    async def transport(model, messages, timeout_seconds):
+        return "ok"
+
+    set_llm_transport(transport)
+
+    for _ in range(61):
+        result = await invoke_llm("m1", [])
+        assert result["content"] == "ok"
+
+    # 限流 key 模板不变、按模型独立计数：61 次都计入 csmp:llm_ratelimit:m1
+    assert _isolate.counts["csmp:llm_ratelimit:m1"] == 61
+
+
+@pytest.mark.asyncio
+async def test_invoke_llm_sets_orchestration_flag_only_during_call(_isolate):
+    # D-1 契约：编排标志仅在 invoke_llm 执行期间为 True，进入前/退出后均为 False，
+    # 供服务自有 transport 检测嵌套、跳过其内嵌的同 key 限流计数。
+    seen: dict[str, bool] = {}
+
+    async def transport(model, messages, timeout_seconds):
+        seen["inside"] = reliability_mod.is_llm_orchestration_active()
+        return "ok"
+
+    assert reliability_mod.is_llm_orchestration_active() is False
+    set_llm_transport(transport)
+
+    await invoke_llm("m1", [])
+
+    assert seen["inside"] is True
+    assert reliability_mod.is_llm_orchestration_active() is False
+
+
+@pytest.mark.asyncio
+async def test_invoke_llm_orchestration_flag_reset_on_transport_error(
+    monkeypatch, _isolate
+):
+    # D-1 契约：transport 抛异常走降级返回后，标志仍必须复位（finally reset），
+    # 不污染调用方后续对 transport 的直调计数判断。
+    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+
+    async def transport(model, messages, timeout_seconds):
+        raise RuntimeError("boom")
+
+    set_llm_transport(transport)
+
+    result = await invoke_llm("m1", [])
+    assert result["degraded"] is True
+    assert reliability_mod.is_llm_orchestration_active() is False
+
+
+@pytest.mark.asyncio
+async def test_invoke_llm_rate_limit_redis_down_silent_allow(_isolate):
+    # spec Scenario：Redis 不可达仍静默放行（fail-open 方向不变），调用正常成功
+    class _RedisDown(FakeRedis):
+        async def set(self, key, value, ex=None, nx=False):
+            raise RedisError("redis down")
+
+        async def incr(self, key):
+            raise RedisError("redis down")
+
+    configure_redis(_RedisDown())
+
+    async def transport(model, messages, timeout_seconds):
+        return "ok"
+
+    set_llm_transport(transport)
+
+    result = await invoke_llm("m1", [])
+    assert result["content"] == "ok"
+    assert result["error"] is None

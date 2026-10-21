@@ -1,16 +1,25 @@
 name: CI
 
+# 触发器：
+# - push 主干 / pull_request：全量门禁（6 job）
+# - workflow_call：供批次 4 CD（.github/workflows/cd.yml）以 reusable workflow 复用同一门禁（design D7）
 on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_call:
 
 jobs:
-  test:
+  # 五个有实质测试的服务矩阵；检查名形如 service-test (<service>)
+  service-test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # 任一条目失败不取消其余条目，暴露全部问题（ci-matrix spec：其余 job 仍执行完毕）
+      matrix:
+        service: [data-platform, rag-service, qc-service, mcp-gateway, complaint-service]
     defaults:
       run:
-        working-directory: services/complaint-service
+        working-directory: services/${{ matrix.service }}
     steps:
       - uses: actions/checkout@v4
 
@@ -19,23 +28,41 @@ jobs:
         with:
           python-version: "3.11"
 
+      # D2 统一依赖安装：基线测试包 + 根 requirements.lock + 服务 requirements.runtime.txt（存在才装）
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pytest pytest-asyncio pytest-cov httpx nest-asyncio fastapi uvicorn locust
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          if [ -f ../../requirements.lock ]; then pip install -r ../../requirements.lock || true; fi
-
-      - name: Optional lint (ruff/bandit/mypy — 有配置则启用)
-        continue-on-error: true
-        run: |
-          if command -v ruff >/dev/null 2>&1; then ruff check app tests || true; else echo "ruff skip"; fi
-          if command -v bandit >/dev/null 2>&1; then bandit -q -r app || true; else echo "bandit skip"; fi
-          if command -v mypy >/dev/null 2>&1; then mypy app || true; else echo "mypy skip"; fi
-
-      - name: Unit + Integration (D8 核心覆盖率 ≥85%)
         env:
-          PYTHONPATH: ../..:$PYTHONPATH
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # 基线（与旧 ci.yml 一致）
+          pip install pytest pytest-asyncio pytest-cov httpx nest-asyncio fastapi uvicorn
+          # locust 仅 complaint 需要（对齐旧 ci.yml）；必须在根 lock 之前安装：
+          # lock 钉有 pytest==7.4.4 / pytest-asyncio==0.23.0，若在 lock 之后装 locust，
+          # 其宽松 pytest 依赖会把 pytest 重升到 9.x 而 pytest-asyncio 停在 0.23.0，
+          # 版本撕裂会在 collection 期报 'Package' object has no attribute 'obj'。
+          if [ "$SERVICE" = "complaint-service" ]; then pip install locust; fi
+          # 根 lock 中 rocketmq-python-client 与 langfuse 存在 otlp 解析耦合（见 lock 注释），
+          # 沿用 services/{qc-service,data-platform}/Dockerfile 既定做法：排除该行装 lock 主体，
+          # 再单独安装 rocketmq + 对齐 langfuse 的 otlp（common.eventbus 测试也需要 rocketmq 可导入）
+          grep -vE '^rocketmq-python-client' ../../requirements.lock > /tmp/requirements.base.lock
+          pip install -r /tmp/requirements.base.lock
+          pip install 'rocketmq-python-client==5.1.1' 'opentelemetry-exporter-otlp>=1.33.1'
+          # 服务运行时增量依赖（当前仅 complaint、mcp-gateway 存在此文件）
+          if [ -f requirements.runtime.txt ]; then pip install -r requirements.runtime.txt; fi
+
+      # 非投诉服务统一入口（mcp-gateway 就近使用自带 pytest.ini；其余服务采用根 pytest.ini）
+      - name: Run tests
+        if: matrix.service != 'complaint-service'
+        env:
+          PYTHONPATH: ../..
+        run: pytest tests/ -q
+
+      # ── complaint-service 特有四阶段（D3：整体迁入旧 ci.yml 既有阶段，覆盖率门禁仅此条目）──
+      - name: Unit + Integration (D8 核心覆盖率 ≥85%)
+        if: matrix.service == 'complaint-service'
+        env:
+          PYTHONPATH: ../..
           USE_REAL_INFRA: "0"
         run: |
           pytest tests/unit/ tests/integration/ \
@@ -45,18 +72,21 @@ jobs:
             --cov-report=term-missing --cov-fail-under=85 -q
 
       - name: E2E tests
+        if: matrix.service == 'complaint-service'
         env:
-          PYTHONPATH: ../..:$PYTHONPATH
+          PYTHONPATH: ../..
         run: pytest tests/e2e/ -q
 
       - name: Prompt regression
+        if: matrix.service == 'complaint-service'
         env:
-          PYTHONPATH: ../..:$PYTHONPATH
+          PYTHONPATH: ../..
         run: pytest tests/regression/ -q
 
       - name: Smoke test
+        if: matrix.service == 'complaint-service'
         env:
-          PYTHONPATH: ../..:$PYTHONPATH
+          PYTHONPATH: ../..
           PORT: "8006"
         run: |
           uvicorn app.main:app --port 8006 &
@@ -65,7 +95,7 @@ jobs:
           kill %1 || true
 
       - name: PR self-check summary
-        if: always()
+        if: matrix.service == 'complaint-service' && always()
         run: |
           echo "## PR Self-Check" >> $GITHUB_STEP_SUMMARY
           echo "- [ ] Unit + Integration（D8 核心 cov ≥85%，非整包 app）" >> $GITHUB_STEP_SUMMARY
@@ -74,3 +104,47 @@ jobs:
           echo "- [ ] Smoke script exit 0" >> $GITHUB_STEP_SUMMARY
           echo "- [ ] Error codes follow common.errors.codes" >> $GITHUB_STEP_SUMMARY
           echo "- [ ] 未新建 app/service/event_publisher.py" >> $GITHUB_STEP_SUMMARY
+
+      # 1.7 D4：ruff 仅 complaint、mcp-gateway 两条目运行；咨询性输出，continue-on-error 不阻塞 job
+      - name: Ruff lint (advisory, non-blocking)
+        if: matrix.service == 'complaint-service' || matrix.service == 'mcp-gateway'
+        continue-on-error: true
+        run: |
+          pip install ruff
+          ruff check app tests
+
+  # 公共 job：common 三个测试目录 + call/case/review 三个脚手架服务 health（1.6 落地）
+  common:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # D2 同款依赖安装（仓库根路径；common.eventbus 测试需要 rocketmq 可导入）
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install pytest pytest-asyncio pytest-cov httpx nest-asyncio fastapi uvicorn
+          grep -vE '^rocketmq-python-client' requirements.lock > /tmp/requirements.base.lock
+          pip install -r /tmp/requirements.base.lock
+          pip install 'rocketmq-python-client==5.1.1' 'opentelemetry-exporter-otlp>=1.33.1'
+
+      # 显式三目录：禁止裸跑 pytest——根 pytest.ini 的 testpaths 夹带 services/qc-service/tests
+      # PYTHONPATH=. 保证仓库根入 sys.path：pytest 7.4.x（lock 钉版）下根 pytest.ini addopts 的
+      # -p ai_collection_pytest_plugin 在 pythonpath ini 生效前导入，裸 pytest 脚本 cwd 不在 sys.path。
+      - name: common tests
+        env:
+          PYTHONPATH: .
+        run: pytest common/tests common/eventbus/tests common/security/tests -q
+
+      - name: Scaffold services health (call/case/review)
+        run: |
+          for svc in call-service case-service review-service; do
+            echo "== $svc health =="
+            (cd services/$svc && PYTHONPATH=../.. pytest tests/ -q)
+          done

@@ -1,0 +1,17 @@
+# Grafana dashboard provider（openspec change: observability-metrics-llm-usage，design D7）
+# dashboard JSON 与本文件同目录（tasks.md 6.1 路径口径），随 /etc/grafana/provisioning
+# 单一挂载进入容器，故 path 即容器内 provisioning/dashboards 目录本身；
+# Grafana 文件型 provider 仅拾取 *.json，本 .yml 不会被误读为 dashboard。
+apiVersion: 1
+
+providers:
+  - name: ai-collection
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

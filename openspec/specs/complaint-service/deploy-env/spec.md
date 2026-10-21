@@ -1,9 +1,5 @@
 ## Purpose
 
-定义投诉服务四环境（dev/test/pre/prod）配置差异矩阵与加载约定，对齐 PRD 第22章，保证生产安全约束落地。
-
-## Purpose
-
 定义投诉服务四环境（dev/test/pre/prod）配置差异矩阵与加载约定，对齐 PRD 第22章，保证生产安全约束落地到**可读 Settings 字段**（禁止幽灵开关名）。
 
 ## Requirements

@@ -1,0 +1,10 @@
+# sops 加密规则（唯一事实源：openspec/changes/infra-production-readiness D5）
+# 加解密均须在仓库根执行；解密私钥经 SOPS_AGE_KEY_FILE 指向本地 age 私钥，私钥严禁入库
+creation_rules:
+  # 同时匹配根 .env 与加密产物 .env.enc（.enc 扩展名无法由 sops 推断类型，命令需显式 dotenv）
+  - path_regex: '\.env(\.enc)?$'
+    # 按子串匹配键名：CCC_ACCESS_KEY_ID 以 _ID 结尾也能命中 KEY 子串，避免漏加密
+    encrypted_regex: '(KEY|SECRET|PASSWORD|TOKEN)'
+    # age 公钥 recipient（可公开）；私钥由核心成员离线持有，不在仓库/CI 中
+    age:
+      - age1ddf29z2hrq8mf5qp0v65mlre9ztlqlghwdg8225ll4z4y58wvgrsl3qus0

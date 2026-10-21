@@ -15,6 +15,16 @@ import structlog
 from app.config import settings
 from app.events.publisher import publisher
 from app.models.state import ReviewAction, TaskStatus, VerdictType
+from app.service.graph_lock import (
+    LOCK_ACQUIRED,
+    LOCK_HELD,
+    acquire_graph_lock,
+    acquire_resume_lock,
+    extend_resume_lock,
+    new_token,
+    release_graph_lock,
+    release_resume_lock,
+)
 from app.service.rate_limiter import rate_limiter
 from app.service.security import prepare_agent_log
 from app.service.session_service import session_service
@@ -25,15 +35,20 @@ logger = structlog.get_logger()
 class ComplaintPersistError(Exception):
     """投诉工单落 PostgreSQL 失败（路由须返回明确错误，禁止静默成功）。"""
 
-# 进程级 MemorySaver：judge 的 checkpointer 按 thread_id=complaint_id 留在投诉进程内，
+# 进程级 checkpointer：judge 的 checkpointer 按 thread_id=complaint_id 持久化图状态，
 # 禁止请求结束就丢弃。review approve 时对同一线程 Command(resume="approve") 恢复图。
-_graph_checkpointer = None
+# 实例与生命周期统一由 app.graph.checkpointer 持有（生产为 AsyncPostgresSaver，
+# 未配置 DSN 或 PG 不可用时降级为进程内 MemorySaver）。
 
 # G2 幂等守卫：resume 前等图进入 human_review 断点的轮询参数。
 # judge 真图含多轮真实 LLM 调用（reflection/verdict/generate_package 等），
-# 正常 ~40s 内入断点；给 120s 上限覆盖慢模型/重试，间隔 1s 不密集打 checkpoint。
+# 正常 ~40s 内入断点；给 120s 上限覆盖慢模型/重试。
+# 轮询用**指数退避**（基间隔 → 2s 封顶）而非固定间隔：每次 aget_state 是一次
+# checkpoints + checkpoint_blobs 的 join，固定 1s 在 120s 窗口内最多打 120 次；
+# 退避在「断点即将到达」的早期更灵敏（0.25s 起），后期降到 2s 显著降载。
 _RESUME_WAIT_TIMEOUT_S = 120.0
-_RESUME_WAIT_INTERVAL_S = 1.0
+_RESUME_WAIT_INTERVAL_S = 0.25        # 轮询基间隔（退避起点）
+_RESUME_WAIT_MAX_INTERVAL_S = 2.0     # 退避上限
 
 # G1b 图执行在途登记：同一 complaint_id 同一时刻只允许一张图在跑。
 # data-platform 订阅者与验收脚本双重驱动 + judge 内部 HTTP 5s 超时重试，
@@ -45,41 +60,50 @@ _graph_inflight: set[str] = set()
 # resume 互斥：同工单可能被多处 review approve 调度（订阅者 + 验收脚本），
 # 并发 resume 会双跑 human_review→sample_backflow；按 complaint_id 串行化。
 _resume_locks: dict[str, asyncio.Lock] = {}
-
-# _release_resume_lock 探测 asyncio.Lock._waiters 时的"无此属性"哨兵
-_RESUME_LOCK_ATTR_MISSING = object()
+# 引用计数：只在无人再引用该锁时回收，避免 dict 随工单量无界增长。
+# 曾用 asyncio.Lock._waiters 私有属性做"有无等待者"判断，问题有三：
+#   ① 私有属性，跨 Python 版本语义有变；② 属性缺失时退化为永不回收；
+#   ③ 安全论证依赖"取锁与入队之间无 await"这一隐含约束，易被后人破坏。
+# 显式计数把该前提变成代码，且不依赖解释器实现。
+_resume_lock_refs: dict[str, int] = {}
 
 
 def _resume_lock(complaint_id: str) -> asyncio.Lock:
+    """取锁并 +1 引用。调用方**必须**配对调用 `_release_resume_lock`。"""
     lock = _resume_locks.get(complaint_id)
     if lock is None:
         lock = asyncio.Lock()
         _resume_locks[complaint_id] = lock
+    _resume_lock_refs[complaint_id] = _resume_lock_refs.get(complaint_id, 0) + 1
     return lock
 
 
 def _release_resume_lock(complaint_id: str, lock: asyncio.Lock) -> None:
-    """无排队等待者时回收 per-complaint 锁，避免 dict 随工单量无界增长。
+    """-1 引用；归零才回收登记，避免 dict 无界增长。
 
-    调用时机硬约束：必须在仍持有该锁、且调用后到锁实际释放之间无 await。
-    协程一旦从 ``_resume_lock`` 取到本实例，下一句即 ``async with`` 排队，
-    中间无 await，故此刻不在 ``_waiters`` 里的协例不可能持有本实例，
-    删除登记不会导致后来者另建新锁而绕过互斥。
-    运行时无 ``_waiters`` 属性时不回收（退化为旧行为，仅缓慢占内存）。
-    CPython 3.11 中 ``_waiters`` 空闲为 None、有等待者时为非空 deque。
+    调用时机：必须在 `async with lock` **退出之后**（锁已释放），
+    这样即使回收后被后来者另建新锁，也不会与仍在临界区的协程重叠。
     """
-    waiters = getattr(lock, "_waiters", _RESUME_LOCK_ATTR_MISSING)
-    if waiters is not _RESUME_LOCK_ATTR_MISSING and not waiters:
-        _resume_locks.pop(complaint_id, None)
+    refs = _resume_lock_refs.get(complaint_id, 0) - 1
+    if refs > 0:
+        _resume_lock_refs[complaint_id] = refs
+        return
+    _resume_lock_refs.pop(complaint_id, None)
+    _resume_locks.pop(complaint_id, None)
 
 
-def _get_graph_checkpointer():
-    """惰性初始化进程级 MemorySaver（避免 import 时加载 langgraph）。"""
-    global _graph_checkpointer
-    if _graph_checkpointer is None:
-        from langgraph.checkpoint.memory import MemorySaver
-        _graph_checkpointer = MemorySaver()
-    return _graph_checkpointer
+async def _get_graph_checkpointer():
+    """获取进程级 checkpointer（生产为异步 PG saver，未配置时 MemorySaver）。
+
+    正常路径由 lifespan 预置（`init_checkpointer`）；本函数保留为兜底，
+    覆盖测试与未走 lifespan 的场景。`_INIT_DONE` 保证 PG 失败后不会每请求重试建池。
+    """
+    from app.graph.checkpointer import get_cached_checkpointer, init_checkpointer
+
+    cached = await get_cached_checkpointer()
+    if cached is not None:
+        return cached
+    return await init_checkpointer()
 
 
 def is_graph_inflight(complaint_id: str) -> bool:
@@ -152,13 +176,18 @@ class ComplaintService:
 
         - USE_MOCK_MCP=true：仅内存（mock 主路径，测试不依赖 PG）；
         - USE_MOCK_MCP=false：同事务 SELECT 幂等 + INSERT complaints，
-          成功 commit、失败 rollback 并抛 ComplaintPersistError（明确错误，不静默）。
+          成功 commit、失败 rollback 并抛 ComplaintPersistError（明确错误，不静默）；
+          随后 bootstrap complaint_sessions 行（FK 依赖工单行，故必须在其后），
+          该步 fail-open——失败只告警，不让建单 500。
         """
         rec = self.create(
             complaint_text, session_id=session_id, case_id=case_id, channel=channel
         )
         if not getattr(settings, "USE_MOCK_MCP", True):
             await self._persist_complaint_row(rec, complaint_text)
+            await session_service.aensure_persisted(
+                rec["session_id"], trace_id=str(rec.get("complaint_id") or "")
+            )
         return rec
 
     async def _persist_complaint_row(self, rec: dict, complaint_text: str) -> None:
@@ -301,6 +330,93 @@ class ComplaintService:
             raise ComplaintNotFound(complaint_id)
         return rec
 
+    def _restore_from_graph_snapshot(self, rec: dict, values: dict) -> None:
+        """用图终态快照补业务字段（hydrate 用；字段映射与 _judge_with_graph 回写一致）。"""
+        pkg = values.get("judgment_package")
+        draft = values.get("verdict_draft")
+
+        response_draft = ""
+        if isinstance(pkg, dict):
+            response_draft = str(
+                pkg.get("response_draft")
+                or pkg.get("judgment_report")
+                or pkg.get("verdict_report")
+                or ""
+            )
+        elif pkg is not None:
+            response_draft = (
+                getattr(pkg, "response_draft", "") or getattr(pkg, "judgment_report", "")
+            )
+
+        if isinstance(draft, dict) and draft.get("verdict") is not None:
+            v = draft.get("verdict")
+            rec["verdict"] = VerdictType(v) if not isinstance(v, VerdictType) else v
+            rec["confidence"] = float(draft.get("confidence") or 0.0)
+            if not response_draft:
+                response_draft = str(draft.get("reasoning") or "")
+        elif draft is not None and hasattr(draft, "verdict"):
+            rec["verdict"] = draft.verdict
+            rec["confidence"] = float(getattr(draft, "confidence", 0.0) or 0.0)
+            if not response_draft:
+                response_draft = getattr(draft, "reasoning", "") or ""
+        else:
+            rec["verdict"] = VerdictType.pending
+            rec["confidence"] = 0.0
+
+        rec["response_draft"] = response_draft or ""
+        from app.service.evidence_refs import extract_citations_from_graph_final
+
+        allowed, regs, srcs = extract_citations_from_graph_final(values)
+        rec["allowed_rag_doc_ids"] = allowed
+        rec["regulation_refs"] = regs
+        rec["rag_source_ids"] = srcs
+        rec["stop_call_flag"] = rec["verdict"] == VerdictType.agent_violation
+
+    async def ahydrate(self, complaint_id: str) -> Optional[dict]:
+        """缓存未命中时从 PG 重建内存态（进程重启 / 换副本的关键路径）。
+
+        必须重建两处，缺一不可：
+        - session_service._store / _by_complaint ← complaint_sessions 行
+          （`get()` 只看 `self._cache`，不重建就会 404）
+        - complaint_service._cache ← _session_to_record，再用图快照补业务字段
+
+        `task_status` 以 complaint_sessions 为准（session 是状态机权威）；
+        图快照只补 verdict / response_draft 等业务产出，缺失不阻断。
+        """
+        sid = await session_service.aload_by_complaint(complaint_id)
+        if sid is None:
+            return None
+        session = await session_service.aload_session(sid)
+        if session is None:
+            return None
+
+        rec = self._session_to_record(session)
+        try:
+            from app.graph.builder import build_complaint_graph
+
+            graph = build_complaint_graph(checkpointer=await _get_graph_checkpointer())
+            snap = await graph.aget_state({"configurable": {"thread_id": complaint_id}})
+            values = dict(snap.values) if (snap and snap.values) else {}
+            if values:
+                self._restore_from_graph_snapshot(rec, values)
+        except Exception as e:  # noqa: BLE001 — 快照缺失不影响状态机与路由
+            logger.warning("hydrate_graph_snapshot_failed",
+                           complaint_id=complaint_id, error=str(e))
+        return rec
+
+    async def aget_or_raise(self, complaint_id: str) -> dict:
+        """get_or_raise 的异步版：内存命中零开销，未命中才回源 PG 重建。
+
+        热路径行为与 get_or_raise 完全一致（先走同步 get），故路由可安全替换。
+        """
+        rec = self.get(complaint_id)
+        if rec is not None:
+            return rec
+        rec = await self.ahydrate(complaint_id)
+        if rec is None:
+            raise ComplaintNotFound(complaint_id)
+        return rec
+
     def judge(self, complaint_id: str, run_graph: bool = False) -> dict:
         """研判入口。
 
@@ -330,12 +446,33 @@ class ComplaintService:
             # G5 排队 deadline：入队超 10min（queue_start 已失效）→ A5010 转人审，不进图
             if not await rate_limiter.check_queue_deadline(complaint_id):
                 return self._handle_queue_timeout(rec)
+
+            # 跨进程图锁：单副本时上面那条进程内判断已足够；多副本时两路 astream
+            # 写同一 thread_id 会让 checkpoint 分叉、resume 失效，故需跨进程互斥。
+            # Redis 不可用 → LOCK_UNAVAILABLE，退化为仅进程内守卫（fail-open）。
+            #
+            # TTL = exec_timeout（1800s）是**刻意与执行超时对齐**，不是随手取值：
+            # 超过 1800s 的执行本就会被 asyncio.wait_for 判超时转人工，锁同时到期
+            # 是自洽的。代价是进程硬崩溃（无 finally）时同单最多被挡 30min。
+            # 评估结论：当前单实例部署下该路径不触发，不值得引入看门狗续期来换
+            # 5min 的恢复时间（纯增复杂度）。若将来真上多副本且对恢复时间敏感，
+            # 再考虑「缩短 TTL + 后台续期」，届时须同时评估续期失败的处理。
+            token = new_token()
+            lock_state = await acquire_graph_lock(
+                complaint_id, ttl=int(rate_limiter.exec_timeout_seconds), token=token
+            )
+            if lock_state == LOCK_HELD:
+                logger.info("judge_skip_graph_lock_held", complaint_id=complaint_id)
+                return self._sync_from_session(rec)
+
             out = rec
             _graph_inflight.add(complaint_id)
             try:
                 out = await self._judge_with_graph(rec, complaint_id)
             finally:
                 _graph_inflight.discard(complaint_id)
+                if lock_state == LOCK_ACQUIRED:
+                    await release_graph_lock(complaint_id, token)
             # 5.4：judge 返回后同栈检查；仅 next 含 human_review 且开关开才 resume
             await self._maybe_sim_auto_review(complaint_id)
             return self.get(complaint_id) or out
@@ -352,7 +489,7 @@ class ComplaintService:
         from app.graph.builder import HUMAN_REVIEW, build_complaint_graph
 
         try:
-            graph = build_complaint_graph(checkpointer=_get_graph_checkpointer())
+            graph = build_complaint_graph(checkpointer=await _get_graph_checkpointer())
             config = {"configurable": {"thread_id": complaint_id}}
             snap = await graph.aget_state(config)
             nxt = tuple(getattr(snap, "next", None) or ())
@@ -523,8 +660,9 @@ class ComplaintService:
     async def _judge_with_graph(self, rec: dict, complaint_id: str) -> dict:
         """run_graph=True：编译并执行真图，回写 verdict 等字段，并落单 trace_events。
 
-        使用进程级 MemorySaver（非请求级），使 checkpointer 按 thread_id=complaint_id
-        留在投诉进程内。review approve 时对同一线程 Command(resume="approve") 恢复图。
+        使用进程级 checkpointer（非请求级），按 thread_id=complaint_id 持久化图状态：
+        生产为 AsyncPostgresSaver（跨进程/重启可恢复），未配置 DSN 时降级 MemorySaver。
+        review approve 时对同一线程 Command(resume="approve") 恢复图。
         """
         from langgraph.errors import GraphInterrupt
 
@@ -559,7 +697,7 @@ class ComplaintService:
         ).model_dump()
         # 进程级 checkpointer：thread_id=complaint_id，judge 停在 human_review 后状态不丢弃，
         # review approve 时用同一线程 Command(resume="approve") 恢复图进 sample_backflow
-        graph = build_complaint_graph(checkpointer=_get_graph_checkpointer())
+        graph = build_complaint_graph(checkpointer=await _get_graph_checkpointer())
         config = {"configurable": {"thread_id": complaint_id}}
 
         mcp = get_mcp_client()
@@ -733,6 +871,11 @@ class ComplaintService:
         # 供 review approve 用同一线程 Command(resume="approve") 恢复图
         rec["thread_id"] = complaint_id
         rec = self._sync_from_session(rec)
+        # 状态已推进到 pending_review：写穿到 PG，使重启/换副本后仍能 resume
+        await session_service.aflush_session(sid)
+        # Step 6：图产出快照一次性回填（唯一写点；只写不读，resume 只认 checkpoint）
+        if isinstance(final, dict) and final:
+            await session_service.aflush_graph_snapshot(sid, final)
 
         # 从 graph 终态回写：优先 judgment_package 答辩稿，其次 verdict_draft
         pkg = final.get("judgment_package") if isinstance(final, dict) else None
@@ -874,7 +1017,8 @@ class ComplaintService:
     async def _resume_graph_thread(self, complaint_id: str, session_id: str) -> None:
         """review approve 后恢复图线程 → sample_backflow → write_session。
 
-        使用 judge 时同一进程级 MemorySaver 和 thread_id=complaint_id。
+        使用与 judge 相同的进程级 checkpointer 和 thread_id=complaint_id
+        （生产为 PG，故断点可跨进程/重启恢复；内存降级时仅限本进程）。
         不改图节点、不新做路由。session_id 仅用于日志上下文。
 
         G2 幂等守卫：data-platform 订阅者与验收脚本双重驱动时，review approve
@@ -887,7 +1031,7 @@ class ComplaintService:
         from langgraph.types import Command
         from app.graph.builder import HUMAN_REVIEW, build_complaint_graph
         try:
-            graph = build_complaint_graph(checkpointer=_get_graph_checkpointer())
+            graph = build_complaint_graph(checkpointer=await _get_graph_checkpointer())
             config = {"configurable": {"thread_id": complaint_id}}
 
             # G2a：先等 judge 图执行结束（judge 优先，resume 不抢执行权）
@@ -905,56 +1049,83 @@ class ComplaintService:
 
             # G2b：等图真正停在 human_review 断点（next 含 human_review 才是可恢复态）。
             # 整段 poll+resume 持 resume 锁，避免订阅者与脚本各调度一次时并发双跑。
-            resume_lock = _resume_lock(complaint_id)
-            async with resume_lock:
+            #
+            # 跨进程互斥：多副本下订阅者与 HTTP 可能落在不同副本，进程内 asyncio.Lock
+            # 拦不住 → sample_backflow 双跑、write_session 重复。Redis 不可用时为
+            # LOCK_UNAVAILABLE，退化为仅进程内守卫（fail-open）。
+            resume_token = new_token()
+            resume_lock_state = await acquire_resume_lock(
+                complaint_id, ttl=int(_RESUME_WAIT_TIMEOUT_S) + 30, token=resume_token
+            )
+            if resume_lock_state == LOCK_HELD:
+                logger.info("graph_resume_skip_lock_held", complaint_id=complaint_id)
+                return
+            try:
+                resume_lock = _resume_lock(complaint_id)
                 try:
-                    # N6：双驱动（订阅者 + HTTP）争同一把锁，落败路拿到锁时
-                    # 先到的一路已消费 human_review 断点：next 不再含 human_review，
-                    # 且 human_review 结果已写入 state。立即返回，不空轮询 120s 刷 warning。
-                    first_snap = await graph.aget_state(config)
-                    first_next = tuple(getattr(first_snap, "next", None) or ())
-                    first_values = getattr(first_snap, "values", None) or {}
-                    hr_value = first_values.get("human_review")
-                    hr_action = (
-                        hr_value.get("review_action")
-                        if isinstance(hr_value, dict)
-                        else getattr(hr_value, "review_action", None)
-                    )
-                    already_reviewed = bool(
-                        HUMAN_REVIEW not in first_next and hr_action
-                    )
-                    if already_reviewed:
-                        logger.info(
-                            "graph_resume_skip_already_resumed",
-                            complaint_id=complaint_id,
-                            session_id=session_id,
-                            inflight_waited_s=round(inflight_waited, 3),
+                    async with resume_lock:
+                        # N6：双驱动（订阅者 + HTTP）争同一把锁，落败路拿到锁时
+                        # 先到的一路已消费 human_review 断点：next 不再含 human_review，
+                        # 且 human_review 结果已写入 state。立即返回，不空轮询 120s 刷 warning。
+                        first_snap = await graph.aget_state(config)
+                        first_next = tuple(getattr(first_snap, "next", None) or ())
+                        first_values = getattr(first_snap, "values", None) or {}
+                        hr_value = first_values.get("human_review")
+                        hr_action = (
+                            hr_value.get("review_action")
+                            if isinstance(hr_value, dict)
+                            else getattr(hr_value, "review_action", None)
                         )
-                        return
-
-                    waited = 0.0
-                    entered = False
-                    while waited < _RESUME_WAIT_TIMEOUT_S:
-                        snap = await graph.aget_state(config)
-                        nxt = tuple(getattr(snap, "next", None) or ())
-                        if HUMAN_REVIEW in nxt:
-                            entered = True
-                            break
-                        await asyncio.sleep(_RESUME_WAIT_INTERVAL_S)
-                        waited += _RESUME_WAIT_INTERVAL_S
-                    if not entered:
-                        logger.warning(
-                            "graph_resume_no_interrupt_after_wait",
-                            complaint_id=complaint_id,
-                            session_id=session_id,
-                            waited_s=waited,
+                        already_reviewed = bool(
+                            HUMAN_REVIEW not in first_next and hr_action
                         )
-                        return
+                        if already_reviewed:
+                            logger.info(
+                                "graph_resume_skip_already_resumed",
+                                complaint_id=complaint_id,
+                                session_id=session_id,
+                                inflight_waited_s=round(inflight_waited, 3),
+                            )
+                            return
 
-                    await graph.ainvoke(Command(resume="approve"), config=config)
+                        waited = 0.0
+                        entered = False
+                        interval = _RESUME_WAIT_INTERVAL_S
+                        while waited < _RESUME_WAIT_TIMEOUT_S:
+                            snap = await graph.aget_state(config)
+                            nxt = tuple(getattr(snap, "next", None) or ())
+                            if HUMAN_REVIEW in nxt:
+                                entered = True
+                                break
+                            await asyncio.sleep(interval)
+                            waited += interval
+                            interval = min(interval * 2, _RESUME_WAIT_MAX_INTERVAL_S)
+                        if not entered:
+                            logger.warning(
+                                "graph_resume_no_interrupt_after_wait",
+                                complaint_id=complaint_id,
+                                session_id=session_id,
+                                waited_s=waited,
+                            )
+                            return
+
+                        # 进入断点后、执行前续期：让锁覆盖整段图执行（含 sample_backflow
+                        # 的 MCP 调用），避免轮询耗光 TTL 后锁在执行段中途过期被他人抢走。
+                        if resume_lock_state == LOCK_ACQUIRED:
+                            await extend_resume_lock(
+                                complaint_id,
+                                ttl=int(rate_limiter.exec_timeout_seconds),
+                                token=resume_token,
+                            )
+
+                        await graph.ainvoke(Command(resume="approve"), config=config)
                 finally:
-                    # N4：持锁末尾回收（其后仅锁释放、无 await，见函数 docstring 约束）
+                    # 回收必须在 async with 退出**之后**（锁已释放）：这样即使登记被
+                    # 回收、后来者另建新锁，也不会与临界区内的协程重叠。见函数 docstring。
                     _release_resume_lock(complaint_id, resume_lock)
+            finally:
+                if resume_lock_state == LOCK_ACQUIRED:
+                    await release_resume_lock(complaint_id, resume_token)
             logger.info(
                 "graph_resumed_after_approve",
                 complaint_id=complaint_id,

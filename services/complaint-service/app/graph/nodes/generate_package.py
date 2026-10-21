@@ -51,7 +51,8 @@ async def generate_package_node(state: ComplaintSessionState) -> dict:
     # MODERATE-5：MCP try/except
     try:
         rag_result = await mcp.call(
-            _RAG_SERVER, "search_response_templates", {"query": state.complaint_text[:500]}
+            _RAG_SERVER, "search_response_templates", {"query": state.complaint_text[:500]},
+            trace_id=state.trace_id, session_id=state.session_id,
         )
         if not isinstance(rag_result, list):
             rag_result = [rag_result] if rag_result else []

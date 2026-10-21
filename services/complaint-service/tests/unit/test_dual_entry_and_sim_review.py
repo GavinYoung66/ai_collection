@@ -19,6 +19,13 @@ def client() -> TestClient:
     return TestClient(app)
 
 
+def _async_saver(value):
+    """`_get_graph_checkpointer` 已 async 化，替身必须可 await。"""
+    async def _get():
+        return value
+    return _get
+
+
 def test_http_create_does_not_auto_judge(client, monkeypatch):
     """5.3：POST /complaints 只建单，不自动 judge(run_graph=true)。"""
     judge_calls: list = []
@@ -62,7 +69,7 @@ async def test_sim_auto_review_true_resumes_when_breakpoint(monkeypatch):
         lambda checkpointer=None: _Graph(),
     )
     monkeypatch.setattr(
-        cs_mod, "_get_graph_checkpointer", lambda: MagicMock(), raising=False
+        cs_mod, "_get_graph_checkpointer", _async_saver(MagicMock()), raising=False
     )
 
     await svc._maybe_sim_auto_review("cid-sim-1")
@@ -116,7 +123,7 @@ async def test_sim_auto_review_skips_when_no_breakpoint(monkeypatch):
         lambda checkpointer=None: _Graph(),
     )
     monkeypatch.setattr(
-        cs_mod, "_get_graph_checkpointer", lambda: MagicMock(), raising=False
+        cs_mod, "_get_graph_checkpointer", _async_saver(MagicMock()), raising=False
     )
 
     await svc._maybe_sim_auto_review("cid-sim-nobp")

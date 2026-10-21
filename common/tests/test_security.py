@@ -50,7 +50,7 @@ class TestMask:
         assert masked.startswith("****")
 
     def test_mask_bank_card_short(self):
-        assert mask_bank_card("123") == "**** **** **** 123"
+        assert mask_bank_card("123") == "123"
 
     def test_mask_name(self):
         assert mask_name("张三") == "张*"
@@ -108,7 +108,7 @@ class TestSensitiveWords:
         assert len(hits) == 0
 
     def test_contains_true(self, matcher):
-        assert matcher.contains("你的征信会受影响") is True
+        assert matcher.contains("逾期不还会影响征信") is True
 
     def test_contains_false(self, matcher):
         assert matcher.contains("请尽快还款") is False

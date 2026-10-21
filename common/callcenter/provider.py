@@ -14,6 +14,7 @@ import structlog
 from common.config.settings import settings
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
+from common.llm.reliability import is_placeholder_secret
 from common.utils.retry import retry
 from common.utils.semaphore import CallSemaphore
 
@@ -67,7 +68,7 @@ class CCCProvider:
 
     @retry(max_attempts=3, delay=1.0, backoff=2.0, exceptions=(aiohttp.ClientError, asyncio.TimeoutError))
     async def _post(self, action: str, extra: dict) -> dict:
-        if settings.ENV == "dev" and self._access_key_id == "change_me":
+        if settings.ENV == "dev" and is_placeholder_secret(self._access_key_id):
             logger.info("ccc_mock_mode", action=action)
             return {"mock": True, "action": action, **extra}
 

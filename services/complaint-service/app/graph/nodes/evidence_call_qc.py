@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import re
 
 import structlog
@@ -42,16 +43,38 @@ async def evidence_call_qc_node(state: ComplaintSessionState) -> dict:
     case_evidence: dict[str, CaseEvidenceBundle] = {}
 
     for case_id in state.case_ids:
-        try:
-            asr_data = await mcp.call(_SERVER, "query_call_asr", {"case_id": case_id})
-            qc_data = await mcp.call(_SERVER, "query_qc_violations", {"case_id": case_id})
-        except (MCPTimeoutError, MCPError) as e:
-            logger.warning("evidence_call_qc_mcp_error", case_id=case_id, error=str(e))
-            return {
-                "exception_info": ExceptionInfo(
-                    error_type=type(e).__name__, message=str(e), node="evidence_call_qc"
-                ).model_dump()
-            }
+        # 单 case 内两查询并发（return_exceptions=True 收集，不吞异常）。
+        # 注意：失败路径下另一查询仍会发出并收集异常（spec 要求不掩盖为成功），
+        # 与串行短路行为不同属预期设计。
+        asr_data, qc_data = await asyncio.gather(
+            mcp.call(
+                _SERVER, "query_call_asr", {"case_id": case_id},
+                trace_id=state.trace_id, session_id=state.session_id,
+            ),
+            mcp.call(
+                _SERVER, "query_qc_violations", {"case_id": case_id},
+                trace_id=state.trace_id, session_id=state.session_id,
+            ),
+            return_exceptions=True,
+        )
+
+        # 任一 MCP 异常即整节点降级，语义与串行版本逐字对齐
+        for maybe_exc in (asr_data, qc_data):
+            if isinstance(maybe_exc, (MCPTimeoutError, MCPError)):
+                logger.warning(
+                    "evidence_call_qc_mcp_error", case_id=case_id,
+                    error_type=type(maybe_exc).__name__, error=str(maybe_exc),
+                )
+                return {
+                    "exception_info": ExceptionInfo(
+                        error_type=type(maybe_exc).__name__, message=str(maybe_exc), node="evidence_call_qc"
+                    ).model_dump()
+                }
+
+        # 非 MCP 异常与串行行为一致：直接抛出（不做降级）
+        for maybe_exc in (asr_data, qc_data):
+            if isinstance(maybe_exc, BaseException):
+                raise maybe_exc
 
         asr_list = asr_data if isinstance(asr_data, list) else [asr_data]
         call_evidence: list[dict] = []
@@ -78,6 +101,9 @@ async def evidence_call_qc_node(state: ComplaintSessionState) -> dict:
             )
         call_evidence = apply_corruption_degradation(call_evidence)
 
+        # query_qc_violations 返回的是违规片段（fixture 形状含 qc_id/violation_type/
+        # snippet_text），非告警（无 alert_id/description）。按违规字段装配 qc_alerts：
+        # evidence_id 取 qc_id（qc-service 直连场景兜底 qc_record_id），content 取违规片段文本。
         qc_list = qc_data if isinstance(qc_data, list) else [qc_data]
         qc_alerts: list[dict] = []
         for alert in qc_list:
@@ -85,10 +111,10 @@ async def evidence_call_qc_node(state: ComplaintSessionState) -> dict:
                 continue
             qc_alerts.append(
                 {
-                    "evidence_id": alert.get("alert_id", f"qc-{case_id}"),
+                    "evidence_id": str(alert.get("qc_id") or alert.get("qc_record_id") or f"qc-{case_id}"),
                     "evidence_type": "qc_alert",
                     "source": "qc",
-                    "content": alert.get("description", ""),
+                    "content": str(alert.get("snippet_text") or alert.get("violation_type") or ""),
                     "confidence": 1.0,
                     "confidence_level": "high",
                     "is_corrupted": False,

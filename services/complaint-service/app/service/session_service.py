@@ -15,8 +15,12 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Optional, Union
 
+import structlog
+
 from app.models.state import TaskStatus
 from app.utils.redis_keys import TTL_COMPLAINT_LOCK, complaint_lock_key
+
+logger = structlog.get_logger()
 
 StatusLike = Union[TaskStatus, str]
 
@@ -105,6 +109,8 @@ class SessionService:
         self._store: dict[str, dict] = {}
         self._by_complaint: dict[str, str] = {}  # complaint_id → session_id 持久映射
         self._lock = threading.Lock()
+        # PG 写穿是否已降级（fail-open：写失败只告警，不回滚内存流转）
+        self._persist_degraded = False
 
     def _find_by_complaint(self, complaint_id: str) -> Optional[str]:
         sid = self._by_complaint.get(complaint_id)
@@ -228,8 +234,330 @@ class SessionService:
                     hit.append(sid)
         return hit
 
-    # ── 对账辅助 ──
+    # ── PG 持久化（异步边界）────────────────────────────────
+    #
+    # 设计：本类的同步 API 与内存 _store 是**单进程内的读权威**，签名一律不变；
+    # PG 持久化只体现在下面这组 a* 方法里，由调用方（ComplaintService 与路由）
+    # 在已是 async 的位置显式调用，避免把 21 处调用点全部 async 化。
+    #
+    # 权威边界：内存命中时内存优先（它是活的、最新的；PG 是 write-behind，
+    # 可能落后一次 flush）；进程重启/换副本/内存无此 sid 时 PG 才成为权威。
 
+    def _persist_enabled(self) -> bool:
+        """PG 写穿是否启用。与 _persist_complaint_row 同一道门，保证单测不碰 PG。"""
+        try:
+            from app.config import settings
+
+            if not getattr(settings, "COMPLAINT_SESSION_PERSIST", True):
+                return False
+            return not getattr(settings, "USE_MOCK_MCP", True)
+        except Exception:  # noqa: BLE001
+            return False
+
+    @property
+    def persist_degraded(self) -> bool:
+        """PG 写穿**当前**是否处于降级。
+
+        刻意做成可自愈：任何一次成功写入都会复位。若做成只置不清的闩锁，
+        一次瞬时抖动会让 /health 永久显示 degraded，运维无法据此判断现状。
+        """
+        return self._persist_degraded
+
+    def _mark_persist_ok(self) -> None:
+        self._persist_degraded = False
+
+    async def aensure_persisted(self, session_id: str,
+                                trace_id: Optional[str] = None) -> bool:
+        """bootstrap INSERT：把内存新建的 session 落一行到 complaint_sessions。
+
+        幂等（已存在直接返回 True）。**失败不抛**——session 行是恢复辅助，
+        缺了只是"这条工单重启后不可 resume"，不应让建单 500。
+        FK 依赖：complaint_id 指向 complaints.id，必须在工单行落库之后调用。
+        """
+        if not self._persist_enabled():
+            return False
+        rec = self._store.get(session_id)
+        if rec is None:
+            return False
+
+        try:
+            from sqlalchemy import select
+
+            from app.models.complaint_session import ComplaintSession
+            from common.db.session import async_session_factory
+
+            async with async_session_factory() as db:
+                found = await db.execute(
+                    select(ComplaintSession.id)
+                    .where(ComplaintSession.session_id == session_id)
+                    .limit(1)
+                )
+                if found.scalar_one_or_none() is not None:
+                    self._mark_persist_ok()
+                    return True
+
+                row = ComplaintSession(
+                    session_id=session_id,
+                    trace_id=trace_id or session_id,
+                    complaint_id=uuid.UUID(str(rec["complaint_id"])),
+                    complaint_text=rec.get("complaint_text") or "",
+                    task_status=rec["task_status"].value,
+                )
+                db.add(row)
+                await db.commit()
+            self._mark_persist_ok()
+            return True
+        except Exception as e:  # noqa: BLE001 — fail-open
+            self._persist_degraded = True
+            logger.warning("session_persist_failed", op="ensure",
+                           session_id=session_id, error=str(e))
+            return False
+
+    async def aflush_session(self, session_id: str) -> bool:
+        """把内存中的 task_status 全量 UPDATE 到 PG。
+
+        幂等：每次写全量状态，故上一轮 flush 失败无需重试——下一轮天然自愈。
+        rowcount==0 表示该 session 未 bootstrap（mock 模式/测试），静默返回。
+        update_time 由 ORM 的 onupdate=func.now() 自动刷新。
+        """
+        if not self._persist_enabled():
+            return False
+        rec = self._store.get(session_id)
+        if rec is None:
+            return False
+
+        try:
+            from sqlalchemy import update as sa_update
+
+            from app.models.complaint_session import ComplaintSession
+            from common.db.session import async_session_factory
+
+            async with async_session_factory() as db:
+                res = await db.execute(
+                    sa_update(ComplaintSession)
+                    .where(ComplaintSession.session_id == session_id)
+                    .values(task_status=rec["task_status"].value)
+                )
+                await db.commit()
+                if res.rowcount == 0:
+                    logger.debug("session_flush_no_row", session_id=session_id)
+                    return False
+            self._mark_persist_ok()
+            return True
+        except Exception as e:  # noqa: BLE001 — fail-open
+            self._persist_degraded = True
+            logger.warning("session_persist_failed", op="flush",
+                           session_id=session_id, error=str(e))
+            return False
+
+    @staticmethod
+    def _row_to_record(row: Any) -> dict:
+        """ORM 行 → 内存记录结构（与 create_session 写入的形状对齐）。"""
+        changed = row.update_time
+        return {
+            "session_id": row.session_id,
+            "complaint_id": str(row.complaint_id),
+            "complaint_text": row.complaint_text or "",
+            "task_status": _normalize_status(row.task_status),
+            "created_at": row.create_time,
+            "updated_at": changed,
+            "status_changed_at": changed,
+        }
+
+    async def aload_session(self, session_id: str, *,
+                            force: bool = False) -> Optional[dict]:
+        """PG → 内存回填。默认内存优先；force=True 时才用 PG 覆盖（灾备恢复专用）。"""
+        if not force and self._store.get(session_id) is not None:
+            return self._store[session_id]
+
+        try:
+            from sqlalchemy import select
+
+            from app.models.complaint_session import ComplaintSession
+            from common.db.session import async_session_factory
+
+            async with async_session_factory() as db:
+                res = await db.execute(
+                    select(ComplaintSession)
+                    .where(ComplaintSession.session_id == session_id,
+                           ComplaintSession.is_delete == "0")
+                    .limit(1)
+                )
+                row = res.scalar_one_or_none()
+            if row is None:
+                return None
+
+            rec = self._row_to_record(row)
+            with self._lock:
+                self._store[session_id] = rec
+                self._by_complaint[str(row.complaint_id)] = session_id
+            return rec
+        except Exception as e:  # noqa: BLE001
+            logger.warning("session_load_failed", session_id=session_id, error=str(e))
+            return None
+
+    async def aload_by_complaint(self, complaint_id: str) -> Optional[str]:
+        """complaint_id → session_id。内存未命中时回源 PG。"""
+        sid = self._by_complaint.get(complaint_id)
+        if sid and sid in self._store:
+            return sid
+
+        try:
+            from sqlalchemy import select
+
+            from app.models.complaint_session import ComplaintSession
+            from common.db.session import async_session_factory
+
+            async with async_session_factory() as db:
+                res = await db.execute(
+                    select(ComplaintSession.session_id)
+                    .where(
+                        ComplaintSession.complaint_id == uuid.UUID(str(complaint_id)),
+                        ComplaintSession.is_delete == "0",
+                    )
+                    .limit(1)
+                )
+                row = res.scalar_one_or_none()
+            if row is None:
+                return None
+            return str(row)
+        except Exception as e:  # noqa: BLE001 — 非法 UUID / 连不上都返回 None
+            logger.debug("session_load_by_complaint_miss",
+                         complaint_id=complaint_id, error=str(e))
+            return None
+
+    # ── Step 6：图产出快照回填（单写点）──────────────────────
+
+    # 只回填「图产出」列。状态机列（task_status/时间戳）归 transition + aflush_session，
+    # 此处绝不碰——避免两处写同一列造成双写不一致。
+    _SNAPSHOT_COLUMNS = (
+        "case_evidence",
+        "cross_case_evidence",
+        "historical_complaint_evidence",
+        "reflection_report",
+        "fact_timeline",
+        "compliance_opinion",
+        "user_demand",
+        "verdict_draft",
+        "judgment_package",
+        "exception_info",
+        "human_review",
+        "loop_count",
+        "total_tokens_consumed",
+    )
+
+    @staticmethod
+    def _jsonable(value: Any) -> Any:
+        """把图状态值转成可入 JSONB 的形式（pydantic 模型 / 枚举 / 容器）。"""
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if hasattr(value, "model_dump"):
+            try:
+                return value.model_dump(mode="json")
+            except Exception:  # noqa: BLE001 — 非 pydantic 的 model_dump 签名
+                return str(value)
+        if isinstance(value, dict):
+            return {str(k): SessionService._jsonable(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [SessionService._jsonable(v) for v in value]
+        if hasattr(value, "value"):  # Enum
+            return value.value
+        return str(value)
+
+    async def aflush_graph_snapshot(self, session_id: str, snapshot: dict) -> bool:
+        """把图终态一次性写入 complaint_sessions 的 JSONB 产出列。
+
+        **唯一写点**：图跑完时调用一次，不按 transition 增量写。
+        权威边界：这些列是**只写不读**的快照，resume 一律只认 LangGraph 的
+        checkpoint 三表；任何人不得从这些列反推图状态（见 ORM 类 docstring）。
+
+        fail-open：失败只告警，不影响已完成的研判与状态流转。
+        """
+        if not self._persist_enabled() or not isinstance(snapshot, dict):
+            return False
+
+        cols = {
+            name: self._jsonable(snapshot.get(name))
+            for name in self._SNAPSHOT_COLUMNS
+            if name in snapshot
+        }
+        if not cols:
+            return False
+
+        try:
+            from sqlalchemy import update as sa_update
+
+            from app.models.complaint_session import ComplaintSession
+            from common.db.session import async_session_factory
+
+            async with async_session_factory() as db:
+                res = await db.execute(
+                    sa_update(ComplaintSession)
+                    .where(ComplaintSession.session_id == session_id)
+                    .values(**cols)
+                )
+                await db.commit()
+                if res.rowcount == 0:
+                    logger.debug("session_snapshot_no_row", session_id=session_id)
+                    return False
+            self._mark_persist_ok()
+            return True
+        except Exception as e:  # noqa: BLE001 — fail-open
+            self._persist_degraded = True
+            logger.warning("session_persist_failed", op="snapshot",
+                           session_id=session_id, error=str(e))
+            return False
+
+    # ── B1：PG 版超时扫描（重启后从真相源恢复）────────────────
+    async def atimeout_sessions_stale(
+        self, timeout_minutes: int = TIMEOUT_MINUTES
+    ) -> list[str]:
+        """把 PG 里超期的 judging/draft_generated 工单转 pending_review。
+
+        这是「进程崩溃/重启后」的关键路径：同步版 `timeout_sessions` 只扫内存
+        `_store`，而重启后内存为空，滞留工单永远查不到。本方法直接查 PG 真相源，
+        一条 `UPDATE ... RETURNING` 原子完成，天然幂等（第二次查不到）。
+
+        超期判据用 `update_time`（≈ 内存 `status_changed_at`，flush 后同步）：
+        ORM 的 `update_time` 带 `onupdate=now()`，每次 `aflush_session` 都会刷新。
+        不回写内存（重启后本无内存态）；不写 exception_info（与同步版
+        `timeout_sessions` 语义对齐——对账转人工只改状态，不伪造错误标记）。
+
+        mock 模式（session 不落 PG）下直接返回 []，由同步版覆盖单进程场景。
+        """
+        if not self._persist_enabled():
+            return []
+
+        from sqlalchemy import text
+
+        sql = text(
+            """
+            UPDATE complaint_sessions
+            SET task_status = 'pending_review'
+            WHERE task_status IN ('pending', 'judging', 'draft_generated')
+              AND is_delete = '0'
+              AND update_time < now() - (:minutes * interval '1 minute')
+            RETURNING session_id
+            """
+        )
+        try:
+            from common.db.session import async_session_factory
+
+            async with async_session_factory() as db:
+                cur = await db.execute(sql, {"minutes": timeout_minutes})
+                timed_out = [str(r[0]) for r in cur.fetchall()]
+                await db.commit()
+            if timed_out:
+                logger.info("atimeout_sessions_stale",
+                            count=len(timed_out), minutes=timeout_minutes)
+            self._mark_persist_ok()
+            return timed_out
+        except Exception as e:  # noqa: BLE001 — fail-open，下轮自愈
+            self._persist_degraded = True
+            logger.warning("atimeout_sessions_stale_failed", error=str(e))
+            return []
+
+    # ── 对账辅助 ──
     def list_stale_draft_generated(self, stale_hours: float = 1.0) -> list[str]:
         now = self._clock()
         return [

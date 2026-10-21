@@ -9,9 +9,19 @@
 """
 from __future__ import annotations
 
+import contextvars
 from typing import Any, Optional
 
 import httpx
+
+# 最近一次 ``post_chat_completions`` 成功响应中的 ``usage``（供编排层 token 埋点透传）。
+# 口径：成功拿到 dict body 时写入 ``body.get("usage")``（无 usage 字段即 None）；
+# HTTP 非 200 / 异常路径不写，保持上一值由调用方 reset 兜底。
+# 重要：调用方若经 ``asyncio.wait_for`` 包裹本函数，写入只落在子 Task 的上下文副本里，
+# 必须在**同一个 Task 内**读取（见 reliability._call_model 的内层协程）。
+_llm_last_usage: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "llm_last_usage", default=None
+)
 
 
 async def post_json(
@@ -77,7 +87,7 @@ async def post_chat_completions(
     if response_format is not None:
         payload["response_format"] = response_format
 
-    return await post_json(
+    body = await post_json(
         url=url,
         api_key=api_key,
         payload=payload,
@@ -85,6 +95,9 @@ async def post_chat_completions(
         client=client,
         error_label=f"LLM model={model}",
     )
+    # 成功返回 dict body：透传 usage（无 usage 字段时为 None，交由编排层 reset 兜底）。
+    _llm_last_usage.set(body.get("usage"))
+    return body
 
 
 def message_content_from_completions(body: dict[str, Any]) -> str:

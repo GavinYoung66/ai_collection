@@ -2,17 +2,25 @@ services:
   ai-api-gateway:
     image: nginx:1.27-alpine
     container_name: ai-api-gateway
+    # 启动时经入口脚本 envsubst 渲染 /etc/nginx/nginx.conf.template。
+    command: ["/bin/sh", "/docker-entrypoint.sh"]
+    # 根 .env 仅服务 compose 插值，不会自动进入容器环境；这里显式注入。
+    env_file:
+      - .env
     ports:
       - "8080:8080"
+      # TLS_ENABLED=true 时 HTTPS 入口（tasks 6.2）；默认 false 时容器内无
+      # 8443 监听，映射空转无害。
+      - "8443:8443"
     volumes:
-      - ./deploy/gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/gateway/nginx.conf.template:/etc/nginx/nginx.conf.template:ro
+      - ./deploy/gateway/server_common.conf.template:/etc/nginx/server_common.conf.template:ro
+      - ./deploy/gateway/docker-entrypoint.sh:/docker-entrypoint.sh:ro
+      # TLS 证书目录（gen-self-signed.sh 生成）；false 时空目录挂载无害。
+      - ./deploy/gateway/tls:/etc/nginx/tls:ro
       - ./deploy/gateway/www:/usr/share/nginx/html/www:ro
       - ./services/complaint-service/web:/usr/share/nginx/html/complaint:ro
       - ./services/qc-service/web:/usr/share/nginx/html/qc:ro
-      - ./deploy/gateway/prefer-ipv4.sh:/prefer-ipv4.sh:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    command: ["/bin/sh", "/prefer-ipv4.sh"]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/gateway/health"]
@@ -21,3 +29,37 @@ services:
       retries: 3
       start_period: 5s
     depends_on: []
+    networks:
+      - ai-shared-net
+
+  # 鉴权 sidecar（api-gateway-hardening D3 / tasks 4.1-4.2）：
+  # 极薄 FastAPI，验证逻辑复用 common.security.authn；仅内网可达，不对外 publish 端口。
+  # common 代码以 volume 挂载运行时注入（镜像不 COPY），保持单一实现。
+  auth-sidecar:
+    build:
+      context: .
+      dockerfile: deploy/auth/Dockerfile
+    container_name: ai-api-auth
+    env_file:
+      - .env
+    volumes:
+      - ./common:/app/common:ro
+    restart: unless-stopped
+    networks:
+      - ai-shared-net
+
+  # 指标 exporter（api-gateway-hardening D10 / tasks 8.1）：抓取网关
+  # stub_status 并转 Prometheus 格式；仅接 ai-shared-net 内网，
+  # MUST NOT publish 端口（不对外裸奔）。网关经 location = /metrics 反代它。
+  nginx-prometheus-exporter:
+    image: nginx/nginx-prometheus-exporter:1.4.2
+    container_name: ai-api-gateway-metrics
+    command: ["-nginx.scrape-uri=http://ai-api-gateway:8080/stub_status"]
+    restart: unless-stopped
+    networks:
+      - ai-shared-net
+
+networks:
+  ai-shared-net:
+    external: true
+    name: ai-shared-net

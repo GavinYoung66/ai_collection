@@ -19,6 +19,9 @@ docs/
 deploy/
 !deploy/gradio/
 !deploy/gradio/requirements.txt
+!deploy/auth/
+!deploy/auth/main.py
+!deploy/auth/Dockerfile
 scripts/smoke/
 scripts/seed/
 Makefile

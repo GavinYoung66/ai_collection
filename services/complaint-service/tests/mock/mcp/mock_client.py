@@ -25,7 +25,7 @@ SERVERS = {
     "call_qc": [
         "query_call_asr",
         "query_qc_violations",
-        "query_call_sessions",
+        "query_qc_alerts",
     ],
     "rag_kb": [
         "search_regulations",
@@ -138,7 +138,7 @@ class MockMCPClient:
                 return v2
         if tool == "query_user_history_complaints":
             return "repeat"
-        if tool in ("query_call_asr", "query_qc_violations", "query_call_sessions"):
+        if tool in ("query_call_asr", "query_qc_violations", "query_qc_alerts"):
             if params.get("scenario") == "corrupted" or params.get("asr_corrupted") is True:
                 return "corrupted"
             if v2:

@@ -82,6 +82,8 @@ services:
     image: ai_collection/elasticsearch-ik:8.11.3
     build:
       context: ./deploy/elasticsearch
+    # ES snapshot 仓库白名单路径：entrypoint(eswrapper) 会剥去首参后透传 -E 参数（db-backup D6）
+    command: ["eswrapper", "-Epath.repo=/usr/share/elasticsearch/backup"]
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
@@ -89,6 +91,8 @@ services:
     ports: ["9200:9200"]
     volumes:
       - es_data:/usr/share/elasticsearch/data
+      # ES fs snapshot 仓库落盘到宿主机 backups/es（db-backup 3.3，仅本服务有 bind mount）
+      - ./backups/es:/usr/share/elasticsearch/backup
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
       interval: 30s
@@ -206,6 +210,44 @@ services:
     depends_on:
       rag-service:
         condition: service_healthy
+    restart: unless-stopped
+
+  # ===== 可观测性（openspec change: observability-metrics-llm-usage）=====
+  # 抓取目标锁定 docker-compose.dev.yml 单实例全栈（design D6），经宿主机端口映射 +
+  # host.docker.internal（macOS 原生支持；Linux 由 extra_hosts 补齐，design D1）
+  prometheus:
+    image: prom/prometheus:v2.54.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    ports:
+      - "3000:3000"
+    environment:
+      # 管理员密码从 .env 读取（.env.example 提供 GRAFANA_ADMIN_PASSWORD 占位）
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?must set GRAFANA_ADMIN_PASSWORD in .env}
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
 
 volumes:

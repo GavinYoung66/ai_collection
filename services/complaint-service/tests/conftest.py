@@ -89,3 +89,45 @@ def _global_fake_redis():
     configure_redis(_GlobalFakeRedis())
     yield
     reset_redis()
+
+
+@pytest.fixture(autouse=True)
+async def _dispose_pg_engine():
+    """每个用例后释放 common.db.session 的模块级 asyncpg 连接池。
+
+    该 engine 在模块导入时创建、全进程共享，而 pytest-asyncio 默认每个用例
+    新建 event loop；池中连接绑定旧 loop，下个用例复用时报
+    "attached to a different loop" / "Event loop is closed"。
+    dispose 后下次用到会按当前 loop 重建连接。
+    """
+    yield
+    try:
+        from common.db.session import engine
+
+        await engine.dispose()
+    except Exception:  # noqa: BLE001 — 未用 PG 的用例无需处理
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _reset_graph_state():
+    """清理 checkpointer 单例与进程内并发守卫，保证用例间隔离。
+
+    - checkpointer 单例在 app.graph.checkpointer 内进程级持有，此前没有清理入口；
+      未清理会让 PG saver 跨用例复用（且它绑定创建时的 event loop，
+      loop 关闭后再用必炸）。
+    - _graph_inflight / _resume_locks 是 complaint_service 的模块级结构，
+      用例间残留会造成"上一用例在途"的假象。
+    """
+    from app.graph.checkpointer import reset_checkpointer_for_tests
+    from app.service import complaint_service as cs
+
+    reset_checkpointer_for_tests()
+    cs._graph_inflight.clear()
+    cs._resume_locks.clear()
+    cs._resume_lock_refs.clear()
+    yield
+    reset_checkpointer_for_tests()
+    cs._graph_inflight.clear()
+    cs._resume_locks.clear()
+    cs._resume_lock_refs.clear()

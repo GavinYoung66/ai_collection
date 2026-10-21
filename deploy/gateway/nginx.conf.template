@@ -1,0 +1,154 @@
+worker_processes auto;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+    server_tokens off;
+    client_max_body_size 100m;
+
+    log_format gateway '$remote_addr - $remote_user [$time_local] "$request" '
+                       'status=$status trace_id=$trace_id '
+                       'request_time=$request_time '
+                       'upstream_response_time=$upstream_response_time '
+                       'upstream_addr=$upstream_addr '
+                       'body_bytes_sent=$body_bytes_sent';
+
+    # LOG_JSON=true 时启用的 JSON 访问日志格式（D / tasks 9.1）：
+    # 含 trace_id/status/request_time/upstream_response_time/body_bytes_sent，
+    # 增补 upstream_addr（tasks 10.1 灰度验收依据：v2 独立后端接入后据其
+    # 统计分流占比；spec 字段清单为 MUST 下限，允许增补），
+    # escape=json 保证字段值内特殊字符转义，单行可被 jq/采集系统结构化解析。
+    log_format gateway_json escape=json
+        '{"remote_addr":"$remote_addr","time":"$time_iso8601",'
+        '"request":"$request","status":"$status","trace_id":"$trace_id",'
+        '"request_time":"$request_time",'
+        '"upstream_response_time":"$upstream_response_time",'
+        '"upstream_addr":"$upstream_addr",'
+        '"body_bytes_sent":"$body_bytes_sent"}';
+
+    # access_log 由入口脚本按 LOG_JSON 生成（false=gateway 文本，true=gateway_json）。
+    include /etc/nginx/log.conf;
+
+    map $http_x_trace_id $trace_id {
+        ""      $request_id;
+        default $http_x_trace_id;
+    }
+
+    # CORS 白名单 map（D6 / tasks 5.1）：入口脚本把 CORS_ALLOWED_ORIGINS
+    # 逗号拆分生成；未命中白名单的 Origin 得空串，不产生 Allow-Origin 头。
+    include /etc/nginx/cors.conf;
+
+    # 灰度分流（D11 / tasks 10.1）：入口脚本按 CANARY_WEIGHT 生成 split_clients。
+    # 分流键用稳定会话标识 $cookie_canary；MUST NOT 用每请求唯一的
+    # $trace_id/$request_id（会同会话散到不同版本）。
+    # 注：location 用变量 proxy_pass（http://$xxx_upstream）后，upstream keepalive
+    # 连接缓存不生效（每请求新建连接）；灰度默认 CANARY_WEIGHT=0 未启用，属可接受
+    # 代价；v2 独立后端接入如需 keepalive，可将 proxy_pass 改回定名 upstream 组。
+    # 灰度验收方法（审核观察项3闭环）：v2 指向独立后端后，按访问日志新增的
+    # upstream_addr 字段统计 v1/v2 占比是否≈CANARY_WEIGHT，并以固定
+    # $cookie_canary 值复测会话粘性（同 cookie 恒定同 upstream）。
+    include /etc/nginx/canary.conf;
+
+    limit_req_zone $binary_remote_addr zone=gateway:10m rate=20r/s;
+
+    # Docker 内嵌 DNS。配合各 upstream 的 `resolve` 参数，nginx 启动时不再强制
+    # 解析 upstream 主机名：某后端容器缺失时网关仍可启动（仅该路由返 502），
+    # 而不是整个网关 [emerg] 起不来。`zone` 是 `resolve` 的必要前提。
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    # 被动熔断与重试边界（D8 / tasks 7.1）：
+    # - 仅连接层错误/超时重试，不因 HTTP 5xx 重试；
+    # - nginx 默认不含 non_idempotent，POST/PUT/DELETE/PATCH 不会被重试
+    #   （避免重复创建工单等副作用）；
+    # - 当前单节点 upstream 无下一节点，重试实际不发生；
+    # - 幂等 GET 在将来多节点时的 5xx 重试属后续项。
+    proxy_next_upstream error timeout;
+
+    upstream complaint {
+        zone complaint_up 64k;
+        server ${UPSTREAM_COMPLAINT} resolve max_fails=3 fail_timeout=10s;
+        keepalive 64;
+    }
+
+    upstream qc {
+        zone qc_up 64k;
+        server ${UPSTREAM_QC} resolve max_fails=3 fail_timeout=10s;
+        keepalive 64;
+    }
+
+    upstream kb {
+        zone kb_up 64k;
+        server ${UPSTREAM_RAG} resolve max_fails=3 fail_timeout=10s;
+        keepalive 64;
+    }
+
+    upstream web {
+        zone web_up 64k;
+        server ${UPSTREAM_WEB} resolve max_fails=3 fail_timeout=10s;
+        keepalive 64;
+    }
+
+    # v2 灰度占位（D11 / tasks 10.1）：与 v1 指向相同后端，CANARY_WEIGHT=0
+    #（默认）时无流量；启用灰度时仅需把 v2 的 server 指向新版本后端。
+    upstream complaint_v2 {
+        zone complaint_v2_up 64k;
+        server ${UPSTREAM_COMPLAINT} resolve max_fails=3 fail_timeout=10s;
+        keepalive 64;
+    }
+
+    upstream qc_v2 {
+        zone qc_v2_up 64k;
+        server ${UPSTREAM_QC} resolve max_fails=3 fail_timeout=10s;
+        keepalive 64;
+    }
+
+    upstream kb_v2 {
+        zone kb_v2_up 64k;
+        server ${UPSTREAM_RAG} resolve max_fails=3 fail_timeout=10s;
+        keepalive 64;
+    }
+
+    upstream web_v2 {
+        zone web_v2_up 64k;
+        server ${UPSTREAM_WEB} resolve max_fails=3 fail_timeout=10s;
+        keepalive 64;
+    }
+
+    # 鉴权 sidecar（api-gateway-hardening D3 / tasks 4.3）：
+    # 仅 auth_request 子请求使用，外部经 `location = /internal/authz { internal; }` 不可直连。
+    upstream auth {
+        zone auth_up 64k;
+        server auth-sidecar:8000 resolve;
+        keepalive 64;
+    }
+
+    # 指标 exporter（D10 / tasks 8.1）：容器内抓取本网关 stub_status 并转
+    # Prometheus 格式；仅 ai-shared-net 内网可达，compose 不 publish 端口。
+    upstream metrics {
+        zone metrics_up 64k;
+        server nginx-prometheus-exporter:9113 resolve;
+    }
+
+    # TLS 8443 server 块（D7 / tasks 6.2）：TLS_ENABLED=true 时由入口脚本
+    # 生成（含证书引用与 HSTS），false 时空文件 = no-op。
+    include /etc/nginx/tls.conf;
+
+    server {
+        listen 8080;
+        listen [::]:8080;
+        server_name _;
+
+        # TLS_ENABLED=true 时由入口脚本生成 8080→8443 的 301 跳转
+        #（豁免 /gateway/health，否则 compose healthcheck 走 wget 明文会被跳走）；
+        # false 时空文件 = no-op。须位于 OPTIONS if 之前，故在 include 公共块前。
+        include /etc/nginx/tls_redirect.conf;
+
+        # 公共 server 内容（CORS/安全头/全路由/错误信封），8443 TLS server
+        # 复用同一份 include，避免双份路由漂移。
+        include /etc/nginx/server_common.conf;
+    }
+}
