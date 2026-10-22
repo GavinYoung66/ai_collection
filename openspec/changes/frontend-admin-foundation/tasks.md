@@ -146,6 +146,7 @@
 - [x] **7.1 新增 `frontend` job**（`.github/workflows/ci.yml`）
   - 判据（pass）：job 内依次执行 `eslint` + `npx vue-tsc --noEmit` + `npx vitest run` + `npx depcruise src`；四步全绿。
   - 判据（fail）：任一命令被 `|| true` 吞掉（必须真实阻断）。
+  - 修订（2026-10-23，PR #4 实测）：Node 版本由 `20` 改为 `22`。原因：`dependency-cruiser@18` 的 `engines` 为 `^22||^24||>=26`，在 Node 20 下直接报 `Your node version (20.20.2) is not supported` 并 `exit 1`（已用 `node:20` / `node:22` 容器分别复现，20 退出码 1、22 退出码 0）；且 Node 20 已 EOL。CI 首次真实运行证据：ESLint / vue-tsc / vitest 三步在 Node 20 下均通过，仅 depcruise 因版本不支持失败。
 
 - [x] **7.2 不动现有 2 个 job（`common` + `service-test` 5 服务矩阵）**
   - 判据（pass）：`common` + `service-test`（5 个 matrix）保持原样，名称、步骤、顺序未改；新增 required check 仅追加 `frontend`（**GitHub 分支保护为仓库设置，需人工在 Settings → Rules 中追加，代码无法自动完成**）。

@@ -171,10 +171,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node 20
+      - name: Set up Node 22
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # Node 20 已 EOL，且 dependency-cruiser 18 的 engines 为 ^22||^24||>=26，
+          # 在 20 下会直接报错退出（本地已用 node:20 容器复现校验）。
+          node-version: '22'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
