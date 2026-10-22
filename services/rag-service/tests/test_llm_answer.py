@@ -5,13 +5,13 @@ LLMRateLimitError 降级 / factory 三条链 / LLM_TIMEOUT 默认 10。
 """
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
 from app.models.search import SearchRequest
 from app.services import query_cache
 from app.services.llm_providers.base import (
-    _load_prompt_template,
     build_answer_prompt,
 )
 from app.services.llm_providers.dashscope_provider import DashScopeProvider
@@ -511,16 +511,55 @@ class TestRedline:
 
 class TestPromptTemplate:
     def test_prompt_loaded_from_yaml_params_injected(self):
-        data = _load_prompt_template()
-        user_tpl = data.get("user", "")
-        assert "{query}" in user_tpl and "{context}" in user_tpl
+        from common.prompt.loader import load_prompt_sections
+
+        data = load_prompt_sections("rag_answer", service="rag-service")
+        assert data["prompt_id"] == "rag_answer"
+        assert data["version"] == "1.0.0"
+        assert data["profile"] == "simple"
+        sections = data["sections"]
+        assert set(sections) == {
+            "role",
+            "task",
+            "input_constraint",
+            "output_schema",
+            "few_shot",
+        }
+        user_tpl = sections["input_constraint"]
+        assert "{{ query }}" in user_tpl and "{{ context }}" in user_tpl
         system, user = build_answer_prompt(
             [{"content": "逾期90天可申请协商", "page": 2}], "能否分期"
         )
-        assert system == data["system"]
+        assert system == sections["role"]
         assert "能否分期" in user
         assert "[2页] 逾期90天可申请协商" in user
         assert "{query}" not in user and "{context}" not in user
+        assert "{{" not in user and "}}" not in user
+        assert "请基于上述资料给出简洁、准确的回答。" in user
+
+    def test_no_drift_vs_pre_migration_baseline(self):
+        """与 T0.3 迁移前 baseline 逐字比对（FALLBACK 降级为渲染文本，见 FALLBACK.md）。"""
+        baseline = (
+            Path(__file__).parent
+            / "baseline"
+            / "prompt_pre_migration"
+            / "rag_answer_prompt.txt"
+        ).read_text(encoding="utf-8")
+        _, rest = baseline.split("# system\n", 1)
+        expected_system, expected_user = rest.split(
+            "\n\n# user（示例 query/context）\n", 1
+        )
+        # baseline 存档文件末尾换行属文件格式，非 prompt 内容（原模板 user: |- 无尾换行）
+        expected_user = expected_user.rstrip("\n")
+        system, user = build_answer_prompt(
+            [
+                {"content": "逾期催收应遵守《个人信息保护法》第二十三条，事先取得单独同意。", "page": 12},
+                {"content": "催收不得在每日 22:00 至次日 8:00 进行。", "page": 18},
+            ],
+            "催收电话可以在夜间打吗？",
+        )
+        assert system == expected_system
+        assert user == expected_user
 
 
 class TestAnswerSkipsCache:

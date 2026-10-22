@@ -1,48 +1,49 @@
-"""LLM Provider 抽象基类 + 共享 Prompt 组装（V5，design D8）。"""
-import threading
+"""LLM Provider 抽象基类 + 共享 Prompt 组装（platform prompt-ops 统一入口）。"""
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from pathlib import Path
+from uuid import uuid4
 
-import yaml
+from jinja2 import Template
 
-# 路径：services/rag-service/conf/llm_answer_prompt.yaml（Docker 中 COPY 至 /app/conf/）
-_PROMPT_FILE = (
-    Path(__file__).resolve().parents[3] / "conf" / "llm_answer_prompt.yaml"
-)
+from common.prompt.ab import configure_ab, get_ab_config, select_version
+from common.prompt.loader import load_prompt_sections
+from common.prompt.telemetry import prompt_metadata
 
-_prompt_cache: dict | None = None
-_prompt_lock = threading.Lock()
+_RAG_PROMPT_ID = "rag_answer"
+_RAG_PROMPT_BASE_VERSION = "1.0.0"
 
-
-def _load_prompt_template() -> dict:
-    """加载 conf/llm_answer_prompt.yaml（进程内缓存；缺失/解析失败按不可用抛错）。"""
-    global _prompt_cache
-    if _prompt_cache is None:
-        with _prompt_lock:
-            if _prompt_cache is None:
-                try:
-                    with open(_PROMPT_FILE, encoding="utf-8") as f:
-                        data = yaml.safe_load(f) or {}
-                except OSError as e:
-                    raise RuntimeError(f"llm_answer_prompt.yaml 读取失败: {e}") from e
-                for placeholder in ("{query}", "{context}"):
-                    if placeholder not in (data.get("system", "") + data.get("user", "")):
-                        raise RuntimeError(
-                            f"llm_answer_prompt.yaml 缺少占位符 {placeholder}"
-                        )
-                _prompt_cache = data
-    return _prompt_cache
+# A/B 配置为进程内存态：未配置时默认 100% 走基线版本，避免调用点 KeyError（对齐 qc 先例）。
+if get_ab_config(_RAG_PROMPT_ID) is None:
+    configure_ab(_RAG_PROMPT_ID, {_RAG_PROMPT_BASE_VERSION: 100})
 
 
-def build_answer_prompt(context: list[dict], query: str) -> tuple[str, str]:
-    """按模板组装回答 Prompt（禁止代码硬编码明文）。
+def prompt_metadata_for(trace_key: str) -> dict[str, str]:
+    """返回本次调用实际使用的 prompt_id@version（供 Langfuse span metadata）。
+
+    A/B 选择对同一 trace_key 恒定，故与 build_answer_prompt(trace_key=...) 选中的版本一致。
+    """
+    return prompt_metadata(_RAG_PROMPT_ID, select_version(_RAG_PROMPT_ID, trace_key))
+
+
+def build_answer_prompt(
+    context: list[dict], query: str, *, trace_key: str | None = None
+) -> tuple[str, str]:
+    """按模板组装回答 Prompt（common/prompt/loader 唯一入口，禁止硬编码明文）。
 
     context 项：{"content": str, "page": int}。返回 (system, user)。
+    system 取 sections.role（原 system 全文），user 由 input_constraint（含
+    {{ query }}/{{ context }} 占位符）与 output_schema 两段经 Jinja2 渲染后拼接，
+    与迁移前 build_answer_prompt 输出逐字一致（baseline 零漂移）。
     页码标注仅在片段携带 page（chunk 级无页码数据源时恒缺省）才生成，
     避免回答虚构 "[0页]" 误导。
+    trace_key：A/B 分流键（调用方传 trace_id，保证与 metadata 版本一致）；
+    缺省时按请求随机，保持原行为。
     """
-    data = _load_prompt_template()
+    prompt_version = select_version(_RAG_PROMPT_ID, trace_key or f"rag-anon-{uuid4().hex}")
+    spec = load_prompt_sections(
+        f"{_RAG_PROMPT_ID}@{prompt_version}", service="rag-service"
+    )
+    sections = spec["sections"]
 
     def _fmt(c: dict) -> str:
         if c.get("page"):
@@ -50,10 +51,12 @@ def build_answer_prompt(context: list[dict], query: str) -> tuple[str, str]:
         return c["content"]
 
     context_text = "\n".join(_fmt(c) for c in context)
-    return (
-        data["system"],
-        data["user"].replace("{query}", query).replace("{context}", context_text),
+    system = sections["role"]
+    user = "\n\n".join(
+        Template(sections[name]).render(query=query, context=context_text)
+        for name in ("input_constraint", "output_schema")
     )
+    return system, user
 
 
 @dataclass

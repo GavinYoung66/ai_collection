@@ -11,7 +11,7 @@ import structlog
 from app.api.deps import get_llm_provider
 from app.llm.provider import CircuitBreakerOpenError, LLMCallError
 from app.models.state import ComplaintSessionState, ReflectionReport
-from app.prompt.loader import load_prompt
+from common.prompt.loader import load_prompt
 from app.service.degrade_llm import node_degrade_fallback
 from app.utils.evidence_helper import _collect_all_evidence
 
@@ -23,6 +23,7 @@ async def reflection_node(state: ComplaintSessionState) -> dict:
     evidence = _collect_all_evidence(state.model_dump())
     prompt = load_prompt(
         "complaint_reflection",
+        service="complaint-service",
         evidence_text=str(evidence)[:4000],
         loop_count=state.loop_count,
         evidence_count=len(evidence),

@@ -16,7 +16,7 @@ from app.models.state import (
     ComplaintSessionState,
     ExceptionInfo,
 )
-from app.prompt.loader import load_prompt
+from common.prompt.loader import load_prompt
 from app.service.degrade_llm import node_degrade_fallback
 from app.service.evidence_refs import extract_doc_ids_from_hits
 from app.utils.evidence_helper import _collect_all_evidence
@@ -56,6 +56,7 @@ async def compliance_node(state: ComplaintSessionState) -> dict:
     evidence = _collect_all_evidence(state.model_dump())
     prompt = load_prompt(
         "complaint_compliance",
+        service="complaint-service",
         evidence_text=str(evidence)[:3500],
         complaint_text=state.complaint_text[:1500],
         rag_refs=str(rag_result)[:1000],

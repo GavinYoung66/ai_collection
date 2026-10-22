@@ -1,16 +1,16 @@
 ## Purpose
 
-定义 qc-service M1 LLM 语义复核：Prompt `qc_review_v1`、结构化输出校验，以及熔断后仍能在 A2011 下给出 AC+规则分。
+定义 qc-service M1 LLM 语义复核：Prompt `qc_review`、结构化输出校验，以及熔断后仍能在 A2011 下给出 AC+规则分。
 
 ## Requirements
 
-### Requirement: Prompt qc_review_v1 约束
+### Requirement: Prompt qc_review 约束
 
-系统 SHALL 提供 `common/llm/prompts/qc_review.yml`，`version=qc_review_v1`，对齐 DD-02 §13.2。Prompt MUST 约束：只判坐席违规；用户投诉/自杀/停呼不是坐席违规；仅当坐席继续催收施压才出 R13；MUST NOT 因缺护栏日志或未检索知识库输出 R10/`unverified` 或 R14；证据 MUST 引用已有 `turn_id`；MUST NOT 捏造金额或规则。
+系统 SHALL 提供 `services/qc-service/app/prompt/templates/qc_review.yaml`，`version=1.0.0`，对齐 DD-02 §13.2。Prompt MUST 约束：只判坐席违规；用户投诉/自杀/停呼不是坐席违规；仅当坐席继续催收施压才出 R13；MUST NOT 因缺护栏日志或未检索知识库输出 R10/`unverified` 或 R14；证据 MUST 引用已有 `turn_id`；MUST NOT 捏造金额或规则。
 
 #### Scenario: Prompt 禁止因缺日志输出 unverified
 
-- **WHEN** 加载 `qc_review.yml`
+- **WHEN** 加载 `qc_review.yaml`
 - **THEN** 约束包含：不得因缺护栏日志或未检索知识库输出 R10/unverified 或 R14
 
 ### Requirement: LLM 复核走 invoke_llm 与 fallback_chain

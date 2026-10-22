@@ -3,11 +3,19 @@
 - select_version(prompt_id, session_id) -> str：基于哈希确定性选版本
 - configure_ab(prompt_id, distribution)：设置版本→百分比
 - rollback(prompt_id, version)：一键回滚为该版本 100%（进程内立即生效）
+
+边界：配置保存在本进程内存，不跨进程/实例共享。rollback 只影响执行它的进程；
+多副本部署时须对每个副本分别执行（或后续改由配置中心下发），否则其余副将继续
+按旧分布分流。
 """
 from __future__ import annotations
 
 import hashlib
 from threading import Lock
+
+import structlog
+
+logger = structlog.get_logger()
 
 # 进程内 A/B 配置：{prompt_id: {version: percentage}}
 _ab_config: dict[str, dict[str, int]] = {}
@@ -63,9 +71,15 @@ def select_version(prompt_id: str, session_id: str) -> str:
 
 
 def rollback(prompt_id: str, version: str) -> None:
-    """一键回滚：将 prompt_id 流量 100% 切到指定版本（进程内立即生效）。"""
+    """一键回滚：将 prompt_id 流量 100% 切到指定版本（仅当前进程生效）。"""
     with _lock:
         _ab_config[prompt_id] = {version: 100}
+    logger.warning(
+        "prompt_ab_rollback",
+        prompt_id=prompt_id,
+        version=version,
+        scope="process-local",
+    )
 
 
 def get_ab_config(prompt_id: str) -> dict[str, int] | None:

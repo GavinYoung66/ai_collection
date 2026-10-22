@@ -52,11 +52,23 @@ jobs:
           if [ -f requirements.runtime.txt ]; then pip install -r requirements.runtime.txt; fi
 
       # 非投诉服务统一入口（mcp-gateway 就近使用自带 pytest.ini；其余服务采用根 pytest.ini）
+      # qc/rag 的主测试排除 tests/regression，prompt 回归在下一步单独执行一次，避免重复收集
       - name: Run tests
         if: matrix.service != 'complaint-service'
         env:
           PYTHONPATH: ../..
-        run: pytest tests/ -q
+        run: |
+          if [ "$SERVICE" = "qc-service" ] || [ "$SERVICE" = "rag-service" ]; then
+            pytest tests/ -q --ignore=tests/regression
+          else
+            pytest tests/ -q
+          fi
+
+      - name: Prompt regression (qc/rag)
+        if: matrix.service == 'qc-service' || matrix.service == 'rag-service'
+        env:
+          PYTHONPATH: ../..
+        run: pytest tests/regression -q
 
       # ── complaint-service 特有四阶段（D3：整体迁入旧 ci.yml 既有阶段，覆盖率门禁仅此条目）──
       - name: Unit + Integration (D8 核心覆盖率 ≥85%)

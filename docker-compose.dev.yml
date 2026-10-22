@@ -207,6 +207,9 @@ services:
       EVENT_BUS: ${EVENT_BUS:-rocketmq}
       ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
       ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
+      # Prompt 模板：镜像内位于 /app/conf（见 Dockerfile COPY services/rag-service/conf/ ./conf/）；
+      # common/prompt/loader.py 的仓库相对映射在容器内不成立，此处显式覆盖。
+      PROMPT_TEMPLATES_DIR: /app/conf
     volumes:
       - ./services/rag-service/app:/app/app
       - ./common:/app/common
@@ -253,6 +256,9 @@ services:
       PG_PORT: "5432"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      # Prompt 模板：容器内 app 挂载在 /app/app，模板位于 /app/app/prompt/templates；
+      # common/prompt/loader.py 的仓库相对映射在容器内不成立，此处显式覆盖。
+      PROMPT_TEMPLATES_DIR: /app/app/prompt/templates
       # Langfuse 本地自托管（与 LangSmith 同构）；容器内经 host.docker.internal 访问宿主机
       LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
@@ -452,6 +458,9 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_DB: "6"
+      # Prompt 模板：容器内 app 挂载在 /app/app，模板位于 /app/app/prompt/templates；
+      # common/prompt/loader.py 的仓库相对映射在容器内不成立，此处显式覆盖。
+      PROMPT_TEMPLATES_DIR: /app/app/prompt/templates
       MCP_GATEWAY_MODE: standalone
       # Agent 侧 MCP SDK client 连网关（USE_MOCK_MCP=false 时生效）；显式传递，
       # 不隐式依赖 shell env（容器内用服务名 + 9000）。

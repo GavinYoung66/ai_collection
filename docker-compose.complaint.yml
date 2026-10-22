@@ -179,6 +179,9 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_DB: "6"
+      # Prompt 模板：镜像内 COPY app/ ./app/，模板位于 /app/app/prompt/templates；
+      # common/prompt/loader.py 的仓库相对映射在容器内不成立，此处显式覆盖。
+      PROMPT_TEMPLATES_DIR: /app/app/prompt/templates
       MCP_GATEWAY_MODE: standalone
       MCP_GATEWAY_URL: http://mcp-gateway:9000
       RAG_SERVICE_URL: http://rag-service:8000
@@ -236,6 +239,9 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_DB: "6"
+      # Prompt 模板：镜像内 COPY app/ ./app/，模板位于 /app/app/prompt/templates；
+      # common/prompt/loader.py 的仓库相对映射在容器内不成立，此处显式覆盖。
+      PROMPT_TEMPLATES_DIR: /app/app/prompt/templates
       MCP_GATEWAY_MODE: standalone
       MCP_GATEWAY_URL: http://mcp-gateway:9000
       RAG_SERVICE_URL: http://rag-service:8000

@@ -10,7 +10,7 @@ import structlog
 from app.api.deps import get_llm_provider
 from app.llm.provider import CircuitBreakerOpenError, LLMCallError
 from app.models.state import ComplaintSessionState, FactTimeline
-from app.prompt.loader import load_prompt
+from common.prompt.loader import load_prompt
 from app.service.degrade_llm import node_degrade_fallback
 from app.utils.evidence_helper import _collect_all_evidence
 
@@ -20,7 +20,7 @@ logger = structlog.get_logger()
 async def fact_node(state: ComplaintSessionState) -> dict:
     """事实还原节点：产出 FactTimeline，不输出责任结论。"""
     evidence = _collect_all_evidence(state.model_dump())
-    prompt = load_prompt("complaint_fact_timeline", evidence_text=str(evidence)[:4000])
+    prompt = load_prompt("complaint_fact_timeline", service="complaint-service", evidence_text=str(evidence)[:4000])
     llm = get_llm_provider()
     try:
         timeline: FactTimeline = await llm.invoke(

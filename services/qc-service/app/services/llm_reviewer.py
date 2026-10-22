@@ -1,4 +1,4 @@
-"""LLM 语义复核：common.llm.transport + qc_review_v1；熔断跳过仍出 AC+规则分。"""
+"""LLM 语义复核：common.llm.transport + qc_review@1.0.0；熔断跳过仍出 AC+规则分。"""
 from __future__ import annotations
 
 import json
@@ -16,7 +16,9 @@ from app.repositories.job_store import QcJobStore, llm_chain_models, llm_degrade
 from app.services.ac_filter import WordHit
 from app.services.demo_trace import OptionalLangfuseRun, OptionalLangSmithRun
 from common.db.models.llm_log import LLMCallLog
-from common.llm.prompts.loader import load_qc_review_prompt
+from common.prompt.ab import configure_ab, get_ab_config, select_version
+from common.prompt.loader import load_prompt_sections
+from common.prompt.telemetry import prompt_metadata
 from common.llm.reliability import (
     LLMCircuitOpenError,
     LLMRateLimitError,
@@ -30,6 +32,13 @@ from common.llm.transport import message_content_from_completions, post_chat_com
 from common.resilience.timeout import Timeout
 from common.security.mask import mask_text
 from common.trace.middleware import get_trace_id
+
+_QC_PROMPT_ID = "qc_review"
+_QC_PROMPT_BASE_VERSION = "1.0.0"
+
+# A/B 配置为进程内存态：未配置时默认 100% 走基线版本，避免调用点 KeyError。
+if get_ab_config(_QC_PROMPT_ID) is None:
+    configure_ab(_QC_PROMPT_ID, {_QC_PROMPT_BASE_VERSION: 100})
 
 VALID_RULE_IDS = frozenset(f"R{i:02d}" for i in range(1, 16))
 _AMOUNT_RE = re.compile(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*(?:元|块|万|圆)?")
@@ -120,9 +129,9 @@ def reason_has_fabricated_amount(reason: str, corpus: str) -> bool:
 def build_system_prompt(spec: dict[str, Any]) -> str:
     lines = [
         spec.get("role") or "",
-        spec.get("goal") or "",
+        spec.get("task") or "",
         "【约束】",
-        *[f"- {item}" for item in spec.get("constraints") or []],
+        *[f"- {item}" for item in spec.get("input_constraint") or []],
         "【禁止】",
         *[f"- {item}" for item in spec.get("prohibitions") or []],
         "只输出 JSON 数组，无命中则 []。",
@@ -324,11 +333,18 @@ class LLMReviewer:
         session_id: str | None = None,
     ) -> list[WordHit]:
         self.last_langsmith_run_id = None
+        run_key = session_id or f"qc-anon-{uuid4().hex}"
         run_inputs = {"session_id": session_id or "", "turn_count": len(turns or [])}
         ls_run = OptionalLangSmithRun(name="qc_llm_review", inputs=run_inputs)
-        lf_run = OptionalLangfuseRun("qc_llm_review", run_inputs)
+        lf_run = OptionalLangfuseRun(
+            "qc_llm_review",
+            run_inputs,
+            metadata=prompt_metadata(
+                _QC_PROMPT_ID, select_version(_QC_PROMPT_ID, run_key)
+            ),
+        )
         try:
-            hits = await self._review_impl(turns, session_id=session_id)
+            hits = await self._review_impl(turns, session_id=session_id, trace_key=run_key)
             outputs = {"hit_count": len(hits), "degraded": self.degraded}
             ls_run.end(outputs=outputs)
             lf_run.end(outputs=outputs)
@@ -345,13 +361,16 @@ class LLMReviewer:
         turns: Sequence[Any] | None = None,
         *,
         session_id: str | None = None,
+        trace_key: str | None = None,
     ) -> list[WordHit]:
         self.degraded = False
         turns = list(turns or [])
         if not turns:
             return []
-        spec = load_qc_review_prompt()
-        prompt_version = str(spec.get("version") or "qc_review_v1")
+        prompt_version = select_version(
+            _QC_PROMPT_ID, trace_key or session_id or f"qc-anon-{uuid4().hex}"
+        )
+        spec = load_prompt_sections(f"{_QC_PROMPT_ID}@{prompt_version}", service="qc-service")
         t0 = time.perf_counter()
         emit_llm_review_started(prompt_version=prompt_version, turn_count=len(turns))
         payload = turns_payload(turns)
@@ -360,7 +379,7 @@ class LLMReviewer:
             if banned in user:
                 user = user.replace(banned, "omitted")
         messages = [
-            {"role": "system", "content": build_system_prompt(spec)},
+            {"role": "system", "content": build_system_prompt(spec["sections"])},
             {"role": "user", "content": user},
         ]
         prompt_blob = messages[0]["content"] + "\n" + messages[1]["content"]

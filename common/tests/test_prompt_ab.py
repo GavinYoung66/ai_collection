@@ -1,7 +1,7 @@
-"""A/B 流量管理单元测试。"""
+"""A/B 流量管理单元测试（公共 prompt.ab）。"""
 from __future__ import annotations
 
-from app.prompt import ab
+from common.prompt import ab
 
 
 def setup_function():

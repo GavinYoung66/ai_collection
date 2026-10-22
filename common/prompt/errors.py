@@ -12,7 +12,7 @@ class PromptNotFoundError(Exception):
 
 
 class PromptStructureError(Exception):
-    """Prompt 七段结构不齐全。"""
+    """Prompt 结构不齐全（按 profile 校验失败）。"""
 
     def __init__(self, prompt_id: str, missing: list[str]):
         self.prompt_id = prompt_id

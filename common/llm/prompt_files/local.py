@@ -1,11 +1,14 @@
-"""Prompt 模板加载器。"""
+"""LLM Prompt 模板本地加载（dialog / fallback）。
+
+qc_review 已迁至 common/prompt + services/qc-service/app/prompt/templates。
+"""
 from __future__ import annotations
 
 import functools
 from pathlib import Path
 
-import yaml
 import structlog
+import yaml
 
 logger = structlog.get_logger()
 
@@ -14,7 +17,7 @@ _PROMPTS_DIR = Path(__file__).parent
 
 @functools.lru_cache(maxsize=8)
 def load_yaml(filename: str) -> dict:
-    """加载 prompts 目录下的 YAML 文件，带缓存。"""
+    """加载本目录下的 YAML 文件，带缓存。"""
     filepath = _PROMPTS_DIR / filename
     if not filepath.exists():
         logger.error("prompt_file_not_found", path=str(filepath))
@@ -32,8 +35,3 @@ def load_fallback_scripts() -> list[dict]:
     """加载兜底话术库。"""
     data = load_yaml("fallback_scripts.yml")
     return data.get("rules", [])
-
-
-def load_qc_review_prompt() -> dict:
-    """加载质检语义复核 Prompt（qc_review_v1）。"""
-    return load_yaml("qc_review.yml")

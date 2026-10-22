@@ -18,7 +18,7 @@ from app.models.state import (
     TaskStatus,
     VerdictDraft,
 )
-from app.prompt.loader import load_prompt
+from common.prompt.loader import load_prompt
 from app.service.degrade_llm import node_degrade_fallback
 
 logger = structlog.get_logger()
@@ -40,6 +40,7 @@ async def verdict_node(state: ComplaintSessionState) -> dict:
 
     prompt = load_prompt(
         "complaint_verdict",
+        service="complaint-service",
         fact_timeline=str(state.fact_timeline.model_dump())[:3000],
         compliance_opinion=str(state.compliance_opinion.model_dump())[:2000],
         user_demand=str(state.user_demand.model_dump())[:1000],

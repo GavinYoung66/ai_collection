@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import structlog
 
-from common.llm.prompts.loader import load_fallback_scripts
+from common.llm.prompt_files import load_fallback_scripts
 
 logger = structlog.get_logger()
 

@@ -18,7 +18,7 @@ from app.models.state import (
     JudgmentPackage,
     TaskStatus,
 )
-from app.prompt.loader import load_prompt
+from common.prompt.loader import load_prompt
 from app.service.degrade_llm import node_degrade_fallback
 from app.service.evidence_refs import extract_doc_ids_from_hits
 from app.service.guardrails_postcheck import postcheck
@@ -65,6 +65,7 @@ async def generate_package_node(state: ComplaintSessionState) -> dict:
 
     prompt = load_prompt(
         "complaint_generate_package",
+        service="complaint-service",
         verdict_draft=mask_before_persist(str(state.verdict_draft.model_dump())[:2000]),
         rag_templates=mask_before_persist(str(rag_result)[:1000]),
         complaint_text=mask_before_persist(state.complaint_text[:1500]),

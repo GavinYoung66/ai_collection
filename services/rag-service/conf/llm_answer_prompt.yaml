@@ -1,14 +1,25 @@
-# LLM 回答 Prompt 模板（V5，design D8；对齐 05_prompt_spec【强制2/6】：Prompt 配置化、不硬编码）
-# 占位符：{query} 用户提问、{context} 召回片段（含页码）。参数由 llm_providers/base.py build_answer_prompt 注入。
-version: 1
-description: 基于检索召回片段生成回答，仅依据给定资料，不得编造
-system: |-
-  你是知识库问答助手。仅依据下方给定资料回答，不得编造资料外的内容；资料不足时如实说明。
-  回答使用与用户提问相同的语言；若资料包含页码，标注引用页码。
-user: |-
-  问题：{query}
+# LLM 回答 Prompt 模板（platform prompt-ops 统一结构；profile: simple，rag 为全平台唯一例外）
+# 经 common/prompt/loader.py 唯一入口加载；占位符 {{ query }}/{{ context }} 由
+# llm_providers/base.py build_answer_prompt 以 Jinja2 渲染注入。
+# 正文与迁移前 system/user 逐字一致（零漂移），仅结构重组；
+# 文件名与路径不变：Dockerfile COPY conf/ → 镜像内 /app/conf/。
+prompt_id: rag_answer
+version: "1.0.0"
+profile: simple
+sections:
+  # 原 system 全文（逐字）
+  role: |-
+    你是知识库问答助手。仅依据下方给定资料回答，不得编造资料外的内容；资料不足时如实说明。
+    回答使用与用户提问相同的语言；若资料包含页码，标注引用页码。
+  # 原 description（逐字）
+  task: 基于检索召回片段生成回答，仅依据给定资料，不得编造
+  # 原 user 前半（逐字，占位符改为 Jinja2 双花括号）
+  input_constraint: |-
+    问题：{{ query }}
 
-  检索资料（含页码）：
-  {context}
-
-  请基于上述资料给出简洁、准确的回答。
+    检索资料（含页码）：
+    {{ context }}
+  # 原 user 结尾（逐字）
+  output_schema: 请基于上述资料给出简洁、准确的回答。
+  # few_shot 约定：置于 sections 内（对齐 qc_review.yaml 与 loader 校验口径）
+  few_shot: []
