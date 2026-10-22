@@ -160,3 +160,36 @@ jobs:
             echo "== $svc health =="
             (cd services/$svc && PYTHONPATH=../.. pytest tests/ -q)
           done
+
+  # 前端门禁（F0 tasks 7.1）：lint / 类型 / 单测 / 分层依赖四道闸，任何一步失败即 job 失败。
+  # 硬约束：四个 step 彼此独立，禁止 `|| true`、禁止 `continue-on-error`（覆盖即视为门禁失效）。
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # —— 以下四步为四道独立闸门，任一步非 0 退出即中断 job ——
+      - name: ESLint
+        run: npm run lint
+
+      - name: Type check (vue-tsc)
+        run: npx vue-tsc --noEmit
+
+      - name: Unit tests (vitest)
+        run: npx vitest run
+
+      - name: Layered dependency check (depcruise)
+        run: npx depcruise src
