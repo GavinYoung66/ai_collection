@@ -23,6 +23,16 @@ ENVELOPE_KEYS = {"code", "message", "data", "trace_id"}
 A2003_MSG = ERROR_MESSAGES["A2003"]
 
 
+class _OneOrNoneResult:
+    """仅服务 replay 的 active 规则包读取（qc_rules）；其余 SQL 仍禁止执行。"""
+
+    def __init__(self, row=None):
+        self._row = row
+
+    def scalar_one_or_none(self):
+        return self._row
+
+
 class ApiFakeSession:
     def __init__(self):
         self.added: list = []
@@ -39,6 +49,10 @@ class ApiFakeSession:
         return None
 
     async def execute(self, stmt):
+        # replay_session 会读一次 active 规则包；HTTP 测试双无 active 行 →
+        # 管道按 v1.0 种子等价回退，其它 SQL 一律禁止。
+        if "qc_rules" in str(stmt):
+            return _OneOrNoneResult(None)
         raise AssertionError("SQL should not run in HTTP fakes")
 
 
@@ -59,6 +73,7 @@ class FakeQualityRepo:
         row = QcRecord(
             session_id=kwargs["session_id"],
             compliance_score=kwargs["compliance_score"],
+            deduction_total=kwargs.get("deduction_total"),
             risk_level=kwargs["risk_level"],
             qc_result=kwargs["qc_result"],
             qc_status=kwargs["qc_status"],
@@ -259,6 +274,7 @@ class TestReplayPath:
             "qc_record_id",
             "session_id",
             "case_id",
+            "deduction_total",
             "compliance_score",
             "risk",
             "grade",
@@ -268,9 +284,12 @@ class TestReplayPath:
         ):
             assert key in data
         assert data["session_id"] == "sess_ok"
+        assert data["deduction_total"] == 20
         assert data["compliance_score"] == 80
+        # 一致性断言：compliance_score == max(0, 100 - deduction_total)
+        assert data["compliance_score"] == max(0, 100 - data["deduction_total"])
         assert data["risk"] == "high"
-        assert data["grade"] == "PASS"
+        assert data["grade"] is None
         _assert_no_score_field(data)
         assert "skipped_rules" not in data
         assert data["call_id"] is None
@@ -280,12 +299,19 @@ class TestReplayPath:
             assert "source" in hit
             assert "word" in hit
             assert "kb_snippet" in hit
+            assert "points" in hit
+            assert "policy_clause" in hit
+            assert "policy_text" in hit
         stored = [item for item in db.added if isinstance(item, tuple) and item[0] == "violation"]
         assert stored
         for _kind, _rid, fields in stored:
             assert "source" in fields
             assert "word" in fields
             assert "kb_snippet" in fields
+            assert "points" in fields
+            assert fields["points"] == 20
+            assert "policy_clause" in fields
+            assert "policy_text" in fields
 
     def test_retry_max_inserts_partial_a2003(self):
         db = ApiFakeSession()
@@ -646,6 +672,9 @@ class TestBatch:
         assert data["batch_id"] == "b2"
         assert len(data["accepted"]) == 1
         assert data["accepted"][0]["session_id"] == "ok1"
+        assert "deduction_total" in data["accepted"][0]
+        assert data["accepted"][0]["deduction_total"] == 20
+        assert data["accepted"][0]["grade"] is None
         rejected = {item["session_id"]: item["code"] for item in data["rejected"]}
         assert rejected["rev1"] == "A2002"
         assert rejected["miss"] == "A2003"

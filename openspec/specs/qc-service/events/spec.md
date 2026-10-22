@@ -11,20 +11,20 @@ qc-service SHALL 发布下列逻辑事件，且不发布 `qc.escalate.human`、�
 | 逻辑事件名 | 业务构造键（上总线前可完整构造） |
 | :--- | :--- |
 | `qc.alert.raised` | `{alert_id,session_id,call_id,level,evidence,trace_id,ts}` 并 XADD `alert:stream` |
-| `qc.check.completed` | `{qc_record_id,session_id,call_id,case_id,score,risk,grade,trace_id,ts}` |
+| `qc.check.completed` | `{qc_record_id,session_id,call_id,case_id,score,deduction,risk,grade,trace_id,ts}` |
 | `qc.complaint.suspected` | `{qc_record_id,session_id,case_id,redline_tags[],trace_id,ts}` |
 | `qc.stop_call.detected` | `{session_id,case_id,evidence,trace_id,ts}` |
 | `qc.review.done` | `{qc_record_id,action,revised_score,redline_tags,evidence_masked,sample_type,trace_id,ts}`，`sample_type∈{positive,negative,corrected}` |
 | `system.alert.raised` | `{alert_id,level,event,service,description,error_code,trace_id,ts}`，LLM 熔断时 `event=qc:llm_degraded` |
 
-`qc.check.completed.score` SHALL 由库 `compliance_score` 映射。`risk` SHALL 由库 `risk_level` 映射。JSON MUST 使用键 `score`/`risk`，不是列名。`qc_result`/`qc_status` MUST NOT 出现在 completed payload。`qc.check.completed.call_id` SHALL 存在，且为 `call_records.id` / `QCSession.call_id` 的 UUID 字符串或 JSON `null`；MUST NOT 复制 `session_id` 或 replay 路径参数。上总线时 score/risk/grade/evidence 等非白名单字段 SHALL NOT 进入信封 `data`；消费方若存在则 HTTP 反拉详情。
+`qc.check.completed.deduction` SHALL 由库 `deduction_total` 映射，为主口径。`qc.check.completed.score` SHALL 由库 `compliance_score` 映射（派生兼容值，灰度期保留）。`risk` SHALL 由库 `risk_level` 映射。`grade` SHALL 恒为 JSON null。JSON MUST 使用键 `deduction`/`score`/`risk`，不是列名。`deduction` 与 `score` 均为可选键，消费方 MUST NOT 依赖其必然存在。`qc_result`/`qc_status` MUST NOT 出现在 completed payload。`qc.check.completed.call_id` SHALL 存在，且为 `call_records.id` / `QCSession.call_id` 的 UUID 字符串或 JSON `null`；MUST NOT 复制 `session_id` 或 replay 路径参数。上总线时 deduction/score/risk/grade/evidence 等非白名单字段 SHALL NOT 进入信封 `data`；消费方若存在则 HTTP 反拉详情。
 
 `qc.alert.raised` SHALL 仅在 MergeHits 终态 `speaker=agent` 且 `severity=high` 时发布（与 `qc_alerts` 同门槛）。LLM 熔断的 `system.alert.raised` SHALL 设 `event=qc:llm_degraded` 且 `error_code=A2011`。服务 MUST NOT 发布 `qc.llm.degraded`。
 
 #### Scenario: completed 使用 score 与 risk 键
 
-- **WHEN** 质检跑完
-- **THEN** 发布前构造的业务 payload 含由 `compliance_score`/`risk_level` 映射的 `score` 与 `risk`，且 `call_id` 为 UUID 字符串或 JSON null；上总线时仅将白名单定位字段写入信封 `data`
+- **WHEN** 质检跑完且 `deduction_total=20`
+- **THEN** 发布前构造的业务 payload 含 `deduction=20`（由 `deduction_total` 映射）、`score=80`（由 `compliance_score` 映射）、`risk` 与 `grade=null`，且 `call_id` 为 UUID 字符串或 JSON null；上总线时仅将白名单定位字段写入信封 `data`
 
 #### Scenario: 六事件均走 EventBus
 
@@ -33,7 +33,7 @@ qc-service SHALL 发布下列逻辑事件，且不发布 `qc.escalate.human`、�
 
 #### Scenario: 信封强校验生效
 
-- **WHEN** 发布任一六事件时信封 `data` 含非白名单字段（如 `score` 或 `evidence`）
+- **WHEN** 发布任一六事件时信封 `data` 含非白名单字段（如 `deduction`、`score` 或 `evidence`）
 - **THEN** 事件总线拒绝发布并记录 `event_id`、`trace_id`、`rejected_field`
 
 #### Scenario: 永不发布 escalate

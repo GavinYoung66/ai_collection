@@ -27,6 +27,7 @@ class TestQcRecordOrm:
     def test_frozen_column_names(self):
         cols = _cols(QcRecord)
         assert "compliance_score" in cols
+        assert "deduction_total" in cols
         assert "risk_level" in cols
         assert "qc_result" in cols
         assert "grade" in cols
@@ -58,6 +59,10 @@ class TestQcRecordOrm:
         assert "RUNNING" not in sql
         assert "EXCELLENT" in sql and "PASS" in sql and "WARNING" in sql and "SERIOUS" in sql
 
+    def test_deduction_total_check(self):
+        sql = _check_sql(QcRecord)
+        assert "deduction_total >= 0" in sql
+
     def test_assert_db_status_rejects_wait_text(self):
         try:
             QcRecord.assert_db_status("WAIT_TEXT")
@@ -78,8 +83,12 @@ class TestChildTables:
         assert "source" in cols
         assert "word" in cols
         assert "kb_snippet" in cols
+        assert "points" in cols
+        assert "policy_clause" in cols
+        assert "policy_text" in cols
         sql = _check_sql(QcViolation)
         assert "ac" in sql and "rule" in sql and "llm" in sql
+        assert "points >= 0" in sql
 
     def test_alerts_level_high_only(self):
         sql = _check_sql(QcAlert)
@@ -91,6 +100,12 @@ class TestChildTables:
         sql = _check_sql(QcReview)
         assert "CONFIRM" in sql and "DISMISS" in sql and "CORRECT" in sql
 
+    def test_reviews_revised_deduction_check(self):
+        cols = _cols(QcReview)
+        assert "revised_deduction" in cols
+        sql = _check_sql(QcReview)
+        assert "revised_deduction IS NULL OR revised_deduction >= 0" in sql
+
     def test_rules_status_and_version(self):
         cols = _cols(QcRule)
         assert "version" in cols
@@ -98,6 +113,7 @@ class TestChildTables:
         assert "penalty" in cols
         assert "same_word_window_ms" in cols
         assert "grade_thresholds" in cols
+        assert "deduction_policy" in cols
         sql = _check_sql(QcRule)
         assert "draft" in sql and "active" in sql and "archived" in sql
         assert inspect(QcRule).columns["version"].unique is True

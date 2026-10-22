@@ -8,7 +8,7 @@
 
 ### Requirement: Prompt 加载器
 
-系统 SHALL 在 `app/prompt/loader.py` 提供 `load_prompt(prompt_id: str, **context_vars) -> str`：
+系统 SHALL 在 `common/prompt/loader.py` 提供 `load_prompt(prompt_id: str, **context_vars) -> str`：
 - dev：从 `app/prompt/templates/` 加载 YAML（单文件 `{prompt_id}.yaml`）
 - prod：配置中心（Nacos）加载——本批允许 stub/接口预留，不得假装已接真 Nacos
 - 支持 `prompt_id@version`：加载后校验文件内 `version` 与请求版本一致，不一致抛版本不存在异常；无 `@version` 时，若传入 `session_id` 则可先经 A/B `select_version` 再按该版本规则加载，否则使用文件内 version
@@ -36,7 +36,7 @@
 
 ### Requirement: Prompt 版本/A-B 流量管理
 
-系统 SHALL 在 `app/prompt/ab.py` 提供版本与 A/B 能力：
+系统 SHALL 在 `common/prompt/ab.py` 提供版本与 A/B 能力：
 - `select_version(prompt_id, session_id) -> str`：按流量百分比选择版本，基于 `hash(session_id + prompt_id) % 100`，同会话稳定
 - `configure_ab` / `rollback`：进程内配置切换，回滚后立即 100% 指定版本
 - 双版本**正文**本批可用测试夹具或进程内 override registry；不要求生产目录已有多文件

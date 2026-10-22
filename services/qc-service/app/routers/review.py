@@ -25,7 +25,8 @@ class ReviewBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     action: ReviewAction
-    revised_score: int | None = Field(default=None)
+    revised_deduction: int | None = Field(default=None)
+    revised_score: int | None = Field(default=None)  # 灰度保留，非主输入
     reason: str | None = None
 
 
@@ -72,6 +73,7 @@ async def submit_review(
     data = await svc.submit(
         record,
         action=body.action,
+        revised_deduction=body.revised_deduction,
         revised_score=body.revised_score,
         reason=body.reason,
         reviewer_id=user_uuid(user),

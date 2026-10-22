@@ -205,6 +205,7 @@ async def check_batch(
                 {
                     "qc_record_id": row["qc_record_id"],
                     "session_id": row["session_id"],
+                    "deduction_total": row["deduction_total"],
                     "compliance_score": row["compliance_score"],
                     "risk": row["risk"],
                     "grade": row["grade"],

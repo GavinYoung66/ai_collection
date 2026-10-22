@@ -5,6 +5,10 @@
 # =============================================================================
 
 # === 运行时 Web 框架 ===
+# prompt 模板渲染：common/prompt/loader.py 与 rag llm_providers/base.py 直接 import，
+# 原先仅 complaint-service 的 requirements.runtime.txt 声明了它，
+# 导致 common / qc-service / rag-service 三个 job 在 CI 上 ImportError（见 PR #4）。
+jinja2==3.1.6
 fastapi==0.104.1
 uvicorn==0.24.0
 pydantic==2.5.3

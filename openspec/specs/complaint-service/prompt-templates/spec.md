@@ -87,7 +87,7 @@
 
 ### Requirement: 本批验收不依赖 load_prompt
 
-本批验收 MUST 仅使用 `yaml.safe_load` 与结构断言。MUST NOT 将 `app.prompt.loader.load_prompt` 可调用作为本批完成条件（该加载器属批次4 任务 6.1）。
+本批验收 MUST 仅使用 `yaml.safe_load` 与结构断言。MUST NOT 将 `common.prompt.loader.load_prompt` 可调用作为本批完成条件（该加载器属批次4 任务 6.1）。
 
 #### Scenario: 无 loader 仍可验收
 

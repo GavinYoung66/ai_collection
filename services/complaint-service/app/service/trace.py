@@ -165,10 +165,16 @@ class OptionalLangSmithRun(LangSmithRun):
 class OptionalLangfuseRun(LangfuseRun):
     """可选包裹一次 judge 图执行（Langfuse 侧）；统一开关关闭或异常时为空操作。"""
 
-    def __init__(self, name: str, inputs: dict[str, Any]):
+    def __init__(
+        self,
+        name: str,
+        inputs: dict[str, Any],
+        *,
+        metadata: dict[str, Any] | None = None,
+    ):
         from app.config import settings
 
-        super().__init__(name, inputs, settings=settings)
+        super().__init__(name, inputs, settings=settings, metadata=metadata)
 
 
 class NodeTimer:

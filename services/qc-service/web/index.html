@@ -17,7 +17,7 @@
     <div class="top-actions">
       <label class="field inline">
         API_BASE
-        <input id="apiBase" type="text" value="/api/v1" />
+        <input id="apiBase" type="text" value="http://localhost:8003/api/v1" />
       </label>
       <label class="field inline">
         JWT
@@ -52,7 +52,7 @@
               <th>session</th>
               <th>call_id</th>
               <th>状态</th>
-              <th>分数</th>
+              <th>扣分</th>
             </tr>
           </thead>
           <tbody id="listBody">
@@ -83,7 +83,7 @@
                   <th>规则/词</th>
                   <th>证据</th>
                   <th>扣分</th>
-                  <th>条款</th>
+                  <th>制度依据</th>
                 </tr>
               </thead>
               <tbody id="hitsBody">
@@ -100,21 +100,21 @@
 
         <div>
           <h3>人审</h3>
-          <p id="reviewHint" class="hint">有扣分须人审：认机检分点「扣分正确」；改分先点「误报改分」再点「关闭质检」。</p>
+          <p id="reviewHint" class="hint">有扣分须人审：认机检扣分点「扣分正确」；改扣分先点「误报改扣分」填整数，再点「提交人审」。</p>
           <p id="reviewDone" class="review-done" hidden></p>
           <div id="reviewBox" hidden>
             <dl class="kv review-kv">
               <dt>合计扣分</dt><dd id="penaltyTotal">—</dd>
-              <dt>机检分</dt><dd id="machineScoreLabel">—</dd>
+              <dt>机检扣分</dt><dd id="machineScoreLabel">—</dd>
             </dl>
             <label class="field">
-              改后分数（点「误报改分」后可改，点「关闭质检」才生效）
-              <input id="revisedScore" type="number" min="0" max="100" step="1" placeholder="0–100" disabled />
+              改后扣分（>=0 整数；点「误报改扣分」后可填，点「提交人审」才生效）
+              <input id="revisedScore" type="number" min="0" step="1" placeholder="整数扣分 >=0" disabled />
             </label>
             <div class="btn-row">
               <button type="button" id="btnConfirm" class="btn primary">扣分正确</button>
-              <button type="button" id="btnRescoreMode" class="btn">误报改分</button>
-              <button type="button" id="btnCloseQc" class="btn">关闭质检</button>
+              <button type="button" id="btnRescoreMode" class="btn">误报改扣分</button>
+              <button type="button" id="btnCloseQc" class="btn">提交人审</button>
             </div>
           </div>
 

@@ -671,6 +671,7 @@ class ComplaintService:
         from app.llm.provider import CircuitBreakerOpenError
         from app.models.state import ComplaintSessionState, ExceptionInfo
         from common.llm.reliability import LLMRateLimitError
+        from common.prompt.telemetry import resolve_prompt_metadata
         from app.service.trace import (
             NodeTimer,
             OptionalLangfuseRun,
@@ -713,7 +714,11 @@ class ComplaintService:
             "session_id": sid,
         }
         ls_run = OptionalLangSmithRun("complaint_judge", judge_inputs)
-        lf_run = OptionalLangfuseRun("complaint_judge", judge_inputs)
+        lf_run = OptionalLangfuseRun(
+            "complaint_judge",
+            judge_inputs,
+            metadata=resolve_prompt_metadata("complaint_verdict", "complaint-service"),
+        )
         interrupt_err: Exception | None = None
         graph_error: Exception | None = None
         graph_error_type: str = ""

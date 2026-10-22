@@ -86,6 +86,23 @@ def _serialize_raw(raw: Any) -> str:
     return str(raw)
 
 
+def _format_schema_repair_hint(err: ValidationError) -> str:
+    """把 Pydantic 校验错误压缩成模型可读的定向修正指令。
+
+    只取 loc + msg + type，最多 10 条，避免错误信息过长挤占上下文。
+    """
+    lines: list[str] = []
+    for item in err.errors()[:10]:
+        loc = ".".join(str(p) for p in item.get("loc", ())) or "<root>"
+        lines.append(f"- 字段 {loc}: {item.get('msg', '')} (type={item.get('type', '')})")
+    detail = "\n".join(lines) if lines else "- 输出结构不符合约定"
+    return (
+        "上一次输出不符合约定的结构，请严格按 Schema 修正后重新输出，"
+        "不要添加额外字段或改变字段类型。\n"
+        f"{detail}"
+    )
+
+
 class ComplaintLLMProvider:
     """投诉研判 LLM Provider。
 
@@ -161,9 +178,14 @@ class ComplaintLLMProvider:
             model: str, _messages: list[dict], timeout_seconds: float
         ) -> str:
             # 适配 invoke_llm 传输签名 (model, messages, timeout_seconds) -> str：
-            # 透传目标模型（fallback 换模型），prompt/schema 由本次 invoke 上下文闭包
+            # prompt 由 messages 实时拼装——校验失败重试时会追加结构修正指令，
+            # 使重试从「同 prompt 重采样」变为「带错误反馈的定向修复」；
+            # 透传目标模型以支持 fallback 换模型。
+            prompt_text = "\n\n".join(
+                str(m.get("content", "")) for m in _messages if m.get("content")
+            )
             raw = await self._get_transport().invoke(
-                prompt=prompt,
+                prompt=prompt_text,
                 schema=schema,
                 trace_id=trace_id,
                 session_id=session_id,
@@ -258,6 +280,11 @@ class ComplaintLLMProvider:
                     agent_role=agent_role,
                 )
                 if attempt < _SCHEMA_RETRY_MAX:
+                    # 把校验错误回灌给模型：追加修正指令，使其定向修复而非盲目重采样
+                    messages = [
+                        *messages,
+                        {"role": "user", "content": _format_schema_repair_hint(e)},
+                    ]
                     logger.info("llm_schema_retry", attempt=attempt, trace_id=trace_id)
                     continue
                 break

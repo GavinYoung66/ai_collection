@@ -75,7 +75,7 @@ class TestObservabilityEvents:
         await replay.replay_session(qc, persist=True)
         completed = [e for e in captured_events() if e["event"] == "qc.check.completed"]
         assert completed
-        assert completed[0]["score"] == 80
+        assert completed[0]["score"] == 20
         assert completed[0]["risk"] == "high"
         assert completed[0]["call_id"] != qc.session_id
         assert completed[0].get("mode") != "realtime"

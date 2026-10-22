@@ -9,12 +9,13 @@
 import asyncio
 import re
 import time
+from uuid import uuid4
 
 import structlog
 from redis.asyncio import Redis
 
 from app.settings import settings
-from app.services.llm_providers.base import build_answer_prompt
+from app.services.llm_providers.base import build_answer_prompt, prompt_metadata_for
 from common.guardrails import postcheck_text, precheck_text
 from common.llm.reliability import (
     LLMCircuitOpenError,
@@ -22,6 +23,7 @@ from common.llm.reliability import (
     invoke_llm,
 )
 from common.resilience.timeout import Timeout
+from common.trace.langfuse_gate import LangfuseRun
 from common.trace.middleware import get_trace_id
 
 logger = structlog.get_logger()
@@ -173,7 +175,8 @@ class LLMService:
                 }
 
         masked = [{**c, "content": mask_sensitive(c["content"])} for c in context]
-        system, user = build_answer_prompt(masked, query)
+        trace_key = f"rag-{get_trace_id() or uuid4().hex}"
+        system, user = build_answer_prompt(masked, query, trace_key=trace_key)
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -181,6 +184,11 @@ class LLMService:
         citations = self._citations(masked)
         model, fallback_chain, transport = await self._resolve_llm()
 
+        lf_run = LangfuseRun(
+            "rag_answer_llm",
+            {"query_len": len(query), "context_chunks": len(masked)},
+            metadata=prompt_metadata_for(trace_key),
+        )
         async with self._sem:
             try:
                 result = await invoke_llm(
@@ -191,13 +199,17 @@ class LLMService:
                     transport=transport,
                 )
             except LLMRateLimitError:
+                lf_run.end(error="llm_rate_limited")
                 return self._degraded(llm_called=True, reason="llm_rate_limited")
             except LLMCircuitOpenError:
+                lf_run.end(error="llm_circuit_open")
                 return self._degraded(llm_called=True, reason="llm_circuit_open")
             except Exception as e:
+                lf_run.end(error=f"provider_error:{type(e).__name__}")
                 return self._degraded(
                     llm_called=True, reason=f"provider_error:{type(e).__name__}"
                 )
+            lf_run.end(outputs={"model": model})
 
         content = result.get("content") if isinstance(result, dict) else None
         if not content:

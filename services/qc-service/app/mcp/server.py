@@ -79,6 +79,9 @@ class CallQcServer:
                     "redline_tag": getattr(row, "redline_tag", None),
                     "violation_rule_id": getattr(row, "rule_id", None),
                     "snippet_text": mask_text(getattr(row, "evidence_text", None) or ""),
+                    "points": getattr(row, "points", None),
+                    "policy_clause": getattr(row, "policy_clause", None),
+                    "policy_text": getattr(row, "policy_text", None),
                     "ts": _as_unix(hit_ts),
                 }
             )

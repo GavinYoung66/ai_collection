@@ -82,6 +82,9 @@ class TestCallQcQueries:
             speaker="agent",
             severity="high",
             evidence_text="请回拨13812341234我是法院的",
+            points=20,
+            policy_clause="X1.2",
+            policy_text="不得冒充司法机关",
         )
         row.id = uuid4()
         row.hit_ts = datetime(2026, 9, 9, 10, 1, tzinfo=timezone.utc)
@@ -102,6 +105,10 @@ class TestCallQcQueries:
         assert "****" in item["snippet_text"]
         assert item["ts"] == int(row.hit_ts.timestamp())
         assert "snippet_text" in item
+        assert item["points"] == 20
+        assert item["policy_clause"] == "X1.2"
+        assert item["policy_text"] == "不得冒充司法机关"
+        assert "grade" not in item
 
     @pytest.mark.asyncio
     async def test_alerts_include_qc_record_id_and_alert_id(self):

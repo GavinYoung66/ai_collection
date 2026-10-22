@@ -108,5 +108,11 @@ class OptionalLangSmithRun(LangSmithRun):
 class OptionalLangfuseRun(LangfuseRun):
     """可选包裹 LLM 复核（Langfuse 侧）；统一开关关闭或异常时为空操作。"""
 
-    def __init__(self, name: str, inputs: dict[str, Any]):
-        super().__init__(name, inputs, settings=platform_settings)
+    def __init__(
+        self,
+        name: str,
+        inputs: dict[str, Any],
+        *,
+        metadata: dict[str, Any] | None = None,
+    ):
+        super().__init__(name, inputs, settings=platform_settings, metadata=metadata)

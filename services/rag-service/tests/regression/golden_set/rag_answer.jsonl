@@ -1,0 +1,24 @@
+{"input": {"query": "夜间可以给债务人打电话催收吗", "context": [{"content": "催收不得在每日 22:00 至次日 8:00 进行。", "page": 18}]}, "expected": {"points": ["22:00 至次日 8:00"]}}
+{"input": {"query": "逾期催收需要取得个人同意吗", "context": [{"content": "逾期催收应遵守《个人信息保护法》第二十三条，事先取得单独同意。", "page": 12}]}, "expected": {"points": ["《个人信息保护法》第二十三条", "单独同意"]}}
+{"input": {"query": "可以向债务人承诺减免吗", "context": [{"content": "禁止未经授权向债务人承诺减免、延期或撤销记录。", "page": 8}]}, "expected": {"points": ["承诺减免", "撤销记录"]}}
+{"input": {"query": "冒充警察开展催收是否允许", "context": [{"content": "禁止冒充公检法等国家机关工作人员或伪造身份开展催收。", "page": 6}]}, "expected": {"points": ["冒充公检法", "伪造身份"]}}
+{"input": {"query": "债务人要求停止呼叫后还能再打吗", "context": [{"content": "债务人明确要求停止呼叫后，不得再次拨打或变相骚扰。", "page": 7}]}, "expected": {"points": ["不得再次拨打", "变相骚扰"]}}
+{"input": {"query": "夸大起诉后果属于什么违规", "context": [{"content": "禁止夸大法律后果（起诉、拘留、征信黑名单等）误导、胁迫债务人。", "page": 9}]}, "expected": {"points": ["夸大法律后果", "起诉、拘留、征信黑名单"]}}
+{"input": {"query": "可以向家人透露债务信息吗", "context": [{"content": "禁止向无关第三方泄露债务人债务、联系方式等隐私信息。", "page": 11}]}, "expected": {"points": ["无关第三方", "隐私信息"]}}
+{"input": {"query": "使用贬损性语言催收合规吗", "context": [{"content": "禁止使用施压、贬损性语言影响债务人正常生活。", "page": 10}]}, "expected": {"points": ["贬损性语言", "影响债务人正常生活"]}}
+{"input": {"query": "通话中长时间静默怎么判定", "context": [{"content": "通话过程中禁止长时间静默、挂机等消极沟通行为。", "page": 13}]}, "expected": {"points": ["长时间静默", "消极沟通"]}}
+{"input": {"query": "通话需要完成规定告知动作吗", "context": [{"content": "通话须完成规定告知动作，禁止未充分沟通即结束通话。", "page": 14}]}, "expected": {"points": ["规定告知动作", "未充分沟通"]}}
+{"input": {"query": "单通通话时长下限要求", "context": [{"content": "单通通话时长不得短于规定下限，确保告知义务履行到位。", "page": 15}]}, "expected": {"points": ["不得短于规定下限", "告知义务"]}}
+{"input": {"query": "关键事实未核实可以向债务人断言吗", "context": [{"content": "关键事实（金额、账期、身份）未经核实不得向债务人断言。", "page": 16}]}, "expected": {"points": ["未经核实不得向债务人断言", "金额、账期、身份"]}}
+{"input": {"query": "伪造还款事实如何处理", "context": [{"content": "禁止伪造、篡改业务数据或捏造还款事实。", "page": 17}]}, "expected": {"points": ["篡改业务数据", "捏造还款事实"]}}
+{"input": {"query": "异常长通话是否算骚扰", "context": [{"content": "单通通话时长须覆盖必要告知与沟通环节，禁止异常长通话骚扰债务人。", "page": 19}]}, "expected": {"points": ["异常长通话", "必要告知与沟通环节"]}}
+{"input": {"query": "外呼接通后要自报身份吗", "context": [{"content": "外呼接通后先自报身份、机构名称、催收事由；身份透明、工号可溯。", "page": 20}]}, "expected": {"points": ["自报身份、机构名称", "工号可溯"]}}
+{"input": {"query": "需要明示催收主体吗", "context": [{"content": "催收应明示催收主体，核身顺序为先确认本人，再披露逾期。", "page": 21}]}, "expected": {"points": ["明示催收主体", "先确认本人"]}}
+{"input": {"query": "多模态文档解析在催收场景的用途", "context": [{"content": "多模态文档解析：PDF/Word/录音转写文本解析，用于导入监管法规、催收话术手册、禁语清单、优秀通话案例。", "page": 3}]}, "expected": {"points": ["PDF/Word/录音转写文本解析", "禁语清单"]}}
+{"input": {"query": "语义分块怎么切分催收对话", "context": [{"content": "语义分块：对话感知分块（非简单字符切割），催收长对话案例按“异议-应答”成对切分，保留上下文完整性。", "page": 4}]}, "expected": {"points": ["对话感知分块", "保留上下文完整性"]}}
+{"input": {"query": "混合检索如何兼顾精确匹配", "context": [{"content": "混合检索：BM25 关键词检索 + 向量语义检索，兼顾精确禁语匹配和语义相似案例召回。", "page": 5}]}, "expected": {"points": ["BM25 关键词检索", "语义相似案例召回"]}}
+{"input": {"query": "重排序对检索结果有什么作用", "context": [{"content": "重排序：Reranker 交叉编码器对召回结果二次排序，过滤噪声片段，提升 Top-K 准确率。", "page": 6}]}, "expected": {"points": ["Reranker 交叉编码器", "过滤噪声片段"]}}
+{"input": {"query": "如何抑制大模型幻觉", "context": [{"content": "幻觉抑制：Prompt 强约束 + 输出溯源引用，强制大模型仅基于检索片段作答。", "page": 7}]}, "expected": {"points": ["Prompt 强约束", "输出溯源引用"]}}
+{"input": {"query": "向量化使用什么模型和向量库", "context": [{"content": "向量化：BGE/中文 Embedding 模型 + Milvus 向量库，将知识片段向量化存储，支持语义相似度检索。", "page": 8}]}, "expected": {"points": ["BGE/中文 Embedding 模型", "Milvus 向量库"]}}
+{"input": {"query": "禁止向第三方泄露哪些内容", "context": [{"content": "禁止向无关第三方泄露债务人债务、联系方式等隐私信息。", "page": 11}, {"content": "禁止在通话中刺探、传播债务人及关联人敏感个人信息。", "page": 22}]}, "expected": {"points": ["债务人债务、联系方式", "敏感个人信息"]}}
+{"input": {"query": "逾期天数与金额可以随意告知吗", "context": [{"content": "关键事实（金额、账期、身份）未经核实不得向债务人断言。", "page": 16}, {"content": "禁止伪造、篡改业务数据或捏造还款事实。", "page": 17}]}, "expected": {"points": ["未经核实不得向债务人断言", "捏造还款事实"]}}

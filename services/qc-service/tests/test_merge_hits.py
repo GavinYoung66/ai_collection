@@ -5,6 +5,7 @@ from app.services.ac_filter import WordHit
 from app.services.alert_service import AlertService
 from app.services.merge_hits import merge_hits
 from app.services.scoring_service import ScoringService
+from app.seeds.qc_rules_v1 import PENALTY_V1
 
 
 def _hit(**kwargs) -> WordHit:
@@ -42,9 +43,9 @@ class TestMergeHits:
         assert len(merged) == 1
         assert merged[0].severity == "high"
         assert merged[0].rule_id == "R11"
-        scored = ScoringService().score(merged)
+        scored = ScoringService().score(merged, PENALTY_V1)
         assert scored.compliance_score == 80
-        assert scored.penalty_total == 20
+        assert scored.deduction_total == 20
         assert scored.high_count == 1
         alerts = AlertService().on_high_risk(merged)
         assert len(alerts) == 1
@@ -54,7 +55,7 @@ class TestMergeHits:
         user = _hit(speaker="user", severity="high", score_eligible=True, source="ac")
         merged = merge_hits([user], [], [])
         assert merged[0].score_eligible is False
-        scored = ScoringService().score(merged)
+        scored = ScoringService().score(merged, PENALTY_V1)
         assert scored.compliance_score == 100
         assert scored.risk_level == "low"
         assert AlertService().on_high_risk(merged) == []
@@ -89,7 +90,7 @@ class TestMergeHits:
         assert len(only_r05) == 1
         assert only_r05[0].severity == "low"
         assert AlertService().on_high_risk(only_r05) == []
-        scored = ScoringService().score(only_r05)
+        scored = ScoringService().score(only_r05, PENALTY_V1)
         assert scored.compliance_score == 98
         assert scored.risk_level == "low"
         assert scored.qc_result == "pending_review"

@@ -16,10 +16,9 @@
     session_id: "会话",
     call_id: "通话 ID",
     qc_record_id: "质检记录",
-    compliance_score: "合规分",
-    machine_score: "机检分",
-    review_score: "人审分",
-    grade: "等级",
+    deduction_total: "扣分",
+    machine_deduction: "机检扣分",
+    review_deduction: "人审扣分",
     risk: "风险",
     qc_status: "质检状态",
     qc_result: "质检结论",
@@ -79,7 +78,13 @@
   let rescoreMode = false;
 
   function normalizeBase(raw) {
-    return String(raw || "").replace(/\/$/, "");
+    const v = String(raw || "").replace(/\/$/, "");
+    // 相对路径（以 / 开头但无 origin）仅在与后端同域时才成立；
+    // 静态 server（8080）或 file:// 协议上相对路径会打到 404/501，自动补后端 origin。
+    if (v.startsWith("/") && !/^https?:\/\//.test(v)) {
+      return `http://localhost:8003${v}`;
+    }
+    return v;
   }
 
   function isLegacyDefault(raw) {
@@ -247,7 +252,7 @@
         const tag = scenarioTag(row);
         const checking = checkingIds.has(id);
         const callId = row.call_id && String(row.call_id) !== String(id) ? row.call_id : "—";
-        const score = row.compliance_score != null ? String(row.compliance_score) : "—";
+        const score = row.deduction_total != null ? `-${row.deduction_total}` : "—";
         return `<tr data-id="${escapeAttr(id)}" class="${checking ? "judging" : ""}">
           <td><span class="tag ${tag.cls}">${escapeHtml(tag.text)}</span></td>
           <td class="trunc"><code>${escapeHtml(id)}</code></td>
@@ -338,8 +343,9 @@
         call_id: replayed && replayed.call_id,
         qc_record_id: replayed && replayed.qc_record_id,
         qc_status: replayed && replayed.qc_status,
+        deduction_total: replayed && replayed.deduction_total,
         compliance_score: replayed && replayed.compliance_score,
-        machine_score: replayed && replayed.compliance_score,
+        machine_deduction: replayed && replayed.deduction_total,
       });
       pendingIds.delete(sessionId);
       await openDetail(sessionId, { replay: false, preload: replayed });
@@ -375,12 +381,13 @@
 
   function penaltyPoints(hit) {
     if (!hitCounts(hit)) return 0;
+    if (hit && hit.points != null) return Number(hit.points) || 0;
     return PENALTY[hit.severity] || 0;
   }
 
   function penaltyLabel(hit) {
     if (!hitCounts(hit)) return "不计入";
-    const n = PENALTY[hit.severity];
+    const n = penaltyPoints(hit);
     if (!n) return "不计入";
     return `-${n}`;
   }
@@ -390,17 +397,25 @@
   }
 
   function clauseText(hit) {
+    // V1.18：优先展示后端静态制度条款（policy_clause + policy_text）；
+    // 纯 AC hit 无 rule_id 由 __ac_default__ 兜底填充；kb_snippet（RAG 片段）次选。
+    if (hit && (hit.policy_clause || hit.policy_text)) {
+      const parts = [];
+      if (hit.policy_clause) parts.push(String(hit.policy_clause));
+      if (hit.policy_text) parts.push(String(hit.policy_text));
+      return parts.join(" ");
+    }
     const snippet = hit && hit.kb_snippet;
     if (snippet) return String(snippet);
-    return "无检索条款 / 已回退关键词";
+    return "无制度依据（已回退关键词）";
   }
 
-  function machineScoreOf(record, sessionId) {
+  function machineDeductionOf(record, sessionId) {
     const cached = sessions.get(sessionId) || {};
-    if (cached.machine_score != null && cached.machine_score !== "") {
-      return Number(cached.machine_score);
+    if (cached.machine_deduction != null && cached.machine_deduction !== "") {
+      return Number(cached.machine_deduction);
     }
-    return Number(record && record.compliance_score);
+    return Number(record && record.deduction_total);
   }
 
   function setReviewButtonsEnabled(enabled) {
@@ -417,10 +432,10 @@
     rescoreMode = true;
     els.revisedScore.disabled = false;
     if (els.revisedScore.value === "") {
-      els.revisedScore.value = String(machineScoreOf(currentRecord, currentSessionId));
+      els.revisedScore.value = String(machineDeductionOf(currentRecord, currentSessionId) || 0);
     }
     els.revisedScore.focus();
-    els.reviewHint.textContent = "已进入改分。改数字不会写库，点「关闭质检」才生效。";
+    els.reviewHint.textContent = "已进入改扣分。填整数 >=0 不会写库，点「提交人审」才生效。";
   }
 
   function showReview(record) {
@@ -430,10 +445,10 @@
       els.reviewDone.textContent = "";
     }
     const status = record && record.qc_status;
-    const score = Number(record && record.compliance_score);
+    const deduction = Number(record && record.deduction_total);
     const hits = (record && record.hits) || [];
     const summed = penaltySum(hits);
-    const zeroDeduction = status === "DONE" && (score === 100 || summed === 0);
+    const zeroDeduction = deduction === 0 || (status === "DONE" && summed === 0);
     if (!record || zeroDeduction) {
       els.reviewBox.hidden = true;
       els.reviewHint.textContent = "零扣分已完成，无需人审。";
@@ -441,10 +456,10 @@
     }
     if (status === "REVIEWED") {
       els.reviewBox.hidden = true;
-      const machine = machineScoreOf(record, currentSessionId);
-      let text = `本通已人审，分数 ${score}`;
-      if (Number.isFinite(machine) && machine !== score) {
-        text = `本通已人审，机检 ${machine} → 人审 ${score}`;
+      const machine = machineDeductionOf(record, currentSessionId);
+      let text = `本通已人审，扣分 -${deduction}`;
+      if (Number.isFinite(machine) && machine !== deduction) {
+        text = `本通已人审，机检扣分 -${machine} → 人审扣分 -${deduction}`;
       }
       if (els.reviewDone) {
         els.reviewDone.hidden = false;
@@ -453,21 +468,21 @@
       els.reviewHint.textContent = "";
       return;
     }
-    if (status !== "PENDING_REVIEW" && !(score < 100)) {
+    if (status !== "PENDING_REVIEW") {
       els.reviewBox.hidden = true;
       els.reviewHint.textContent = "无需人审。";
       return;
     }
     els.reviewBox.hidden = false;
-    const machine = machineScoreOf(record, currentSessionId);
-    if (els.penaltyTotal) els.penaltyTotal.textContent = summed ? `-${summed}` : "0";
-    if (els.machineScoreLabel) els.machineScoreLabel.textContent = String(machine);
+    const machine = machineDeductionOf(record, currentSessionId);
+    if (els.penaltyTotal) els.penaltyTotal.textContent = deduction ? `-${deduction}` : "0";
+    if (els.machineScoreLabel) els.machineScoreLabel.textContent = `-${machine}`;
     els.revisedScore.value = "";
     els.revisedScore.disabled = true;
     const hasJwt = Boolean(token());
     setReviewButtonsEnabled(hasJwt);
     els.reviewHint.textContent = hasJwt
-      ? "认机检分点「扣分正确」。要改分：先点「误报改分」改数字，再点「关闭质检」才写入。"
+      ? "认机检扣分点「扣分正确」。要改扣分：先点「误报改扣分」填整数，再点「提交人审」才写入。"
       : "请先灌数或粘贴 QC JWT，人审按钮不可用。";
   }
 
@@ -508,19 +523,18 @@
       record.call_id && String(record.call_id) !== String(sessionId) ? record.call_id : "—";
     const status = record.qc_status || "—";
     const result = record.qc_result || "—";
-    const machine = machineScoreOf(record, sessionId);
-    const finalScore = record.compliance_score;
+    const machine = machineDeductionOf(record, sessionId);
+    const finalDeduction = record.deduction_total;
     const rows = [
       ["session_id", sessionId],
       ["call_id", callId],
       ["qc_record_id", record.qc_record_id || "—"],
-      ["compliance_score", finalScore != null ? String(finalScore) : "—"],
+      ["deduction_total", finalDeduction != null ? `-${finalDeduction}` : "—"],
     ];
-    if (status === "REVIEWED" && Number.isFinite(machine) && Number(finalScore) !== machine) {
-      rows.push(["machine_score", String(machine)], ["review_score", String(finalScore)]);
+    if (status === "REVIEWED" && Number.isFinite(machine) && Number(finalDeduction) !== machine) {
+      rows.push(["machine_deduction", `-${machine}`], ["review_deduction", `-${finalDeduction}`]);
     }
     rows.push(
-      ["grade", record.grade || "—"],
       ["risk", record.risk || "—"],
       ["qc_status", STATUS_LABEL[status] || status],
       ["qc_result", RESULT_LABEL[result] || result],
@@ -555,19 +569,20 @@
         record.call_id = null;
       }
       const machine =
-        cached.machine_score != null
-          ? cached.machine_score
+        cached.machine_deduction != null
+          ? cached.machine_deduction
           : record.qc_status === "PENDING_REVIEW"
-            ? record.compliance_score
-            : cached.machine_score;
+            ? record.deduction_total
+            : cached.machine_deduction;
       currentRecord = record;
       upsertSession({
         session_id: sessionId,
         call_id: record.call_id,
         qc_record_id: record.qc_record_id,
         qc_status: record.qc_status,
+        deduction_total: record.deduction_total,
         compliance_score: record.compliance_score,
-        machine_score: machine,
+        machine_deduction: machine,
       });
       renderMeta(record, sessionId);
       renderHits(record.hits);
@@ -654,11 +669,11 @@
     }
   }
 
-  function readRevisedScore() {
+  function readRevisedDeduction() {
     const raw = els.revisedScore.value;
     if (raw === "" || raw == null) return null;
     const n = Number(raw);
-    if (!Number.isInteger(n) || n < 0 || n > 100) return null;
+    if (!Number.isInteger(n) || n < 0) return null;
     return n;
   }
 
@@ -691,20 +706,20 @@
 
   function onCloseQc() {
     if (!rescoreMode) {
-      showToast("请先点「误报改分」并修改分数，或点「扣分正确」认机检分", true);
+      showToast("请先点「误报改扣分」并填写扣分值，或点「扣分正确」认机检扣分", true);
       return;
     }
-    const score = readRevisedScore();
-    if (score == null) {
-      showToast("请填写 0–100 整数分数后再关闭质检", true);
+    const deduction = readRevisedDeduction();
+    if (deduction == null) {
+      showToast("请填写 >=0 整数扣分后再提交", true);
       return;
     }
-    const machine = machineScoreOf(currentRecord, currentSessionId);
-    if (score === machine) {
-      showToast("分数仍等于机检分。请改分后再关闭，或点「扣分正确」", true);
+    const machine = machineDeductionOf(currentRecord, currentSessionId);
+    if (deduction === machine) {
+      showToast("扣分仍等于机检扣分。请改值后再提交，或点「扣分正确」", true);
       return;
     }
-    submitReview("CORRECT", { revised_score: score });
+    submitReview("CORRECT", { revised_deduction: deduction });
   }
 
   function escapeHtml(s) {

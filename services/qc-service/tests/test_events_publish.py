@@ -85,8 +85,10 @@ class TestCompletedPayload:
         assert completed
         payload = completed[0]
         assert payload["score"] == 80
+        assert payload["deduction"] == 20
+        assert payload["score"] == max(0, 100 - payload["deduction"])
         assert payload["risk"] == "high"
-        assert payload["grade"] == "PASS"
+        assert payload["grade"] is None
         assert payload["call_id"] is None
         assert payload["call_id"] != payload["session_id"]
         assert payload["session_id"] == "sess_ok"
@@ -94,6 +96,7 @@ class TestCompletedPayload:
         assert "qc_status" not in payload
         assert "skipped_rules" not in payload
         assert "compliance_score" not in payload
+        assert "deduction_total" not in payload
         assert "risk_level" not in payload
         assert "ts" in payload and "trace_id" in payload
         # Wire format goes through EventBus (mocked); envelope structure is
@@ -107,6 +110,7 @@ class TestCompletedPayload:
         data = calls[0].args[1]
         assert data.get("session_id") == "sess_ok"
         assert "score" not in data
+        assert "deduction" not in data
         assert payload["score"] == 80
 
     async def test_completed_call_id_is_uuid_not_session(self):
@@ -212,10 +216,17 @@ class TestReviewDone:
         for action, expected in mapping.items():
             assert sample_type_for(action) == expected
             assert review.sample_type(action) == expected
-            payload = await review.publish_done(qc_record_id=rid, action=action, revised_score=80)
+            rev_ded = 0 if action == "DISMISS" else (20 if action == "CORRECT" else None)
+            rev_score = None if action == "DISMISS" else (80 if action == "CORRECT" else None)
+            payload = await review.publish_done(
+                qc_record_id=rid, action=action,
+                revised_deduction=rev_ded, revised_score=rev_score,
+            )
             assert payload["sample_type"] == expected
             assert payload["action"] == action
             assert payload["qc_record_id"] == rid
+            assert payload["revised_deduction"] == rev_ded
+            assert payload["revised_score"] == rev_score
         channels = [ch for ch, _ in pub.emitted]
         assert channels.count(CHANNEL_REVIEW_DONE) == 3
         with pytest.raises(ValueError):

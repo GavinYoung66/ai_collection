@@ -10,7 +10,7 @@ import structlog
 from app.api.deps import get_llm_provider
 from app.llm.provider import CircuitBreakerOpenError, LLMCallError
 from app.models.state import ComplaintSessionState, UserDemandAnalysis
-from app.prompt.loader import load_prompt
+from common.prompt.loader import load_prompt
 from app.service.degrade_llm import node_degrade_fallback
 
 logger = structlog.get_logger()
@@ -18,7 +18,7 @@ logger = structlog.get_logger()
 
 async def user_demand_node(state: ComplaintSessionState) -> dict:
     """用户诉求节点：产出 UserDemandAnalysis，不做责任判定。"""
-    prompt = load_prompt("complaint_user_demand", complaint_text=state.complaint_text[:2000])
+    prompt = load_prompt("complaint_user_demand", service="complaint-service", complaint_text=state.complaint_text[:2000])
     llm = get_llm_provider()
     try:
         demand: UserDemandAnalysis = await llm.invoke(

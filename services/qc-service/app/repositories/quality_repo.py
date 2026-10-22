@@ -1,6 +1,7 @@
 """qc_records / qc_violations 仓储。WAIT_TEXT 禁止 INSERT；skipped_rules 不落列。"""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Sequence
 from uuid import UUID
@@ -16,6 +17,56 @@ from common.trace.middleware import get_trace_id
 
 SKIP_ACTION = "qc.skip.recorded"
 SKIP_RESOURCE_TYPE = "qc_records"
+_AC_DEFAULT_KEY = "__ac_default__"
+
+
+def points_for_hit(
+    penalty: Mapping[str, int],
+    *,
+    severity: str | None,
+    score_eligible: bool,
+) -> int:
+    """本条违规扣分 = penalty[severity]（与打分同源快照）；不可计分 hit 记 0。"""
+    if not score_eligible or not severity:
+        return 0
+    return int(penalty.get(severity, 0))
+
+
+def resolve_policy_fields(
+    deduction_policy: Mapping[str, Any],
+    *,
+    rule_id: str | None,
+    redline_tag: str | None,
+    severity: str | None,
+) -> dict[str, str | None]:
+    """从 active 包 deduction_policy 静态表确定性填充 policy_clause/policy_text。
+
+    rule_id 命中规则条款优先；无 rule_id 的纯 AC hit 走 __ac_default__ 兜底
+    （redline_tag 优先、severity 次之）。与 kb_snippet（RAG 片段）严格分离。
+    """
+    node = deduction_policy.get(rule_id) if rule_id else None
+    if not isinstance(node, Mapping):
+        fallback = deduction_policy.get(_AC_DEFAULT_KEY)
+        fallback = fallback if isinstance(fallback, Mapping) else {}
+        by_tag = fallback.get("by_redline_tag")
+        node = by_tag.get(redline_tag) if redline_tag and isinstance(by_tag, Mapping) else None
+        if not isinstance(node, Mapping):
+            by_severity = fallback.get("by_severity")
+            node = (
+                by_severity.get(severity)
+                if severity and isinstance(by_severity, Mapping)
+                else None
+            )
+        if not isinstance(node, Mapping):
+            node = None
+    if node is None:
+        return {"policy_clause": None, "policy_text": None}
+    clause = node.get("clause_no")
+    text = node.get("clause_text")
+    return {
+        "policy_clause": str(clause) if clause else None,
+        "policy_text": str(text) if text else None,
+    }
 
 
 class QualityRepo:
@@ -31,6 +82,7 @@ class QualityRepo:
         risk_level: str,
         qc_result: str,
         qc_status: str,
+        deduction_total: int = 0,
         grade: str | None = None,
         case_id: UUID | None = None,
         agent_id: UUID | None = None,
@@ -42,6 +94,7 @@ class QualityRepo:
         row = QcRecord(
             session_id=session_id,
             compliance_score=compliance_score,
+            deduction_total=deduction_total,
             risk_level=risk_level,
             qc_result=qc_result,
             qc_status=qc_status,

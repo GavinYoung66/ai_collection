@@ -13,7 +13,8 @@ from app.observability import emit_check_completed
 from app.repositories.alert_repo import AlertRepo
 from app.repositories.demo_store import DemoTraceStore
 from app.repositories.job_store import QcJobStore
-from app.repositories.quality_repo import QualityRepo
+from app.repositories.quality_repo import QualityRepo, points_for_hit, resolve_policy_fields
+from app.repositories.rule_repo import RulePackSnapshot, RuleRepo
 from app.services.ac_filter import WordHit
 from app.services.demo_trace import elapsed_ms, make_trace_event, safe_append, safe_set_meta, utc_now
 from app.services.offline_qc_service import CODE_OK, SUSPECTED_RULE_IDS, OfflineQcService, QcRunResult
@@ -34,6 +35,7 @@ def _as_uuid(value: str | None) -> UUID | None:
 
 
 def hit_to_http(hit: WordHit) -> dict[str, Any]:
+    """命中 HTTP 形态：source/word/条款/扣分点数。points/条款由 _persist 同源标注进 extras。"""
     return {
         "turn_id": hit.turn_id,
         "rule_id": hit.rule_id,
@@ -45,18 +47,22 @@ def hit_to_http(hit: WordHit) -> dict[str, Any]:
         "evidence_text": mask_text(hit.evidence_text or ""),
         "source": hit.source,
         "word": hit.word or None,
+        "points": hit.extras.get("points"),
+        "policy_clause": hit.extras.get("policy_clause"),
+        "policy_text": hit.extras.get("policy_text"),
         "kb_snippet": hit.kb_snippet,
     }
 
 
 def _result_from_record(row: QcRecord, qc: QCSession) -> QcRunResult:
-    """幂等命中：回已有终态行，不重跑管道、不 INSERT。"""
+    """幂等命中：回已有终态行，不重跑管道、不 INSERT。grade 恒 null（D5），不暴露库列历史值。"""
     return QcRunResult(
         code=CODE_OK,
         message="ok",
+        deduction_total=row.deduction_total,
         compliance_score=row.compliance_score,
         risk_level=row.risk_level,
-        grade=row.grade,
+        grade=None,
         qc_result=row.qc_result,
         qc_status=row.qc_status,
         inserted=False,
@@ -67,6 +73,15 @@ def _result_from_record(row: QcRecord, qc: QCSession) -> QcRunResult:
     )
 
 
+def _resolve_deduction(result: QcRunResult) -> int:
+    """扣分主口径：优先 deduction_total；缺失时由 compliance_score 反推，保证两列互洽。"""
+    if result.deduction_total is not None:
+        return int(result.deduction_total)
+    if result.compliance_score is not None:
+        return max(0, 100 - int(result.compliance_score))
+    return 0
+
+
 def run_result_to_http(result: QcRunResult) -> dict[str, Any]:
     """QcRunResult HTTP 字段。不含 skipped_rules、不含 score 作合规分。"""
     return {
@@ -74,6 +89,7 @@ def run_result_to_http(result: QcRunResult) -> dict[str, Any]:
         "session_id": result.session_id,
         "case_id": result.case_id,
         "call_id": result.call_id,
+        "deduction_total": result.deduction_total,
         "compliance_score": result.compliance_score,
         "risk": result.risk_level,
         "grade": result.grade,
@@ -117,12 +133,14 @@ class ReplayService:
         *,
         call_records_exists: bool = True,
         text_retry_count: int = 0,
+        rule_pack: RulePackSnapshot | None = None,
     ) -> QcRunResult:
         return await self.offline.run(
             session,
             call_records_exists=call_records_exists,
             text_retry_count=text_retry_count,
             persist=False,
+            rule_pack=rule_pack,
         )
 
     async def _assert_force_rerun(self, session_id: str, *, force: bool) -> None:
@@ -144,7 +162,9 @@ class ReplayService:
         high = score.high_count if score else 0
         med = score.med_count if score else 0
         low = score.low_count if score else 0
-        compliance = result.compliance_score if result.compliance_score is not None else 0
+        deduction = _resolve_deduction(result)
+        # 一致性：compliance_score 恒为 deduction_total 的派生值 max(0, 100 - deduction)。
+        compliance = max(0, 100 - deduction)
         risk = result.risk_level or "low"
         qc_result = result.qc_result or "compliant"
         qc_status = result.qc_status or "DONE"
@@ -153,6 +173,7 @@ class ReplayService:
             row = await self.quality_repo.insert_record(
                 session_id=qc.session_id,
                 compliance_score=compliance,
+                deduction_total=deduction,
                 risk_level=risk,
                 qc_result=qc_result,
                 qc_status=qc_status,
@@ -164,6 +185,7 @@ class ReplayService:
             )
         else:
             existing.compliance_score = compliance
+            existing.deduction_total = deduction
             existing.risk_level = risk
             existing.qc_result = qc_result
             existing.qc_status = qc_status
@@ -173,8 +195,28 @@ class ReplayService:
             existing.low_count = low
             row = existing
             await self.quality_repo.session.flush()
+        result.compliance_score = compliance
+        result.deduction_total = deduction
+        # 违规行三字段与打分同源：复用本次运行快照（由 RuleRepo active 包产出，不在此处硬编码种子）。
+        penalty_map = result.penalty_snapshot or {}
+        policy_map = result.deduction_policy_snapshot or {}
         violation_ids: dict[tuple[Any, Any, Any], Any] = {}
         for hit in result.hits:
+            policy_fields = resolve_policy_fields(
+                policy_map,
+                rule_id=hit.rule_id,
+                redline_tag=hit.redline_tag,
+                severity=hit.severity,
+            )
+            points = points_for_hit(
+                penalty_map,
+                severity=hit.severity,
+                score_eligible=bool(hit.score_eligible),
+            )
+            # 同源标注进命中，供 replay HTTP hits 与落库共用同一口径（不查库、不再算一遍）。
+            hit.extras["points"] = points
+            hit.extras["policy_clause"] = policy_fields["policy_clause"]
+            hit.extras["policy_text"] = policy_fields["policy_text"]
             vrow = await self.quality_repo.add_violation(
                 row,
                 turn_id=hit.turn_id,
@@ -186,6 +228,9 @@ class ReplayService:
                 source=hit.source,
                 word=hit.word or None,
                 kb_snippet=hit.kb_snippet,
+                points=points,
+                policy_clause=policy_fields["policy_clause"],
+                policy_text=policy_fields["policy_text"],
             )
             if vrow is not None and getattr(vrow, "id", None) is not None:
                 violation_ids[(hit.rule_id, hit.turn_id, hit.speaker)] = vrow.id
@@ -221,7 +266,7 @@ class ReplayService:
             session_id=qc.session_id,
             call_id=qc.call_id,
             latency_ms=latency_ms,
-            score=compliance,
+            score=deduction,
             risk=risk,
             grade=result.grade,
             violation_count=len(result.hits),
@@ -293,8 +338,8 @@ class ReplayService:
             call_id=call_id,
             case_id=qc.case_id,
             score=mapped["score"],
+            deduction=mapped["deduction"],
             risk=mapped["risk"],
-            grade=mapped["grade"],
         )
 
     async def replay_session(
@@ -319,7 +364,11 @@ class ReplayService:
         retries = 0
         if self.job_store is not None:
             retries = await self.job_store.get_wait_retries(qc.session_id)
-        result = await self.run(qc, call_records_exists=True, text_retry_count=retries)
+        # 一次质检运行只读一次 active 规则包：打分与落库共用该快照，防包切换竞态。
+        rule_pack: RulePackSnapshot | None = None
+        if self.quality_repo is not None:
+            rule_pack = await RuleRepo(self.quality_repo.session).get_active_snapshot()
+        result = await self.run(qc, call_records_exists=True, text_retry_count=retries, rule_pack=rule_pack)
         result.session_id = qc.session_id
         result.case_id = qc.case_id
         result.call_id = qc.call_id

@@ -43,6 +43,7 @@ class ReviewRepo:
         qc_record_id: UUID | str,
         action: str,
         revised_score: int | None = None,
+        revised_deduction: int | None = None,
         reason: str | None = None,
         reviewer_id: UUID | None = None,
     ) -> QcReview:
@@ -52,6 +53,7 @@ class ReviewRepo:
             qc_record_id=rid,
             action=action,
             revised_score=revised_score,
+            revised_deduction=revised_deduction,
             reason=reason,
             reviewer_id=reviewer_id,
         )
@@ -68,6 +70,7 @@ class ReviewRepo:
             "session_id": row.session_id,
             "case_id": str(row.case_id) if row.case_id is not None else None,
             "compliance_score": row.compliance_score,
+            "deduction_total": row.deduction_total,
             "risk": row.risk_level,
             "grade": row.grade,
             "qc_result": row.qc_result,

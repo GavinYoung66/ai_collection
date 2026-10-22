@@ -45,7 +45,18 @@ REVIEW_SAMPLE_TYPE = {
 }
 
 COMPLETED_KEYS = frozenset(
-    {"qc_record_id", "session_id", "call_id", "case_id", "score", "risk", "grade", "trace_id", "ts"}
+    {
+        "qc_record_id",
+        "session_id",
+        "call_id",
+        "case_id",
+        "score",
+        "deduction",
+        "risk",
+        "grade",
+        "trace_id",
+        "ts",
+    }
 )
 COMPLETED_FORBIDDEN_KEYS = frozenset({"qc_result", "qc_status", "skipped_rules", "compliance_score", "risk_level"})
 
@@ -148,19 +159,21 @@ class QcEventPublisher:
         call_id: str | None,
         case_id: str | None,
         score: int | None,
+        deduction: int | None,
         risk: str | None,
-        grade: str | None,
         trace_id: str | None = None,
         ts: int | None = None,
     ) -> dict[str, Any]:
+        """业务构造键含 deduction（扣分）与 score（派生兼容）；grade 退役恒 null（D5）。"""
         payload = {
             "qc_record_id": qc_record_id,
             "session_id": session_id,
             "call_id": event_call_id(call_id, session_id=session_id),
             "case_id": case_id,
             "score": score,
+            "deduction": deduction,
             "risk": risk,
-            "grade": grade,
+            "grade": None,
             **self._base(trace_id=trace_id, ts=ts),
         }
         extra = set(payload) - COMPLETED_KEYS
@@ -213,6 +226,7 @@ class QcEventPublisher:
         *,
         qc_record_id: str,
         action: str,
+        revised_deduction: int | None = None,
         revised_score: int | None = None,
         redline_tags: list[str] | None = None,
         evidence_masked: str | None = None,
@@ -222,6 +236,7 @@ class QcEventPublisher:
         payload = {
             "qc_record_id": qc_record_id,
             "action": action,
+            "revised_deduction": revised_deduction,
             "revised_score": revised_score,
             "redline_tags": list(redline_tags or []),
             "evidence_masked": mask_text(evidence_masked or ""),

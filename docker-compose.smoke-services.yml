@@ -82,6 +82,8 @@ services:
       PG_PORT: "5432"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      # Prompt 模板：镜像内位于 /app/app/prompt/templates（见 Dockerfile COPY app/ ./app/）
+      PROMPT_TEMPLATES_DIR: /app/app/prompt/templates
       # 轻量冒烟可选：7 词 mock。演示默认见 docker-compose.dev.yml（rag-service:8000，非 rag-dict-mock）。
       QC_RAG_SENSITIVE_BASE: http://rag-dict-mock:8000
       QC_RAG_INITIAL_TIMEOUT: "3"
@@ -179,6 +181,8 @@ services:
       PG_PORT: "5432"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      # Prompt 模板：镜像内位于 /app/app/prompt/templates（见 Dockerfile COPY app/ ./app/）
+      PROMPT_TEMPLATES_DIR: /app/app/prompt/templates
       EVENT_BUS: ${EVENT_BUS:-rocketmq}
       ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
       ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}

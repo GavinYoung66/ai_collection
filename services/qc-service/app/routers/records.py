@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 from app.deps import get_quality_repo
 from app.errors import envelope, http_status_for, success
-from app.models.qc import GRADE_VALUES, QC_RESULT_VALUES, QC_STATUS_VALUES, RISK_LEVEL_VALUES, QcRecord, QcViolation
+from app.models.qc import QC_RESULT_VALUES, QC_STATUS_VALUES, RISK_LEVEL_VALUES, QcRecord, QcViolation
 from app.repositories.quality_repo import QualityRepo
 from common.errors.codes import ERROR_MESSAGES, ErrorCode
 from common.errors.exceptions import BizException
@@ -19,7 +19,6 @@ from common.security.mask import mask_text
 router = APIRouter(prefix="/api/v1/qc", tags=["qc-records"])
 
 RiskQ = Literal["low", "medium", "high"]
-GradeQ = Literal["EXCELLENT", "PASS", "WARNING", "SERIOUS"]
 StatusQ = Literal["DONE", "PENDING_REVIEW", "REVIEWED", "PARTIAL"]
 ResultQ = Literal["compliant", "violation", "pending_review"]
 GroupByQ = Literal["agent", "rule_id", "day"]
@@ -52,9 +51,10 @@ def record_to_list_item(row: QcRecord) -> dict[str, Any]:
         "session_id": row.session_id,
         "case_id": _id_str(row.case_id),
         "agent_id": _id_str(row.agent_id),
+        "deduction_total": row.deduction_total,
         "compliance_score": row.compliance_score,
         "risk": row.risk_level,
-        "grade": row.grade,
+        "grade": None,  # grade 退役（D5）：字段保留恒 null，不暴露库列历史值
         "qc_result": row.qc_result,
         "qc_status": row.qc_status,
         "create_time": _iso(getattr(row, "create_time", None)),
@@ -74,6 +74,9 @@ def violation_to_hit(row: QcViolation) -> dict[str, Any]:
         "evidence_text": evidence,
         "source": row.source,
         "word": row.word,
+        "points": row.points,
+        "policy_clause": row.policy_clause,
+        "policy_text": row.policy_text,
         "kb_snippet": row.kb_snippet,
     }
 
@@ -114,7 +117,6 @@ async def records_list(
     page_size: int = Query(20, ge=1, le=100),
     agent_id: str | None = None,
     risk: RiskQ | None = None,
-    grade: GradeQ | None = None,
     qc_status: StatusQ | None = None,
     qc_result: ResultQ | None = None,
     case_id: str | None = None,
@@ -127,8 +129,6 @@ async def records_list(
         raise BizException(ErrorCode.A2002)
     if risk is not None and risk not in RISK_LEVEL_VALUES:
         raise BizException(ErrorCode.A2002)
-    if grade is not None and grade not in GRADE_VALUES:
-        raise BizException(ErrorCode.A2002)
     if qc_status is not None and qc_status not in QC_STATUS_VALUES:
         raise BizException(ErrorCode.A2002)
     if qc_result is not None and qc_result not in QC_RESULT_VALUES:
@@ -138,7 +138,6 @@ async def records_list(
         page_size=page_size,
         agent_id=_as_uuid(agent_id, field="agent_id"),
         risk=risk,
-        grade=grade,
         qc_status=qc_status,
         qc_result=qc_result,
         case_id=_as_uuid(case_id, field="case_id"),
