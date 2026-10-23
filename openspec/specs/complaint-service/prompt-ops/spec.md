@@ -8,12 +8,12 @@
 
 ### Requirement: Prompt 加载器
 
-系统 SHALL 在 `common/prompt/loader.py` 提供 `load_prompt(prompt_id: str, **context_vars) -> str`：
-- dev：从 `app/prompt/templates/` 加载 YAML（单文件 `{prompt_id}.yaml`）
-- prod：配置中心（Nacos）加载——本批允许 stub/接口预留，不得假装已接真 Nacos
+系统 SHALL 在 `common/prompt/loader.py` 提供 `load_prompt(prompt_id: str, service: str, **context_vars) -> str`（签名与 platform/prompt-ops 一致，`service` 用于解析调用方模板目录）：
+- dev：按调用方服务名解析到该服务模板目录加载 YAML（单文件 `{prompt_id}.yaml`）
+- prod：配置中心（Nacos）加载——本期允许 stub/接口预留，不得假装已接真 Nacos
 - 支持 `prompt_id@version`：加载后校验文件内 `version` 与请求版本一致，不一致抛版本不存在异常；无 `@version` 时，若传入 `session_id` 则可先经 A/B `select_version` 再按该版本规则加载，否则使用文件内 version
 - Jinja2 变量替换：对 sections 文本段渲染；**调用方传入的 context 键对应的占位符必须被替换**（不得简单用「整串不含 `{{`」作为唯一验收——正文可能含字面量）
-- 加载后校验：元数据齐全；七段键 `role` / `task` / `input_constraint` / `output_schema` / `prohibitions` / `fallback` / **`enum_constraints`** 齐全；附加键 **`few_shot`** 必须存在（可空）；缺失抛结构异常
+- 加载后按 YAML 顶层 `profile` 校验（缺省按 `standard`）：`standard` 要求七段键 `role` / `task` / `input_constraint` / `output_schema` / `prohibitions` / `fallback` / **`enum_constraints`** 齐全且附加键 **`few_shot`** 存在（可空）；`simple` 仅要求 `role` / `task` / `input_constraint` / `output_schema` 四段且 `few_shot` 存在。缺失抛结构异常
 - **禁止**将 `examples` 作为第七段权威键名
 
 #### Scenario: 加载并渲染 Prompt
@@ -27,20 +27,25 @@
 - **THEN** 返回该 Prompt 渲染结果
 
 - **WHEN** `load_prompt("complaint_verdict@9.9.9")` 且磁盘仅有 version=`1.0.0` 的单文件
-- **THEN** 抛出版本不存在异常（本批无第二套正文文件）
+- **THEN** 抛出版本不存在异常
 
 #### Scenario: 七段结构校验
 
-- **WHEN** 加载的 YAML 缺少七段中任一段（含 `enum_constraints`）或缺少 `few_shot` 键
+- **WHEN** 加载的 `profile: standard` YAML 缺少七段中任一段（含 `enum_constraints`）或缺少 `few_shot` 键
 - **THEN** 抛出结构校验异常，不返回不完整 Prompt
+
+#### Scenario: 双 profile 校验
+
+- **WHEN** 加载的 `profile: simple` YAML 四段（`role` / `task` / `input_constraint` / `output_schema`）齐全且含 `few_shot` 键，但无 `prohibitions` / `fallback` / `enum_constraints`
+- **THEN** 加载成功，不强制七段
 
 ### Requirement: Prompt 版本/A-B 流量管理
 
 系统 SHALL 在 `common/prompt/ab.py` 提供版本与 A/B 能力：
 - `select_version(prompt_id, session_id) -> str`：按流量百分比选择版本，基于 `hash(session_id + prompt_id) % 100`，同会话稳定
 - `configure_ab` / `rollback`：进程内配置切换，回滚后立即 100% 指定版本
-- 双版本**正文**本批可用测试夹具或进程内 override registry；不要求生产目录已有多文件
-- `load_prompt` 宜支持可选 `session_id=` 走 A/B 后再加载（或由调用方先 `select_version` 再 `load_prompt(id@ver)`——二者择一写进实现，tasks 需可测）
+- 双版本**正文**可用测试夹具或进程内 override registry；不要求生产目录已有多文件
+- `load_prompt` 宜支持可选 `session_id=` 走 A/B 后再加载（或由调用方先 `select_version` 再 `load_prompt(id@ver)`）
 
 #### Scenario: A/B 流量分配
 
