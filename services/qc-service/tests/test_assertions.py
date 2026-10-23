@@ -281,7 +281,7 @@ class TestAssertions1to14:
         _assert_envelope(replay.json(), code="0")
         resp = client.get(
             "/api/v1/qc/alerts",
-            headers=_token("SUPV"),
+            headers=_token("supervisor"),
             params={"session_id": "sess_a3", "status": "NEW"},
         )
         assert resp.status_code == 200
@@ -439,7 +439,7 @@ class TestAssertions1to14:
         original = replay_body["data"]["compliance_score"]
         resp = client.post(
             f"/api/v1/qc/reviews/{qc_record_id}",
-            headers=_token("QC"),
+            headers=_token("qc_reviewer"),
             json={"action": "CORRECT", "revised_score": 72, "reason": "改分"},
         )
         assert resp.status_code == 200

@@ -31,7 +31,7 @@ def _qc_json(code: str, data=None) -> JSONResponse:
 @router.get("/rules/active")
 async def get_active_rules(
     repo: RuleRepo = Depends(get_rule_repo),
-    _user: dict = Depends(require_roles("ADMIN", "TRAINER")),
+    _user: dict = Depends(require_roles("admin", "ai_trainer")),
 ):
     row = await repo.get_active()
     if row is None or not row.status == "active":
@@ -44,7 +44,7 @@ async def apply_rules(
     body: ApplyBody,
     repo: RuleRepo = Depends(get_rule_repo),
     job_store=Depends(get_job_store),
-    _user: dict = Depends(require_roles("ADMIN")),
+    _user: dict = Depends(require_roles("admin")),
 ):
     row, previous = await repo.apply_version(body.version)
     if job_store is not None:

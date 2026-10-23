@@ -30,7 +30,7 @@ async def list_alerts(
     status: str | None = None,
     session_id: str | None = None,
     repo: AlertRepo = Depends(get_alert_repo),
-    _user: dict = Depends(require_roles("SUPV", "ADMIN")),
+    _user: dict = Depends(require_roles("supervisor", "admin")),
 ):
     if page_size > 100:
         raise BizException(ErrorCode.A2002)
@@ -52,7 +52,7 @@ async def list_alerts(
 async def ack_alert(
     alert_id: str,
     repo: AlertRepo = Depends(get_alert_repo),
-    user: dict = Depends(require_roles("SUPV", "ADMIN")),
+    user: dict = Depends(require_roles("supervisor", "admin")),
 ):
     row = await repo.get(alert_id)
     if row is None or row.status == "ACKED":

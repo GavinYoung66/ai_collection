@@ -104,7 +104,7 @@ class TestRulesHttp:
     def test_get_active_returns_only_active_package(self):
         repo = FakeRuleRepo([_rule("v1.0", "active"), _rule("v0.9", "archived")])
         client = _client(repo)
-        resp = client.get("/api/v1/qc/rules/active", headers=_token("TRAINER"))
+        resp = client.get("/api/v1/qc/rules/active", headers=_token("ai_trainer"))
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data["version"] == "v1.0"

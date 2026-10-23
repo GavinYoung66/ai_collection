@@ -1,4 +1,4 @@
-"""种子数据：初始用户（admin/supervisor/agent）。"""
+"""种子数据：初始用户（admin/supervisor/agent/qc_reviewer/ai_trainer）。"""
 import asyncio
 
 from passlib.context import CryptContext
@@ -19,6 +19,8 @@ USERS = [
     {"username": "agent03", "password": "Agent@2026", "real_name": "催收坐席03", "role": "agent"},
     {"username": "agent04", "password": "Agent@2026", "real_name": "催收坐席04", "role": "agent"},
     {"username": "agent05", "password": "Agent@2026", "real_name": "催收坐席05", "role": "agent"},
+    {"username": "qc_reviewer01", "password": "Qc@2026", "real_name": "质检复核员01", "role": "qc_reviewer"},
+    {"username": "trainer01", "password": "Train@2026", "real_name": "AI 训练师01", "role": "ai_trainer"},
 ]
 
 

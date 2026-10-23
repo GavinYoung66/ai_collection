@@ -8,7 +8,7 @@
 - 本 change **不暴露 DISMISS**（API 仍保留；演示前端不要做该按钮）。
 - `CONFIRM`（扣分正确）**不改分**。
 - 零扣分（`DONE`）**无人审按钮**。
-- 路径参数是 `qc_record_id`，不是 `session_id`。JWT 角色仍为 `QC` / `SUPV`。
+- 路径参数是 `qc_record_id`，不是 `session_id`。JWT 角色使用规范值 `qc_reviewer` / `supervisor`（与 `common/db/models/user.py` 一致，大小写不敏感）。
 - 已 `REVIEWED` 再提交 → `A2007`；CORRECT 缺分或越界 → `A2008`。
 
 ## 演示时间线

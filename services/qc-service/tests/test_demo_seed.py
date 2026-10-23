@@ -149,7 +149,7 @@ class TestDemoSeed:
         assert "agent" not in speakers
         payload = verify_token(data["token"])
         assert payload is not None
-        assert payload["role"] == "QC"
+        assert payload["role"] == "qc_reviewer"
         assert payload["sub"] == data["reviewer_id"]
         UUID(data["reviewer_id"])
 

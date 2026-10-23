@@ -147,7 +147,7 @@ class TestAlertHttp:
     def test_empty_list_is_200_not_a2006(self):
         repo = FakeAlertRepo()
         client = _client(repo)
-        resp = client.get("/api/v1/qc/alerts", headers=_token("SUPV"))
+        resp = client.get("/api/v1/qc/alerts", headers=_token("supervisor"))
         assert resp.status_code == 200
         body = resp.json()
         assert body["code"] == "0"
@@ -170,7 +170,7 @@ class TestAlertHttp:
         repo.rows.append(row)
         repo.meta[str(aid)] = {"session_id": "sess_high", "evidence": "13812341234"}
         client = _client(repo)
-        resp = client.get("/api/v1/qc/alerts", headers=_token("supv"), params={"session_id": "sess_high"})
+        resp = client.get("/api/v1/qc/alerts", headers=_token("supervisor"), params={"session_id": "sess_high"})
         assert resp.status_code == 200
         item = resp.json()["data"]["items"][0]
         assert item["alert_id"] == str(aid)
@@ -188,7 +188,7 @@ class TestAlertHttp:
         row = QcAlert(id=aid, qc_record_id=uuid4(), level="high", status="NEW")
         repo.rows.append(row)
         client = _client(repo)
-        headers = _token("SUPV", sub=uid)
+        headers = _token("supervisor", sub=uid)
         first = client.post(f"/api/v1/qc/alerts/{aid}/ack", headers=headers)
         assert first.status_code == 200
         assert first.json()["data"]["status"] == "ACKED"
@@ -211,15 +211,15 @@ class TestAlertHttp:
 
     def test_ack_wrong_role_is_403_b0003(self):
         client = _client(FakeAlertRepo())
-        resp = client.post(f"/api/v1/qc/alerts/{uuid4()}/ack", headers=_token("QC"))
+        resp = client.post(f"/api/v1/qc/alerts/{uuid4()}/ack", headers=_token("qc_reviewer"))
         assert resp.status_code == 403
         assert resp.json()["code"] == "B0003"
 
     def test_page_size_over_100_and_bad_status_are_a2002(self):
         client = _client(FakeAlertRepo())
-        over = client.get("/api/v1/qc/alerts", headers=_token("SUPV"), params={"page_size": 101})
+        over = client.get("/api/v1/qc/alerts", headers=_token("supervisor"), params={"page_size": 101})
         assert over.status_code == 422
         assert over.json()["code"] == "A2002"
-        bad = client.get("/api/v1/qc/alerts", headers=_token("SUPV"), params={"status": "OPEN"})
+        bad = client.get("/api/v1/qc/alerts", headers=_token("supervisor"), params={"status": "OPEN"})
         assert bad.status_code == 422
         assert bad.json()["code"] == "A2002"

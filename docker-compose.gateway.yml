@@ -42,10 +42,16 @@ services:
     container_name: ai-api-auth
     env_file:
       - .env
+    # .env 的 PG_HOST=localhost 是宿主机调试口径；容器内必须走 postgres 服务名。
+    environment:
+      PG_HOST: postgres
     volumes:
       - ./common:/app/common:ro
     restart: unless-stopped
     networks:
+      # default：与主 compose 的 postgres 同网络（F0 登录需查 users 表）；
+      # ai-shared-net：供网关 proxy_pass http://auth 解析。
+      - default
       - ai-shared-net
 
   # 指标 exporter（api-gateway-hardening D10 / tasks 8.1）：抓取网关

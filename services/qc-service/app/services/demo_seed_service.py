@@ -84,7 +84,7 @@ class DemoSeedService:
         commit = getattr(self.repo.session, "commit", None)
         if commit is not None:
             await commit()
-        token = create_token({"sub": str(reviewer_id), "role": "QC"})
+        token = create_token({"sub": str(reviewer_id), "role": "qc_reviewer"})
         return {
             "session_ids": [item["session_id"] for item in sessions],
             "sessions": sessions,

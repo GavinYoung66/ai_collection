@@ -53,9 +53,15 @@ def user_uuid(payload: dict | None) -> UUID | None:
 
 
 def require_roles(*roles: str) -> Callable:
-    """JWT role ∈ roles（大小写不敏感）。返回 token payload。"""
+    """JWT role ∈ roles（大小写不敏感）。
 
-    allowed = {item.upper() for item in roles}
+    角色词表以 `common/db/models/user.py` 的 `role` 为准，即
+    `admin / supervisor / agent / qc_reviewer / ai_trainer`。
+    历史上此处曾用 `QC / SUPV / TRAINER` 短码，与 JWT 规范值永不相等，
+    导致 review/alerts/rules 对真实账号一律 403；现已统一为规范全名。
+    """
+
+    allowed = {str(item).strip().lower() for item in roles}
 
     async def check(request: Request) -> dict:
         header = request.headers.get(_AUTH_HEADER, "")
@@ -66,7 +72,7 @@ def require_roles(*roles: str) -> Callable:
         role = (payload or {}).get("role")
         if not payload or not role:
             raise UnauthorizedError()
-        if str(role).upper() not in allowed:
+        if str(role).strip().lower() not in allowed:
             raise ForbiddenError()
         request.state.user = payload
         return payload

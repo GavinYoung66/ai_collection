@@ -63,6 +63,20 @@ location = /internal/authz {
     proxy_set_header X-Trace-Id $trace_id;
 }
 
+# 认证入口（F0）：POST /api/v1/auth/login、GET /api/v1/auth/me。
+# MUST NOT include auth_request.conf —— 登录本身不能要求已登录，否则自锁成 401 死循环。
+# 路径原样透传给 auth-sidecar（proxy_pass 不带 URI），sidecar 按 /api/v1/auth/* 注册路由。
+location /api/v1/auth {
+    proxy_pass http://auth;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Trace-Id $trace_id;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 15s;
+    limit_req zone=gateway burst=40 nodelay;
+}
+
 # judge 长任务专用（D9 / tasks 7.2）：POST /api/v1/complaints/{id}/judge 为
 # 同步跑图（含 LLM 调用，典型耗时 >15s），若落在 /api/v1/complaints 前缀的
 # 15s 读超时会被误杀。正则 location 优先于前缀匹配，单独放 120s 级。
