@@ -9,11 +9,17 @@ COPY deploy/auth/main.py /app/main.py
 
 # fastapi/uvicorn 提供 HTTP 服务；pydantic-settings 供 common.config.settings 读取；
 # python-jose[cryptography] 是 common.security.rbac 验签的运行时依赖。
+# sqlalchemy/asyncpg/passlib 是 F0 登录（查 users 表 + bcrypt 校验）的运行时依赖，
+# 版本对齐根 requirements.lock，避免与其它服务的依赖版本漂移。
 RUN pip install --no-cache-dir \
     fastapi \
     uvicorn \
     pydantic-settings \
-    "python-jose[cryptography]"
+    "python-jose[cryptography]" \
+    "sqlalchemy[asyncio]==2.0.23" \
+    "asyncpg==0.29.0" \
+    "passlib[bcrypt]==1.7.4" \
+    "bcrypt==4.0.1"
 
 ENV PYTHONPATH=/app
 

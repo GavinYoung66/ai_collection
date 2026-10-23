@@ -42,7 +42,7 @@ async def pending_reviews(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1),
     repo: ReviewRepo = Depends(get_review_repo),
-    _user: dict = Depends(require_roles("QC", "SUPV")),
+    _user: dict = Depends(require_roles("qc_reviewer", "supervisor")),
 ):
     if page_size > 100:
         raise BizException(ErrorCode.A2002)
@@ -66,7 +66,7 @@ async def submit_review(
     body: ReviewBody,
     repo: ReviewRepo = Depends(get_review_repo),
     redis=Depends(get_redis),
-    user: dict = Depends(require_roles("QC", "SUPV")),
+    user: dict = Depends(require_roles("qc_reviewer", "supervisor")),
 ):
     record = await repo.get_record(qc_record_id)
     svc = ReviewService(QcEventPublisher(redis), repo=repo)

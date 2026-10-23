@@ -81,7 +81,7 @@ class TestReviewHttp:
 
     def test_pending_empty_is_200_not_a2007(self):
         client = _client(FakeReviewRepo())
-        resp = client.get("/api/v1/qc/reviews/pending", headers=_token("QC"))
+        resp = client.get("/api/v1/qc/reviews/pending", headers=_token("qc_reviewer"))
         assert resp.status_code == 200
         body = resp.json()
         assert body["code"] == "0"
@@ -97,7 +97,7 @@ class TestReviewHttp:
         client = _client(repo)
         resp = client.post(
             f"/api/v1/qc/reviews/{row.id}",
-            headers=_token("QC"),
+            headers=_token("qc_reviewer"),
             json={"action": "DISMISS", "reason": "误报"},
         )
         assert resp.status_code == 200
@@ -123,7 +123,7 @@ class TestReviewHttp:
         client = _client(repo, redis)
         resp = client.post(
             f"/api/v1/qc/reviews/{row.id}",
-            headers=_token("SUPV"),
+            headers=_token("supervisor"),
             json={"action": "CORRECT", "revised_deduction": 72, "reason": "改分"},
         )
         assert resp.status_code == 200
@@ -157,7 +157,7 @@ class TestReviewHttp:
         client = _client(repo, redis)
         resp = client.post(
             f"/api/v1/qc/reviews/{row.id}",
-            headers=_token("QC"),
+            headers=_token("qc_reviewer"),
             json={"action": "CORRECT", "revised_score": 100, "reason": "误报"},
         )
         assert resp.status_code == 200
@@ -180,7 +180,7 @@ class TestReviewHttp:
         client = _client(repo)
         resp = client.post(
             f"/api/v1/qc/reviews/{row.id}",
-            headers=_token("QC"),
+            headers=_token("qc_reviewer"),
             json={"action": "CONFIRM", "reason": "扣分正确"},
         )
         assert resp.status_code == 200
@@ -205,7 +205,7 @@ class TestReviewHttp:
         client = _client(repo)
         resp = client.post(
             f"/api/v1/qc/reviews/{row.id}",
-            headers=_token("QC"),
+            headers=_token("qc_reviewer"),
             json={"action": "CONFIRM"},
         )
         assert resp.status_code == 404
@@ -215,7 +215,7 @@ class TestReviewHttp:
         client = _client(FakeReviewRepo())
         resp = client.post(
             f"/api/v1/qc/reviews/{uuid4()}",
-            headers=_token("QC"),
+            headers=_token("qc_reviewer"),
             json={"action": "DISMISS"},
         )
         assert resp.status_code == 404
@@ -228,21 +228,21 @@ class TestReviewHttp:
         client = _client(repo)
         high = client.post(
             f"/api/v1/qc/reviews/{row.id}",
-            headers=_token("QC"),
+            headers=_token("qc_reviewer"),
             json={"action": "CORRECT", "revised_score": 101},
         )
         assert high.status_code == 400
         assert high.json()["code"] == "A2008"
         negative = client.post(
             f"/api/v1/qc/reviews/{row.id}",
-            headers=_token("QC"),
+            headers=_token("qc_reviewer"),
             json={"action": "CORRECT", "revised_deduction": -1},
         )
         assert negative.status_code == 400
         assert negative.json()["code"] == "A2008"
         missing = client.post(
             f"/api/v1/qc/reviews/{row.id}",
-            headers=_token("QC"),
+            headers=_token("qc_reviewer"),
             json={"action": "CORRECT"},
         )
         assert missing.status_code == 400
@@ -264,7 +264,7 @@ class TestReviewHttp:
             body = {"action": action}
             if action == "CORRECT":
                 body["revised_score"] = 88
-            resp = client.post(f"/api/v1/qc/reviews/{row.id}", headers=_token("qc"), json=body)
+            resp = client.post(f"/api/v1/qc/reviews/{row.id}", headers=_token("qc_reviewer"), json=body)
             assert resp.status_code == 200
             # 业务事件经 EventBus（mock）发布；信封 data 仅白名单，
             # sample_type/action 业务字段由 publisher 单测 test_three_sample_types 覆盖

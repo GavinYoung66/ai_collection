@@ -252,7 +252,7 @@ class TestAssertions15to28:
         assert CHANNEL_COMPLAINT_SUSPECTED not in _published_channels(redis)
         listed = client.get(
             "/api/v1/qc/alerts",
-            headers=_token("SUPV"),
+            headers=_token("supervisor"),
             params={"session_id": "sess_a21"},
         )
         assert listed.json()["data"]["items"] == []

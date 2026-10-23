@@ -1,7 +1,50 @@
 # AI 电话催收生态赋能系统
 
+[![CI](https://github.com/GavinYoung66/ai_collection/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/GavinYoung66/ai_collection/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.11-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.104-green)
+![LangGraph](https://img.shields.io/badge/LangGraph-Multi--Agent-orange)
+![Tests](https://img.shields.io/badge/Pytest-1400%2B%20passed-brightgreen)
+
 > 规范驱动开发（Specification-Driven Development）项目。
 > **实现深度口径：数据中台 / 知识库 / 全量质检 / 投诉研判四服务真实事件闭环已跑通**；其余服务在对应里程碑前为 health 脚手架，不是七系统业务功能全部完备。
+
+**English**: A production-grade reference implementation of a multi-agent LLM system (LangGraph + RAG + MCP) in the debt-collection domain. The real value is domain-agnostic: layered gateway architecture, RocketMQ event-driven microservice closure, MCP as the mandatory agent-to-capability protocol, and a battle-tested resilience toolkit (rate-limit / circuit-breaker / retry / fallback / degradation / tracing / PromptOps) packaged as reusable components under `common/`.
+
+## 这个仓库能给你什么
+
+业务是垂直的（贷后催收），**工程是通用的**。如果你在搭任何「LLM + 微服务」系统，以下零件可直接抄走：
+
+```mermaid
+flowchart TB
+    subgraph L1["① 接入层 · 三网关"]
+        GW1["API 网关<br/>Nginx :8080<br/>转发/限流/舱壁/灰度"]
+        GW2["MCP 网关<br/>mcp-gateway :9000<br/>Agent 工具调用统一入口"]
+        GW3["大模型网关<br/>invoke_llm 编排器<br/>选Key→限流→熔断→重试→fallback→降级"]
+    end
+    subgraph L2["② 微服务层 · 7 服务独立容器/schema"]
+        SVC["data-platform · rag · qc · complaint<br/>call · case · review"]
+    end
+    subgraph L3["③ 事件通信 · RocketMQ 唯一模式"]
+        MQ["信封白名单 + 幂等消费<br/>事件只带 ID/trace_id，订阅方回查明细"]
+    end
+    subgraph L4["④ 公共底座 · common/ 韧性零件"]
+        BASE["限流 · 熔断 · 有界重试 · 降级<br/>链路追踪(Langfuse) · PromptOps · PII脱敏/AES加密"]
+    end
+    L1 --> L2
+    L2 <-->|"跨服务只走事件总线（禁 HTTP 直推）"| L3
+    L2 -->|"Agent 取证只走 MCP 标准协议"| GW2
+    L2 --> L4
+```
+
+| 你想解决的问题 | 本仓库的答案 | 代码位置 |
+|---|---|---|
+| LLM 调用怎么做得不死不飘 | 统一编排器：限流→熔断（三态机）→有界重试（业务错才重试）→fallback 换模型→降级 | [common/llm/](common/llm/) |
+| 提示词散落各处、改了没人知道 | PromptOps：YAML 七段结构 + 唯一加载入口 + A/B 选版回滚 + golden 回归门禁 + `prompt_id@version` 全链观测 | [common/prompt/](common/prompt/) |
+| Agent 调下游能力越调越乱 | 强制走 MCP 标准协议，下游变更对 Agent 透明 | [services/mcp-gateway/](services/mcp-gateway/) |
+| 微服务事件闭环怎么落地 | RocketMQ 事件信封白名单 + 幂等消费 + 四服务真实闭环（ETL→质检→投诉→回写） | [common/eventbus/](common/eventbus/) |
+| LLM 系统的合规与安全 | PII 出 Agent 前脱敏、CoT 加密双授权解密、L4 幻觉/红线后置校验 | [common/guardrails/](common/guardrails/) [common/security/](common/security/) |
+| 变更怎么管住 AI/人的手 | OpenSpec 规范驱动：宪法层 specs + changes 归档流程，CI 六 job 门禁 + master 分支保护 | [openspec/](openspec/) |
 
 ## 1. 项目定位
 
@@ -248,3 +291,14 @@ ai_collection/
 | M3.5 投诉 V2 | 🟢 ✅ | real-llm + 事件化 + 图状态机修复 |
 | M4 复盘 | 🔴 ❌ | review-service 脚手架 |
 | 生产上线 | 🟢 ✅ | P0 六项硬门槛已清零（2026-10-10 infra-production-readiness + observability-metrics-llm-usage 两 change 归档） |
+
+---
+
+## 分支与协作
+
+- `dev`：默认分支，日常开发直接推送
+- `master`：受保护分支，仅接受 CI 六 job 全绿的 PR（Ruleset: Require PR + status checks + 禁止强推/删除）
+
+## 如果对你有帮助
+
+这个仓库的公共底座（LLM 韧性编排、PromptOps、MCP 网关、事件闭环）都是业务无关的通用零件，欢迎抄走、提 Issue 交流。觉得有用就点个 ⭐ Star，也是对持续维护的鼓励。
