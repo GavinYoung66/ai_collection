@@ -69,10 +69,11 @@ export function setRateLimitHandler(handler: RateLimitHandler | null): void {
 }
 
 // 模块级 trace 上下文（spec R13：MUST 预留读写函数供 F1 使用）。
-// F0 只做内存读写扩展点，**不生成、不注入 X-Trace-Id 请求头**（由网关统一生成）。
+// F1 起请求拦截器在上下文非空时注入 X-Trace-Id（§9.4：详情页复合链路串联）；
+// 上下文的生成/清空由模块侧 composable 负责（F1 ComplaintDetail），本文件不生成。
 let traceContext: string | null = null
 
-/** 写入当前 trace 上下文（F1 使用；F0 仅预留扩展点） */
+/** 写入当前 trace 上下文（F1 详情页挂载时写入、卸载时清空） */
 export function setTraceContext(traceId: string | null): void {
   traceContext = traceId
 }
@@ -99,6 +100,12 @@ const http: AxiosInstance = axios.create({
 http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   if (authToken) {
     config.headers.set('Authorization', `Bearer ${authToken}`)
+  }
+  // X-Trace-Id 注入（§9.4 F1 落地）：trace 上下文非空时注入请求头，
+  // 串联详情页「查看→研判→定责→回电→关单」复合链路；为空不注入。
+  const ctx = getTraceContext()
+  if (ctx) {
+    config.headers.set('X-Trace-Id', ctx)
   }
   return config
 })

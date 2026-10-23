@@ -15,8 +15,10 @@ const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
 
-const username = ref('')
-const password = ref('')
+// 开发便利：仅 DEV 模式预填种子账号（生产构建 import.meta.env.DEV=false，不含凭证）
+// 去除时把两行初值改回 '' 即可
+const username = ref(import.meta.env.DEV ? 'admin' : '')
+const password = ref(import.meta.env.DEV ? 'Admin@2026' : '')
 // 提交中状态：连点直接 return，保证 100ms 内只发 1 次请求
 const loading = ref(false)
 const errorMsg = ref('')

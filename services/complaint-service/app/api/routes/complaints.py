@@ -36,6 +36,7 @@ from app.api.schemas.complaint import (
     VerdictResponse,
 )
 from app.config import settings
+from app.models.state import TaskStatus
 from app.service.complaint_service import (
     ComplaintNotFound,
     ComplaintPersistError,
@@ -88,8 +89,11 @@ async def list_complaints(
     request: Request,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
+    task_status: Optional[list[TaskStatus]] = Query(default=None),
 ):
-    result = complaint_service.list(page=page, page_size=page_size)
+    # task_status 支持重复查询参数（?task_status=a&task_status=b），
+    # 供 F1 复核工作台按待复核集合过滤；None 时不过滤（保持原契约）。
+    result = complaint_service.list(page=page, page_size=page_size, task_status=task_status)
     items = [
         ComplaintListItem(
             complaint_id=r["complaint_id"],
@@ -146,6 +150,7 @@ async def get_complaint(complaint_id: str, request: Request):
     disp = rec.get("disposition_verdict")
     disp_val = disp.value if hasattr(disp, "value") else disp
     ordered: list = []
+    # 契约：违规清单仅在「人审定责 = 坐实违规」后返回（定责前为空，见 test_api_routes.py:454）
     if disp_val == VerdictType.agent_violation.value:
         ordered = build_ordered_evidence(rec)
     evidence_refs = build_evidence_refs(

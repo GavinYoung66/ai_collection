@@ -11,11 +11,16 @@ import {
   Fold,
   Expand,
   SwitchButton,
+  Warning,
 } from '@element-plus/icons-vue'
 import type { Component } from 'vue'
 
 // 主布局（SSOT §11 / D11）：侧边栏 + 顶栏 + 面包屑 + router-view。
 // 布局不 import 任何 modules/*，菜单由路由表 + 当前角色过滤生成。
+// 菜单渲染同时支持两种路由结构：
+//   1. 扁平路由（单条 el-menu-item，如 qc/rag/usage/system）
+//   2. 嵌套路由（父级 el-sub-menu + 子级 el-menu-item，如 complaint）
+// 子路由 meta.menu === false 时不进入侧边栏（详情页是导航目标，不是菜单入口）
 const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
@@ -30,18 +35,78 @@ const ICON_MAP: Record<string, Component> = {
   Reading,
   DataAnalysis,
   Setting,
+  Warning,
+}
+
+// 菜单项统一结构：group = 父级路由，children = 侧边栏实际渲染项
+interface MenuGroup {
+  path: string
+  title: string
+  icon?: string
+  roles: string[]
+  children: MenuItem[]
+}
+
+interface MenuItem {
+  path: string        // 完整路径（如 /complaints/review）
+  title: string
+  icon?: string
+  menu: boolean       // true = 侧边栏显示，false = 隐藏（如详情页）
 }
 
 // 从路由表提取 AdminLayout 下的业务子路由，按当前角色过滤生成菜单
-const menuRoutes = computed(() => {
+const menuRoutes = computed<MenuGroup[]>(() => {
   const root = router.options.routes.find((r) => r.path === '/')
   const children = root?.children ?? []
-  return children.filter((r) => {
-    const roles = r.meta?.roles
-    // meta.roles 缺省 = 登录即可见；否则需当前角色命中
+
+  function filterByRoles(roles: string[] | undefined): boolean {
     if (!roles || roles.length === 0) return true
     return auth.role ? roles.includes(auth.role) : false
-  })
+  }
+
+  return children
+    .filter((r) => filterByRoles(r.meta?.roles as string[] | undefined))
+    .map((r): MenuGroup => {
+      // 有嵌套 children → 生成 group + 过滤子级
+      if (r.children && r.children.length > 0) {
+        const visibleChildren: MenuItem[] = r.children
+          .filter((c) => filterByRoles(c.meta?.roles as string[] | undefined))
+          .filter((c) => c.meta?.menu !== false)
+          .map((c): MenuItem => {
+            const childPath = (c.path ?? '').startsWith('/')
+              ? (c.path as string)
+              : `${r.path}/${c.path ?? ''}`.replace(/\/+$/, '') // 去掉末尾多余 /
+            return {
+              path: childPath,
+              title: (c.meta?.title as string) ?? '',
+              icon: c.meta?.icon as string | undefined,
+              menu: c.meta?.menu !== false,
+            }
+          })
+
+        return {
+          path: r.path,
+          title: (r.meta?.title as string) ?? '',
+          icon: r.meta?.icon as string | undefined,
+          roles: (r.meta?.roles as string[] | undefined) ?? [],
+          children: visibleChildren,
+        }
+      }
+
+      // 扁平单路由 → 转成单子级 group
+      return {
+        path: r.path,
+        title: (r.meta?.title as string) ?? '',
+        icon: r.meta?.icon as string | undefined,
+        roles: (r.meta?.roles as string[] | undefined) ?? [],
+        children: [{
+          path: r.path,
+          title: (r.meta?.title as string) ?? '',
+          icon: r.meta?.icon as string | undefined,
+          menu: true,
+        }],
+      }
+    })
 })
 
 // 面包屑：由当前路由 matched 的 meta.title 链生成
@@ -53,6 +118,24 @@ const breadcrumbs = computed(() =>
 
 function toggleCollapse(): void {
   collapsed.value = !collapsed.value
+}
+
+// 父级菜单整行点击（含 padding 区域，箭头除外）→ 跳转到第一个可见子路由（如「投诉研判」→ /complaints）
+// el-sub-menu 默认只展开/折叠不跳转；事件委托在 el-menu 捕获阶段执行，与展开/折叠不冲突
+// 折叠状态下点击父级图标是弹 popup 选子项，不跳转
+function handleMenuCapture(e: MouseEvent): void {
+  if (collapsed.value) return
+  const el = e.target as HTMLElement
+  if (el.closest('.el-sub-menu__icon-arrow')) return // 点击箭头只展开/折叠
+  const titleEl = el.closest('.el-sub-menu__title')
+  if (!titleEl) return // 普通 el-menu-item 点击交给 el-menu router 模式处理
+  const groupPath = titleEl.closest('[data-group-path]')?.getAttribute('data-group-path')
+  const group = menuRoutes.value.find((g) => g.path === groupPath)
+  if (!group || group.children.length === 0) return
+  const target = group.children[0].path
+  if (route.path !== target) {
+    router.push(target)
+  }
 }
 
 function handleLogout(): void {
@@ -79,19 +162,47 @@ function handleLogout(): void {
         background-color="#001529"
         text-color="#b7bdc8"
         active-text-color="#ffffff"
+        @click.capture="handleMenuCapture"
       >
-        <el-menu-item
-          v-for="item in menuRoutes"
-          :key="item.path"
-          :index="item.path"
-        >
-          <el-icon>
-            <component :is="ICON_MAP[item.meta?.icon ?? '']" />
-          </el-icon>
-          <template #title>
-            {{ item.meta?.title }}
-          </template>
-        </el-menu-item>
+        <template v-for="group in menuRoutes" :key="group.path">
+          <!-- 多个可见子级 → el-sub-menu（可折叠）
+               index 加 #group 后缀：与子级 el-menu-item 的 index（路由路径）区分，
+               否则父级 index=/complaints 与「投诉列表」子项 index=/complaints 冲突（重复 key 警告） -->
+          <el-sub-menu
+            v-if="group.children.length > 1"
+            :index="`${group.path}#group`"
+            :data-group-path="group.path"
+          >
+            <template #title>
+              <el-icon>
+                <component :is="ICON_MAP[group.icon ?? '']" />
+              </el-icon>
+              <span>{{ group.title }}</span>
+            </template>
+            <el-menu-item
+              v-for="child in group.children"
+              :key="child.path"
+              :index="child.path"
+            >
+              <template #title>
+                {{ child.title }}
+              </template>
+            </el-menu-item>
+          </el-sub-menu>
+
+          <!-- 单条（扁平）→ el-menu-item -->
+          <el-menu-item
+            v-else
+            :index="group.children[0]?.path ?? group.path"
+          >
+            <el-icon>
+              <component :is="ICON_MAP[group.icon ?? '']" />
+            </el-icon>
+            <template #title>
+              {{ group.title }}
+            </template>
+          </el-menu-item>
+        </template>
       </el-menu>
     </el-aside>
 
@@ -107,9 +218,10 @@ function handleLogout(): void {
             <Expand v-else />
           </el-icon>
           <el-breadcrumb separator="/">
+            <!-- key 用 path+idx：嵌套路由下父级与 index 子级 record.path 可能相同（如 /complaints），会触发重复 key 警告 -->
             <el-breadcrumb-item
               v-for="(b, idx) in breadcrumbs"
-              :key="b.path"
+              :key="`${b.path}-${idx}`"
               :to="idx === breadcrumbs.length - 1 ? undefined : b.path"
             >
               {{ b.title }}
@@ -161,6 +273,7 @@ function handleLogout(): void {
   font-weight: 600;
   border-bottom: 1px solid #1f2d3d;
 }
+/* el-sub-menu 标题行点击跳转由 el-menu 捕获阶段委托处理（见 handleMenuCapture） */
 .header {
   display: flex;
   align-items: center;
