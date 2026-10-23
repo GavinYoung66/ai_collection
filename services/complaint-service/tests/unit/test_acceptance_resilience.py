@@ -220,7 +220,17 @@ async def test_consumer_ready_dispatches_judge(monkeypatch):
     rl.release_complaint()
 
     await _consume_queue_once()
-    await asyncio.sleep(0.05)  # 等待派发 task 完成
+    # 轮询等待派发 task 完成（含槽/锁释放）：固定 sleep 在慢 runner 上读到的仍是
+    # pending（PR #4 master 侧两次失败）；judge_async 置 pending_review 后，
+    # finally 才释放并发槽与幂等锁，故三个条件必须同时等待。
+    for _ in range(200):
+        if (
+            complaint_service.get(cid)["task_status"] == "pending_review"
+            and rl.inflight == 0
+            and judge_lock_key(cid) not in fake.store
+        ):
+            break
+        await asyncio.sleep(0.05)
 
     rec = complaint_service.get(cid)
     assert rec["task_status"] == "pending_review"
@@ -275,7 +285,13 @@ async def test_consumer_spawned_task_is_referenced_until_done(monkeypatch):
     await _consume_queue_once()
     # 任务在途：被集合强引用（防 GC）
     assert len(_running_queued) == 1
-    await asyncio.sleep(0.3)  # 等研判结束 → done_callback 自动移除
+    # 直接等任务终结：固定 sleep 在慢 runner 上会读到仍在途的任务并泄漏给后续
+    # 用例（PR #4 master 侧 run_3 三连失败根因——泄漏 task 绑定的循环关闭后，
+    # lifespan shutdown 对其 cancel() 抛 Event loop is closed）。
+    # done_callback(discard) 注册早于本等待方，唤醒时集合必然已移除；
+    # wait_for 兜底防极端挂起死套件。
+    task = next(iter(_running_queued))
+    await asyncio.wait_for(task, timeout=10)
     assert len(_running_queued) == 0
     assert rl.inflight == 0
     assert judge_lock_key(cid) not in fake.store
