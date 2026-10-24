@@ -70,8 +70,8 @@ class TestQcSettings:
         assert qc_settings.QC_RAG_INITIAL_TIMEOUT == 3
         assert qc_settings.QC_RAG_HOURLY_CRON == "0 * * * *"
         assert qc_settings.QC_DP_TIMEOUT == 5
-        assert qc_settings.QC_LLM_MODEL == "qwen-plus"
-        assert qc_settings.QC_LLM_TIMEOUT == 5
+        assert qc_settings.QC_LLM_MODEL == "deepseek-flash"
+        assert qc_settings.QC_LLM_TIMEOUT == 20
         assert qc_settings.QC_LLM_FALLBACK_CHAIN == ["qwen-turbo"]
         assert qc_settings.QC_MAX_INFLIGHT == 3
         assert qc_settings.QC_INFLIGHT_WAIT_TIMEOUT == 0

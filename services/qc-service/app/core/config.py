@@ -19,8 +19,12 @@ class QcSettings(BaseSettings):
     QC_DP_SESSION_PATH: str = "/api/v1/data/sessions/{session_id}/qc-source"
     QC_DP_PENDING_QC_PATH: str = "/api/v1/data/sessions:pending-qc"
     QC_DP_TIMEOUT: int = 5
-    QC_LLM_MODEL: str = "qwen-plus"
-    QC_LLM_TIMEOUT: int = 5
+    # 主模型：DeepSeek 线上 V4.1 Flash（官方调用名 deepseek-flash，api-docs.deepseek.com）；
+    # qwen 系列保留在降级链（DashScope 兜底），llm_reviewer 按模型名前缀路由 provider
+    QC_LLM_MODEL: str = "deepseek-flash"
+    # DeepSeek V4.1 Flash 实测单跳 ~6s（含 reasoning tokens），5s 会稳定超时降级；
+    # 网关 replay 读超时 120s，20s 留足余量且不拖垮批量质检
+    QC_LLM_TIMEOUT: int = 20
     QC_LLM_FALLBACK_CHAIN: list[str] = ["qwen-turbo"]
     QC_MAX_INFLIGHT: int = Field(default=3, ge=1)
     QC_INFLIGHT_WAIT_TIMEOUT: int = Field(default=0, ge=0)

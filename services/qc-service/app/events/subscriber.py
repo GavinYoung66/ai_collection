@@ -25,6 +25,7 @@ from app.repositories.demo_store import DemoTraceStore
 from app.repositories.job_store import QcJobStore
 from app.repositories.quality_repo import QualityRepo
 from app.services.ac_filter import get_shared_ac
+from app.services.llm_reviewer import LLMReviewer
 from app.services.offline_qc_service import CODE_OK, OfflineQcService, QcRunResult, _text_ready
 from app.services.replay_service import ReplayService
 from app.services.word_loader import WordLoader
@@ -87,6 +88,10 @@ async def default_replay_session(qc: QCSession) -> QcRunResult:
             publisher=publisher,
             rag=get_rag_client(),
             trace_store=DemoTraceStore(redis),
+            # 自动质检链路的 LLM 用量埋点（独立短事务落 llm_call_logs）
+            llm=LLMReviewer(
+                job_store=job_store, publisher=publisher, persist_call_logs=True
+            ),
         )
         replay = ReplayService(offline, quality_repo=repo, trace_store=offline.trace_store)
         return await replay.replay_session(qc)

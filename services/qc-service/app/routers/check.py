@@ -92,7 +92,8 @@ def get_dp_client() -> DpClient:
 
 
 def get_llm_reviewer() -> LLMReviewer:
-    return LLMReviewer()
+    # persist_call_logs：手动 replay 路径同样落 llm_call_logs（用量看板数据源）
+    return LLMReviewer(persist_call_logs=True)
 
 
 async def get_replay_service(

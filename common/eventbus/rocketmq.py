@@ -72,6 +72,12 @@ class RocketMQEventBus:
             max_workers=4, thread_name_prefix="eventbus-rmq"
         )
         self._owns_executor = executor is None
+        # 发布专用线程池：消费循环里的 consumer.receive 是阻塞长轮询，单次可占住线程
+        # 十余秒；若与发布共用同一个 4 线程池，订阅数一多就会把池占满，发布任务
+        # 只能排队（实测 qc 4 个订阅 4 个 worker → 复核接口 publish 卡 12~19s）。
+        self._publish_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="eventbus-rmq-pub"
+        )
         self._tasks: list[asyncio.Task[None]] = []
         self._producer = None
 
@@ -110,7 +116,7 @@ class RocketMQEventBus:
         body = envelope.model_dump_json().encode("utf-8")
         loop = asyncio.get_running_loop()
         message_id = await loop.run_in_executor(
-            self._executor,
+            self._publish_executor,
             self._publish_sync,
             event_name,
             body,
@@ -378,7 +384,7 @@ class RocketMQEventBus:
         topic = dlq_topic_name(consumer_group)
         try:
             await loop.run_in_executor(
-                self._executor,
+                self._publish_executor,
                 self._publish_sync,
                 envelope.event_name,
                 body,
@@ -410,3 +416,4 @@ class RocketMQEventBus:
             self._producer = None
         if self._owns_executor:
             self._executor.shutdown(wait=False, cancel_futures=True)
+        self._publish_executor.shutdown(wait=False, cancel_futures=True)
