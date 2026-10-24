@@ -14,6 +14,7 @@ from app.mcp.http import router as mcp_router
 from app.routers.alerts import router as alerts_router
 from app.routers.check import router as check_router
 from app.routers.demo import router as demo_router
+from app.routers.llm_usage import router as llm_usage_router
 from app.routers.records import router as records_router
 from app.routers.review import router as review_router
 from app.routers.rules import router as rules_router
@@ -116,4 +117,5 @@ app.include_router(records_router)
 app.include_router(alerts_router)
 app.include_router(review_router)
 app.include_router(rules_router)
+app.include_router(llm_usage_router)
 app.include_router(mcp_router)

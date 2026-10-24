@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# qc-service M1 冒烟（SSOT）：health → seed 通话 → replay/raw → records → alerts
+# qc-service M1 冒烟（SSOT）：health → seed 通话 → replay/raw → records → alerts → llm-usage
 #
 # 依赖：data-platform + PostgreSQL + Redis。
 # MUST NOT 启动 call-service（qc 不 ingest、无 WS、不把 call 当冒烟依赖）。
@@ -350,6 +350,63 @@ PY
         pass "GET /qc/alerts 200 (empty or NEW high)"
     else
         fail "GET /qc/alerts 200 (empty or NEW high)"
+    fi
+fi
+
+echo "--- GET /api/v1/llm-usage/summary|logs (SUPV, F3) ---"
+if [ -z "$TOKEN" ]; then
+    echo "[SKIP] llm-usage 两端点（未取得 SUPV token）" >&2
+else
+    if python3 - "$BASE" "$TOKEN" <<'PY'
+import json, sys, urllib.error, urllib.request
+
+base, token = sys.argv[1], sys.argv[2]
+headers = {"Authorization": f"Bearer {token}"}
+
+
+def get(path):
+    req = urllib.request.Request(f"{base}{path}", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.getcode(), json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode()) if exc.fp else {}
+
+
+status, body = get("/api/v1/llm-usage/summary")
+if status != 200 or str(body.get("code")) != "0":
+    print(f"summary failed HTTP={status} body={body}", file=sys.stderr)
+    sys.exit(1)
+data = body.get("data") or {}
+totals = data.get("totals")
+if not isinstance(totals, dict):
+    print("summary data.totals missing", file=sys.stderr)
+    sys.exit(1)
+for key in ("calls", "tokens", "avg_latency_ms", "failure_rate"):
+    if key not in totals:
+        print(f"missing totals.{key}", file=sys.stderr)
+        sys.exit(1)
+if not isinstance(data.get("by_model"), list) or not isinstance(data.get("trend"), list):
+    print("summary by_model/trend must be list", file=sys.stderr)
+    sys.exit(1)
+
+status, body = get("/api/v1/llm-usage/logs?page=1&page_size=5")
+if status != 200 or str(body.get("code")) != "0":
+    print(f"logs failed HTTP={status} body={body}", file=sys.stderr)
+    sys.exit(1)
+data = body.get("data") or {}
+if not isinstance(data.get("items"), list) or not isinstance(data.get("total"), int):
+    print("logs data.items/total type mismatch", file=sys.stderr)
+    sys.exit(1)
+if data.get("page") != 1 or data.get("page_size") != 5:
+    print(f"logs paging echo mismatch page={data.get('page')} size={data.get('page_size')}", file=sys.stderr)
+    sys.exit(1)
+print(f"summary totals.calls={totals['calls']}; logs total={data['total']}")
+PY
+    then
+        pass "GET /llm-usage/summary + /logs code=0（totals/by_model/trend + items/total）"
+    else
+        fail "GET /llm-usage/summary + /logs code=0（端点为 F3 新增；需 qc-service 已部署且迁移 0017/0018 已执行）"
     fi
 fi
 
