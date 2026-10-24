@@ -81,7 +81,7 @@ describe('circular JSON error reproduction', () => {
       props: {
         columns: [
           { key: 'id', label: 'ID', width: 100 },
-          { key: 'name', label: '名称', render: (row: { name: string }) => row.name.slice(0, 10) + '…' },
+          { key: 'name', label: '名称', render: (row: unknown) => (row as { name: string }).name.slice(0, 10) + '…' },
           { key: 'status', label: '状态', width: 100 },
         ],
         rows: [

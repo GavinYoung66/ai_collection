@@ -8,8 +8,8 @@
     "strict": true,
     "allowArbitraryExtensions": true,
 
-    /* 路径别名：与 vite.config.ts 的 resolve.alias 保持一致，供 TS 与 depcruise 解析 */
-    "baseUrl": ".",
+    /* 路径别名：与 vite.config.ts 的 resolve.alias 保持一致，供 TS 与 depcruise 解析。
+       TS 6.0 起 baseUrl 废弃（TS5101），paths 直接相对 tsconfig 所在目录解析。 */
     "paths": {
       "@/*": ["./src/*"]
     },

@@ -184,11 +184,14 @@ jobs:
         run: npm ci
 
       # —— 以下四步为四道独立闸门，任一步非 0 退出即中断 job ——
+      # ESLint：0 error 为硬红线；warning 冻结基线（--max-warnings 271 定义在 package.json），
+      # 禁止新增 warning；存量逐批清理后同步下调该阈值（只降不升）。
       - name: ESLint
         run: npm run lint
 
+      # 必须用 -b：根 tsconfig 是 solution 式（files: []），`--noEmit` 会空转通过（0 文件被检查）
       - name: Type check (vue-tsc)
-        run: npx vue-tsc --noEmit
+        run: npx vue-tsc -b --force
 
       - name: Unit tests (vitest)
         run: npx vitest run

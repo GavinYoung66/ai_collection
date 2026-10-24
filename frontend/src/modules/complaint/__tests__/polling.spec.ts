@@ -10,6 +10,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { Ref } from 'vue'
+import { defineComponent } from 'vue'
 import { mount } from '@vue/test-utils'
 import { usePolling } from '../composables/usePolling'
 
@@ -22,15 +23,18 @@ vi.mock('../api', () => ({
 }))
 
 function mountForPolling(complaintId: string, callbacks: Record<string, unknown> = {}) {
-  return mount({
-    setup() {
-      return usePolling(
-        { value: complaintId } as Ref<string>,
-        callbacks as Parameters<typeof usePolling>[1],
-      )
-    },
-    template: '<div />',
-  })
+  // defineComponent 包裹保证 wrapper.vm 上 setup 暴露绑定的类型推断（裸对象字面量在 TS6 下推为 never）
+  return mount(
+    defineComponent({
+      setup() {
+        return usePolling(
+          { value: complaintId } as Ref<string>,
+          callbacks as Parameters<typeof usePolling>[1],
+        )
+      },
+      template: '<div />',
+    }),
+  )
 }
 
 describe('modules/complaint/usePolling', () => {
