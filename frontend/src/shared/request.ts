@@ -27,12 +27,15 @@ function makeError(message: string, code?: string | number, trace?: string): Req
 
 /**
  * 超时常量表（SSOT §9.3）：前端超时 < 网关 proxy_read_timeout。
- * 仅 normal / judge 两项；F0 不设 upload 常量（后端放宽 ≥60s 前上传沿用 normal）。
+ * normal 12s（默认）/ judge 110s（投诉研判）/ qcReplay 110s（F2：qc replay/{session_id}
+ * 与 check/batch，网关对应正则 location 为 120s，留 10s 余量，design D1）。
+ * 不设 upload 常量（后端放宽 ≥60s 前上传沿用 normal）。
  * api 层按端点引用常量，禁止散写数值。
  */
 export const TIMEOUT = {
   normal: 12_000,
   judge: 110_000,
+  qcReplay: 110_000,
 } as const
 
 // 模块级 token holder：由 auth store 通过 setAuthToken 写入。

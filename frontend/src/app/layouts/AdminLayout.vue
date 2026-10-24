@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, provide, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/app/stores/auth'
 import {
@@ -24,6 +24,12 @@ import type { Component } from 'vue'
 const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
+
+// 按钮级权限桥（f2-qc-console）：向模块组件 provide 当前角色。
+// §7 铁律禁止 modules/ import app/stores/auth，模块侧统一经
+// modules/qc/composables/useCurrentRole.ts 的 useCurrentRole() 按此 key 读取
+// （如 QC 详情人审按钮组对 admin 置灰，§5.0 F 按钮级 allowlist）。
+provide('app:currentRole', computed(() => auth.role))
 
 // 侧边栏折叠状态
 const collapsed = ref(false)
@@ -120,22 +126,17 @@ function toggleCollapse(): void {
   collapsed.value = !collapsed.value
 }
 
-// 父级菜单整行点击（含 padding 区域，箭头除外）→ 跳转到第一个可见子路由（如「投诉研判」→ /complaints）
-// el-sub-menu 默认只展开/折叠不跳转；事件委托在 el-menu 捕获阶段执行，与展开/折叠不冲突
-// 折叠状态下点击父级图标是弹 popup 选子项，不跳转
-function handleMenuCapture(e: MouseEvent): void {
-  if (collapsed.value) return
-  const el = e.target as HTMLElement
-  if (el.closest('.el-sub-menu__icon-arrow')) return // 点击箭头只展开/折叠
-  const titleEl = el.closest('.el-sub-menu__title')
-  if (!titleEl) return // 普通 el-menu-item 点击交给 el-menu router 模式处理
-  const groupPath = titleEl.closest('[data-group-path]')?.getAttribute('data-group-path')
+// 分组展开后跳到第一个子路由（点父级标题整行展开时触发）。
+// 不用 el-menu 的 click.capture 在捕获阶段 push：click 会继续冒泡到 el-sub-menu 的
+// toggle（handleSubMenuClick），两步在路由异步切换时冲突，导致「展开一秒即折叠」。
+// 改用 @open：分组已展开、openedMenus 已稳定后才导航，不会被 toggle 反向折叠。
+function handleSubMenuOpen(index: string): void {
+  const groupPath = index.replace(/#group$/, '')
   const group = menuRoutes.value.find((g) => g.path === groupPath)
   if (!group || group.children.length === 0) return
-  const target = group.children[0].path
-  if (route.path !== target) {
-    router.push(target)
-  }
+  // 已在当前分组内（如点箭头单纯展开）则不跳转，避免把用户从子页拉走
+  if (route.path === groupPath || route.path.startsWith(`${groupPath}/`)) return
+  router.push(group.children[0].path)
 }
 
 function handleLogout(): void {
@@ -162,7 +163,7 @@ function handleLogout(): void {
         background-color="#001529"
         text-color="#b7bdc8"
         active-text-color="#ffffff"
-        @click.capture="handleMenuCapture"
+        @open="handleSubMenuOpen"
       >
         <template v-for="group in menuRoutes" :key="group.path">
           <!-- 多个可见子级 → el-sub-menu（可折叠）

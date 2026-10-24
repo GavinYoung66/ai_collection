@@ -36,12 +36,19 @@ function flattenRoutes(routes: RouteRecordRaw[], parentPath = ''): RouteRecordRa
 }
 
 /** SSOT §3.2 角色矩阵（唯一事实源，逐格手抄，改动必须同步此处）
- * complaint 模块嵌套后：顶层 1 条父级（path=/complaints）+ children 3 条 */
+ * complaint 模块嵌套后：顶层 1 条父级（path=/complaints）+ children 3 条；
+ * qc 模块嵌套后（f2-qc-console D3 收窄）：顶层 1 条父级（path=/qc）+ children 6 条，
+ * 其中 rules=admin、alerts=admin/supervisor、reviews=supervisor/qc_reviewer（与后端 require_roles 对齐） */
 const MATRIX: Record<string, Role[]> = {
   '/complaints': ['admin', 'supervisor', 'agent'],
   '/complaints/review': ['admin', 'supervisor', 'agent'],
   '/complaints/:id': ['admin', 'supervisor', 'agent'],
   '/qc/tasks': ['admin', 'supervisor', 'qc_reviewer'],
+  '/qc/records': ['admin', 'supervisor', 'qc_reviewer'],
+  '/qc/records/:sessionId': ['admin', 'supervisor', 'qc_reviewer'],
+  '/qc/reviews': ['supervisor', 'qc_reviewer'],
+  '/qc/rules': ['admin'],
+  '/qc/alerts': ['admin', 'supervisor'],
   '/kb/documents': ['admin', 'ai_trainer'],
   '/usage': ['admin', 'supervisor'],
   '/system/users': ['admin'],
@@ -58,12 +65,13 @@ const MODULE_ROUTES: RouteRecordRaw[] = flattenRoutes([
   ...systemRoutes,
 ])
 
-describe('角色矩阵（5 模块 × 5 角色 = 25 格 + complaint 子路由 1 行 = 26 断言）', () => {
-  it('1. 各模块导出路由数量：complaint=3（嵌套结构顶层 1 条父级 + children 3 条）、其余模块 F0 各 1 条', () => {
-    // complaint 模块顶层是 1 条父级路由
+describe('角色矩阵（12 路径 × 5 角色 = 60 格断言）', () => {
+  it('1. 各模块导出路由数量：complaint=1 父级+children 3 条、qc=1 父级+children 6 条、其余模块 F0 各 1 条', () => {
+    // complaint / qc 模块顶层各是 1 条父级路由（嵌套结构）
     expect(complaintRoutes).toHaveLength(1)
     expect(complaintRoutes[0]!.children).toHaveLength(3)
     expect(qcRoutes).toHaveLength(1)
+    expect(qcRoutes[0]!.children).toHaveLength(6)
     expect(ragRoutes).toHaveLength(1)
     expect(usageRoutes).toHaveLength(1)
     expect(systemRoutes).toHaveLength(1)
@@ -82,7 +90,7 @@ describe('角色矩阵（5 模块 × 5 角色 = 25 格 + complaint 子路由 1 �
     }
   })
 
-  it('3. 30 格判定矩阵与 SSOT 完全一致（5 角色 × 6 路径，新增 /complaints/review）', () => {
+  it('3. 60 格判定矩阵与 SSOT 完全一致（5 角色 × 12 路径，qc 6 条含收窄 roles）', () => {
     const actual: Record<string, string[]> = {}
     for (const role of ROLES) {
       for (const [path, allowed] of Object.entries(MATRIX)) {

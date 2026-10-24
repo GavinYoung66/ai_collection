@@ -92,6 +92,36 @@ location ~ ^/api/v1/complaints/[^/]+/judge$ {
     limit_req zone=gateway burst=40 nodelay;
 }
 
+# qc 长任务专用（f2-qc-console D1 / tasks 2.1）：POST /api/v1/qc/replay/*
+# （含 replay/raw 与 replay/{session_id}）同步跑质检管线（含一跳 LLM 复核，
+# 后端硬超时 5s），POST /api/v1/qc/check/batch 串行循环（前端勾选上限 10 条，
+# 最坏 ≈90s）。若落在 /api/v1/qc 前缀的 15s 读超时会被误杀 504。
+# 照 judge 先例（上文 L83-93）：正则 location 优先于前缀匹配，单独放 120s，
+# 前端 TIMEOUT.qcReplay=110s < 120s（留 10s 余量）。
+location ~ ^/api/v1/qc/replay/ {
+    include /etc/nginx/proxy_pass/qc.conf;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Trace-Id $trace_id;
+    include /etc/nginx/auth_request.conf;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 120s;
+    limit_req zone=gateway burst=40 nodelay;
+}
+
+location ~ ^/api/v1/qc/check/batch$ {
+    include /etc/nginx/proxy_pass/qc.conf;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Trace-Id $trace_id;
+    include /etc/nginx/auth_request.conf;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 120s;
+    limit_req zone=gateway burst=40 nodelay;
+}
+
 location /api/v1/complaints {
     include /etc/nginx/proxy_pass/complaint.conf;
     proxy_set_header Host $host;
