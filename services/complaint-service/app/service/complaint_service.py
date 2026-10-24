@@ -312,8 +312,18 @@ class ComplaintService:
         )
         rec["updated_at"] = datetime.now(timezone.utc)
         return rec
-    def list(self, page: int = 1, page_size: int = 20) -> dict:
+
+    def list(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        task_status: Optional[list[TaskStatus]] = None,
+    ) -> dict:
         items = [self._sync_from_session(r) for r in self._cache.values()]
+        if task_status:
+            # str 枚举与 value 字符串混存均安全（str Enum hash/eq 与值一致）
+            allowed = {getattr(s, "value", s) for s in task_status}
+            items = [r for r in items if r.get("task_status") in allowed]
         total = len(items)
         start = (page - 1) * page_size
         end = start + page_size
@@ -362,6 +372,9 @@ class ComplaintService:
         else:
             rec["verdict"] = VerdictType.pending
             rec["confidence"] = 0.0
+
+        # AI 初选快照（真图路径）：供「定责对照 → AI 初选」展示，避免人审覆盖后无从对比
+        rec["ai_verdict"] = rec["verdict"]
 
         rec["response_draft"] = response_draft or ""
         from app.service.evidence_refs import extract_citations_from_graph_final
@@ -587,6 +600,9 @@ class ComplaintService:
 
         allowed = ["rag_doc_001"]
         rec["verdict"] = VerdictType.agent_violation
+        # ai_verdict = AI 初选快照：定责前就要展示（否则「定责对照 → AI 初选」一直显示 —），
+        # 且人审定责会覆盖 rec["verdict"]，必须在此时单独留档
+        rec["ai_verdict"] = rec["verdict"]
         rec["confidence"] = 0.92
         rec["response_draft"] = "经核查，坐席存在不当话术，建议向用户致歉并按流程升级处理。"
         rec["allowed_rag_doc_ids"] = allowed

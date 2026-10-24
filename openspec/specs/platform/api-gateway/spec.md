@@ -8,7 +8,7 @@
 
 ### Requirement: 单入口路径路由
 
-网关 SHALL 在统一端口（8080）提供唯一北向入口，并按 URL 前缀（前缀匹配，不带尾斜杠，须同时覆盖无尾斜杠的资源根路径与其下子路径）将请求反代到对应后端服务：`/api/v1/complaints`（含创建工单的 `POST /api/v1/complaints` 根路径与子资源）、`/api/v1/stats`、`/api/v1/mode` 路由到 complaint-service；`/api/v1/qc` 路由到 qc-service；`/api/v1/kb` 与 `/api/v1/sensitive-words` 路由到 rag-service；`/rag/` 路由到 Gradio 前端。Nginx location 匹配须保证长前缀（`/api/v1/...`、`/rag/`）优先于 `/` 兜底（导航页），避免因 location 顺序错误导致业务路由被 `/` 截获。经网关转发后的响应（状态码、统一响应信封、响应体）MUST 与直连对应后端端口完全一致。网关 MUST 将请求体上限（`client_max_body_size`）设为不小于 100MB 以放行多模态文件上传（PPTX/图片/音频），MUST NOT 使用 Nginx 默认 1MB 上限在后端校验之前拦截请求；文件大小的业务合法性仍由后端按自身上限（rag-service `KB_MAX_FILE_SIZE` 默认 20MB）判定。
+网关 SHALL 在统一端口（8080）提供唯一北向入口，并按 URL 前缀（前缀匹配，不带尾斜杠，须同时覆盖无尾斜杠的资源根路径与其下子路径）将请求反代到对应后端服务：`/api/v1/complaints`（含创建工单的 `POST /api/v1/complaints` 根路径与子资源）、`/api/v1/stats`、`/api/v1/mode` 路由到 complaint-service；`/api/v1/qc` 路由到 qc-service；`/api/v1/kb` 与 `/api/v1/sensitive-words` 路由到 rag-service；`/rag/` 路由到 Gradio 前端；**`/api/v1/auth`（含 `/login` 与 `/me`，单 location 前缀匹配、不挂 `auth_request`）路由到 auth-sidecar**（新增）。Nginx location 匹配须保证长前缀（`/api/v1/...`、`/rag/`）优先于 `/` 兜底（导航页），避免因 location 顺序错误导致业务路由被 `/` 截获。经网关转发后的响应（状态码、统一响应信封、响应体）MUST 与直连对应后端端口完全一致。网关 MUST 将请求体上限（`client_max_body_size`）设为不小于 100MB 以放行多模态文件上传（PPTX/图片/音频），MUST NOT 使用 Nginx 默认 1MB 上限在后端校验之前拦截请求；文件大小的业务合法性仍由后端按自身上限（rag-service `KB_MAX_FILE_SIZE` 默认 20MB）判定。
 
 #### Scenario: 前端只知一个 origin 访问质检接口
 
@@ -44,6 +44,26 @@
 
 - **WHEN** 浏览器请求 `http://<gateway>:8080/api/v1/qc/rules/versions`
 - **THEN** 后端收到的请求路径仍为 `/api/v1/qc/rules/versions`（网关 MUST NOT 改写或剥离 URI 前缀），与直连 8003 的路径一致；实现上各 location 须用 `proxy_pass http://<upstream>;`（不带尾路径），MUST NOT 用带尾斜杠的 `proxy_pass http://<upstream>/;`
+
+#### Scenario: auth/login 反代 auth-sidecar 且豁免鉴权
+
+- **WHEN** ENABLE_AUTH=true，请求 `POST /api/v1/auth/login`，正确凭证
+- **THEN** 请求到达 auth-sidecar（upstream `auth`），返回 HTTP 200 + 统一信封含 JWT；auth-sidecar 需具备 DB 连接能力以查 users 表
+
+#### Scenario: auth/me 反代 auth-sidecar 且豁免鉴权
+
+- **WHEN** ENABLE_AUTH=true，请求 `GET /api/v1/auth/me` 携带有效 Bearer token
+- **THEN** 请求到达 auth-sidecar，返回 HTTP 200 + 当前用户身份（auth-sidecar 按 JWT `sub` 查库复核 `status` 与 `role`，`status != active` 返回 403 `B0003`）
+
+#### Scenario: ENABLE_AUTH=false 时 auth 端点仍正常
+
+- **WHEN** ENABLE_AUTH=false（默认），请求 `POST /api/v1/auth/login`
+- **THEN** 与 ENABLE_AUTH=true 时行为完全一致——auth 端点永远可用，不受鉴权开关影响
+
+#### Scenario: auth-sidecar 不可用时 auth 端点返回 502
+
+- **WHEN** auth-sidecar 容器挂了，请求 `POST /api/v1/auth/login`
+- **THEN** 返回 HTTP 502（upstream `auth` 被动熔断），网关错误信封（`code=B0008`）
 
 ### Requirement: upstream 舱壁隔离与网关层错误统一信封
 
@@ -165,7 +185,7 @@
 
 ### Requirement: 鉴权开关与身份透传
 
-网关 MUST 支持可选的请求鉴权，由环境变量 `ENABLE_AUTH` 控制：`false`（默认）时网关不执行任何鉴权，所有请求直接转发，行为与无鉴权现状完全一致；`true` 时网关通过 Nginx `auth_request` 指令向内部鉴权端点（`/internal/authz`）发起子请求校验凭证，校验通过（204）才转发到后端并将身份头（`X-User-Id`、`X-User-Role`）透传给后端（透传 MUST 经 `auth_request_set` 捕获 sidecar 回传头到变量，再 `proxy_set_header` 下发——auth_request 子请求的响应头不会被自动转发），校验失败（401）直接返回统一信封 `code=B0002`（未认证）。`/gateway/health` 与 `/health` 健康检查端点、`OPTIONS` 预检请求、`/rag/`（Gradio 自有 `RAG_API_TOKEN` 鉴权）及其附属资源（`/manifest.json`）、纯静态前端壳（`/`、`/complaint/`、`/qc/`）MUST 永远豁免网关鉴权，不受 `ENABLE_AUTH` 影响。鉴权逻辑的验证契约由 `security/authn` 能力定义，网关仅负责调用与透传。
+网关 MUST 支持可选的请求鉴权，由环境变量 `ENABLE_AUTH` 控制：`false`（默认）时网关不执行任何鉴权，所有请求直接转发，行为与无鉴权现状完全一致；`true` 时网关通过 Nginx `auth_request` 指令向内部鉴权端点（`/internal/authz`）发起子请求校验凭证，校验通过（204）才转发到后端并将身份头（`X-User-Id`、`X-User-Role`）透传给后端（透传 MUST 经 `auth_request_set` 捕获 sidecar 回传头到变量，再 `proxy_set_header` 下发——auth_request 子请求的响应头不会被自动转发），校验失败（401）直接返回统一信封 `code=B0002`（未认证）。`/gateway/health` 与 `/health` 健康检查端点、`OPTIONS` 预检请求、`/rag/`（Gradio 自有 `RAG_API_TOKEN` 鉴权）及其附属资源（`/manifest.json`）、纯静态前端壳（`/`、`/complaint/`、`/qc/`）、**`/api/v1/auth/login` 与 `/api/v1/auth/me`**（新增——登录本身就是获取 token 的入口，me 端点仅需 auth-sidecar 自身验证 JWT 有效即可，不经网关 auth_request 子请求）——以上所有端点 MUST 永远豁免网关鉴权，不受 `ENABLE_AUTH` 影响。鉴权逻辑的验证契约由 `security/authn` 能力定义，网关仅负责调用与透传。
 
 #### Scenario: 鉴权关闭时零回归
 
@@ -191,6 +211,15 @@
 
 - **WHEN** `ENABLE_AUTH=true` 时访问 `/gateway/health`、`/health` 或发起 `OPTIONS` 预检
 - **THEN** 请求不经过鉴权子请求，直接返回健康/预检响应
+
+#### Scenario: ENABLE_AUTH=true 时业务路由被拦截但 auth 路由豁免
+
+- **WHEN** ENABLE_AUTH=true，无 Bearer token，请求 `GET /api/v1/complaints`
+- **THEN** 返回 HTTP 401（网关 auth_request 拒绝）
+- **WHEN** 同条件下请求 `POST /api/v1/auth/login`（正确凭证）
+- **THEN** 请求正常转发到 auth-sidecar，返回 HTTP 200 + JWT（登录成功）或 auth-sidecar 自身的 401（密码错误），而非网关层的 401
+- **WHEN** ENABLE_AUTH=true，无 Bearer token，请求 `GET /api/v1/auth/me`
+- **THEN** 请求转发到 auth-sidecar，返回 auth-sidecar 自身的 401（JWT 验证失败），而非网关层的 401
 
 ### Requirement: TLS 与安全响应头
 

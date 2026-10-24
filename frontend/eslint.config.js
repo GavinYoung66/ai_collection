@@ -54,6 +54,9 @@ export default tseslint.config(
   {
     files: ['**/*.{ts,tsx,vue}'],
     rules: {
+      // TS 文件的未定义标识符交给 tsc 判定（DOM 类型如 MouseEvent/HTMLElement 属 lib.dom，
+      // ESLint 的 no-undef 不认识类型引用，会产生误报）
+      'no-undef': 'off',
       // 允许以 _ 开头的有意未使用参数（如拦截器 rejected 回调的 error）
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
       'no-restricted-imports': [

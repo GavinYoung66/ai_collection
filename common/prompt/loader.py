@@ -117,13 +117,32 @@ def load_prompt_sections(
 
 
 def _resolve_templates_dir(service: str) -> Path:
-    """按 service 解析模板目录；环境变量覆盖用于容器内路径差异。"""
+    """按 service 解析模板目录；环境变量覆盖用于容器内路径差异。
+
+    容器镜像通常把服务源码挂在 /app/app（如 complaint-service），但
+    _SERVICE_TEMPLATE_DIRS 硬编码了仓库相对路径 services/<svc>/app/prompt/templates；
+    若硬编码路径不存在则尝试容器挂载兜底位置 /app/app/prompt/templates，
+    避免 compose 漏配 PROMPT_TEMPLATES_DIR 时 silent 失败（历史：
+    test_trace_after_run_graph_has_agent_and_llm 因 PromptNotFoundError 挂了 6h，
+    原因就是这个）。
+    """
     override = os.environ.get(_TEMPLATES_DIR_ENV)
     if override:
         return Path(override)
     if service not in _SERVICE_TEMPLATE_DIRS:
         raise ValueError(f"Unknown prompt service: {service}")
-    return _SERVICE_TEMPLATE_DIRS[service]
+    p = _SERVICE_TEMPLATE_DIRS[service]
+    if not p.is_dir():
+        fallback = Path("/app/app/prompt/templates")
+        if fallback.is_dir():
+            logger.warning(
+                "prompt_template_dir_fallback",
+                service=service,
+                hardcoded=str(p),
+                fallback=str(fallback),
+            )
+            return fallback
+    return p
 
 
 def _parse_prompt_id(prompt_id: str) -> tuple[str, Optional[str]]:

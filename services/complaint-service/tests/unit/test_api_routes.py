@@ -33,6 +33,45 @@ def test_create_and_list(client: TestClient):
     assert any(item["complaint_id"] == cid for item in r.json()["data"]["items"])
 
 
+def test_list_filter_by_task_status(client: TestClient):
+    """F1 复核工作台：task_status 单值过滤，total 与 items 均为筛后结果。"""
+    r = client.post("/api/v1/complaints", json={"complaint_text": "投诉催收"})
+    cid = r.json()["data"]["complaint_id"]
+    status = r.json()["data"]["task_status"]
+
+    r = client.get("/api/v1/complaints", params=[("task_status", status)])
+    assert r.json()["code"] == 0
+    items = r.json()["data"]["items"]
+    assert any(item["complaint_id"] == cid for item in items)
+    assert all(item["task_status"] == status for item in items)
+    assert r.json()["data"]["total"] >= len(items)  # total 为筛后全量计数，items 为当前页切片
+
+    # 不相交集合：用终态过滤必然不含该新单
+    r2 = client.get("/api/v1/complaints", params=[("task_status", "resolved")])
+    assert r2.json()["code"] == 0
+    assert all(item["task_status"] == "resolved" for item in r2.json()["data"]["items"])
+    assert not any(item["complaint_id"] == cid for item in r2.json()["data"]["items"])
+
+
+def test_list_filter_by_multiple_task_status(client: TestClient):
+    """重复查询参数（?task_status=a&task_status=b）按集合并集过滤。"""
+    cid = _create(client)
+    r = client.get(
+        "/api/v1/complaints",
+        params=[("task_status", "pending"), ("task_status", "pending_review")],
+    )
+    assert r.json()["code"] == 0
+    items = r.json()["data"]["items"]
+    assert {item["task_status"] for item in items} <= {"pending", "pending_review"}
+    assert any(item["complaint_id"] == cid for item in items)
+
+
+def test_list_filter_invalid_status_422(client: TestClient):
+    """非法枚举值由 FastAPI/Pydantic 校验拦截（422）。"""
+    r = client.get("/api/v1/complaints", params=[("task_status", "not_a_status")])
+    assert r.status_code == 422
+
+
 def test_detail_not_found(client: TestClient):
     r = client.get("/api/v1/complaints/nonexistent-id")
     assert r.json()["code"] == "A5001"
@@ -327,7 +366,9 @@ def test_disposition_verdict_from_ai_pending_needs_reason(client: TestClient):
     cid = _create(client)
     client.post(f"/api/v1/complaints/{cid}/judge")
     rec = complaint_service.get_or_raise(cid)
+    # 模拟「AI 判为待定」：ai_verdict 是定责比对的基准快照，verdict 仅供展示
     rec["verdict"] = VerdictType.pending
+    rec["ai_verdict"] = VerdictType.pending
     r = client.put(
         f"/api/v1/complaints/{cid}/disposition/verdict",
         json={"establishment": "agent_violation", "reviewer": "ops"},

@@ -209,4 +209,30 @@ describe('shared/request 请求层', () => {
     )
     expect(result).toBe('')
   })
+
+  it('11. trace 上下文非空时请求头注入 X-Trace-Id（§9.4 F1）', async () => {
+    const req = await loadRequest()
+    req.setTraceContext('tr_detail_12345678')
+
+    const headers = mockHeaders()
+    await requestFulfilled!({ headers } as unknown as InternalAxiosRequestConfig)
+
+    expect(headers.get('X-Trace-Id')).toBe('tr_detail_12345678')
+  })
+
+  it('12. trace 上下文无值或清空后不注入 X-Trace-Id', async () => {
+    const req = await loadRequest()
+
+    // 从未写入：不注入
+    const freshHeaders = mockHeaders()
+    await requestFulfilled!({ headers: freshHeaders } as unknown as InternalAxiosRequestConfig)
+    expect(freshHeaders.get('X-Trace-Id')).toBeUndefined()
+
+    // 写入后清空：不注入（离开详情页即清空，不污染列表类请求）
+    req.setTraceContext('tr_detail_12345678')
+    req.setTraceContext(null)
+    const clearedHeaders = mockHeaders()
+    await requestFulfilled!({ headers: clearedHeaders } as unknown as InternalAxiosRequestConfig)
+    expect(clearedHeaders.get('X-Trace-Id')).toBeUndefined()
+  })
 })
