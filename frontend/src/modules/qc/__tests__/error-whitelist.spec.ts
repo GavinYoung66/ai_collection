@@ -54,6 +54,7 @@ import QcTaskBoard from '../views/QcTaskBoard.vue'
 import QcRules from '../views/QcRules.vue'
 import ReviewActions from '../components/ReviewActions.vue'
 import TraceTimeline from '../components/TraceTimeline.vue'
+import { CURRENT_ROLE_INJECT_KEY } from '@/shared'
 
 /**
  * 构造拦截器形态的业务错误：message 已附白名单/后端文案 + trace 后 8 位
@@ -86,7 +87,7 @@ beforeEach(() => {
 describe('§15.1 白名单：B0004/A2005 详情空态 + 返回列表', () => {
   function mountDetail(role = 'qc_reviewer') {
     return mount(QcRecordDetail, {
-      global: { provide: { 'app:currentRole': role } },
+      global: { provide: { [CURRENT_ROLE_INJECT_KEY]: role } },
     })
   }
 
@@ -138,7 +139,7 @@ describe('§15.1 白名单：A2002 人审表单行内标红', () => {
   function mountActions() {
     return mount(ReviewActions, {
       props: { qcRecordId: 'rec-1', deductionTotal: 8, qcStatus: 'PENDING_REVIEW' },
-      global: { provide: { 'app:currentRole': 'qc_reviewer' } },
+      global: { provide: { [CURRENT_ROLE_INJECT_KEY]: 'qc_reviewer' } },
     })
   }
 
@@ -188,7 +189,8 @@ describe('未映射码默认分支：message 直出 + trace 后 8 位，不新�
     const wrapper = mount(QcRules)
     await flushPromises()
 
-    const errorBox = wrapper.find('.qru-error')
+    // 三态统一由 shared AsyncState 承载后，错误块以 role="alert" 标识（不再绑定模块内 class）
+    const errorBox = wrapper.find('[role="alert"]')
     expect(errorBox.exists()).toBe(true)
     expect(errorBox.text()).toContain('当前无生效规则包') // message 直出
     expect(errorBox.text()).toContain('9999eeee') // trace 后 8 位

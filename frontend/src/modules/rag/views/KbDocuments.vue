@@ -32,12 +32,11 @@
  *   （含 ai_trainer）置灰 + el-tooltip 悬浮说明「该操作需 admin/supervisor 权限」，
  *   且各操作入口函数前置守卫，置灰态不发起请求。
  */
-import { onActivated, onDeactivated, onMounted, reactive, ref } from 'vue'
+import { onActivated, onDeactivated, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance } from 'element-plus'
-import PageTable from '@/shared/components/base/PageTable.vue'
-import type { Column } from '@/shared/components/base/PageTable.vue'
-import StatusTag from '@/shared/components/base/StatusTag.vue'
+import { PageTable, StatusTag, useTableQuery } from '@/shared'
+import type { Column } from '@/shared'
 import type { RequestError } from '@/shared/request'
 import {
   deleteKbDocument,
@@ -53,7 +52,7 @@ import KbDocDetailDrawer from '../components/KbDocDetailDrawer.vue'
 import KbUploadDialog from '../components/KbUploadDialog.vue'
 import { useKbIngestPolling } from '../composables/useKbIngestPolling'
 import { KB_SUMMARY_RULES } from '../composables/kbSummaryRules'
-import { RAG_WRITE_FORBIDDEN_TIP, useKbWriteAllowed } from '../composables/useCurrentRole'
+import { RAG_WRITE_FORBIDDEN_TIP, useKbWriteAllowed } from '../permissions'
 
 defineOptions({ name: 'KbDocuments' })
 
@@ -77,76 +76,48 @@ const STATUS_OPTIONS: { value: RagDocStatus | ''; label: string }[] = [
   { value: 'archived', label: 'archived' },
 ]
 
-// ── 列表状态（组件本地 ref，不进 store，design D5）──
-const rows = ref<RagDocumentListItem[]>([])
-const total = ref(0)
-const page = ref(1)
-const pageSize = ref(20)
-const loading = ref(false)
-const error = ref<Error | null>(null)
-const categoryFilter = ref<RagCategory | ''>('')
-const statusFilter = ref<RagDocStatus | ''>('')
-
-async function fetchList(): Promise<void> {
-  loading.value = true
-  error.value = null
-  try {
-    const res = await listKbDocuments({
-      page: page.value,
-      page_size: pageSize.value,
-      ...(categoryFilter.value ? { category: categoryFilter.value } : {}),
-      ...(statusFilter.value ? { status: statusFilter.value } : {}),
-    })
-    rows.value = res.items
-    total.value = res.total
-  } catch (e) {
-    // B0006 等：拦截器已附白名单文案 + trace 后 8 位，PageTable 错误态直出，不自动重试
-    error.value = e instanceof Error ? e : new Error(String(e))
-  } finally {
-    loading.value = false
-  }
-}
-
-// keepAlive 语义：首个 activated 与 mounted 同序触发，标志位去重（同 QcRecordList 先例）
-let skipNextActivated = false
-onMounted(() => {
-  skipNextActivated = true
-  void fetchList()
+// ── 列表三态 / 分页 / 筛选统一由 shared 维护（SSOT §19.4；组件本地状态，不进 store，design D5）──
+const {
+  rows,
+  total,
+  page,
+  pageSize,
+  query,
+  loading,
+  error,
+  reload: fetchList,
+  setPage: onPageChange,
+  setPageSize: onPageSizeChange,
+} = useTableQuery<RagDocumentListItem, { category: RagCategory | ''; status: RagDocStatus | '' }>({
+  fetcher: (q, p, ps) =>
+    listKbDocuments({
+      page: p,
+      page_size: ps,
+      ...(q.category ? { category: q.category } : {}),
+      ...(q.status ? { status: q.status } : {}),
+    }),
+  initialQuery: { category: '', status: '' },
+  pageSize: 20,
+  refetchOnActivated: true,
 })
-onActivated(() => {
-  if (skipNextActivated) {
-    skipNextActivated = false
-    return
-  }
+
+function onRetry(): void {
   void fetchList()
-  // deactivated 时停止的轮询：仍有未终态文档则恢复（P2-4 多文档队列续航）
+}
+// keepAlive：列表刷新由 refetchOnActivated 负责，此处仅恢复被 deactivated 打断的入库轮询
+// （P2-4 多文档队列续航）
+onActivated(() => {
   if (pendingDocIds.value.length > 0 && ingestPolling.isStopped.value) {
     void ingestPolling.start()
   }
 })
 
-function onPageChange(p: number): void {
-  page.value = p
-  void fetchList()
-}
-function onPageSizeChange(s: number): void {
-  pageSize.value = s
-  page.value = 1
-  void fetchList()
-}
-/** 筛选变更：回到第一页重新查询 */
-function onFilterChange(): void {
-  page.value = 1
-  void fetchList()
-}
-function onRetry(): void {
-  void fetchList()
-}
-
-// ── 列定义：标题/分类走 columns；status 起各列经 #table-row-extra 渲染（StatusTag 组件）──
+// ── 列定义：标题/分类/status 走 columns（status 用 #cell-status 渲染 StatusTag），
+//    其余列经 #table-row-extra 渲染（SSOT §19.7 PageTable 单元格插槽）──
 const columns: Column<RagDocumentListItem>[] = [
   { key: 'title', label: '标题', render: (row) => row.title },
   { key: 'category', label: '分类', width: 100, render: (row) => RAG_CATEGORY_LABELS[row.category] },
+  { key: 'status', label: 'status', width: 110 },
 ]
 
 // ── 详情抽屉（数据由本容器获取后传入，抽屉不碰 api）──
@@ -423,10 +394,9 @@ async function onReindex(): Promise<void> {
       <div class="kbd-tools">
         <!-- 分类筛选（含「全部」= 空值不下发） -->
         <select
-          v-model="categoryFilter"
+          v-model="query.category"
           class="kbd-filter"
           aria-label="分类筛选"
-          @change="onFilterChange"
         >
           <option
             v-for="opt in CATEGORY_OPTIONS"
@@ -438,10 +408,9 @@ async function onReindex(): Promise<void> {
         </select>
         <!-- 状态筛选（含「全部」；枚举值与后端逐字一致） -->
         <select
-          v-model="statusFilter"
+          v-model="query.status"
           class="kbd-filter"
           aria-label="状态筛选"
-          @change="onFilterChange"
         >
           <option
             v-for="opt in STATUS_OPTIONS"
@@ -496,13 +465,10 @@ async function onReindex(): Promise<void> {
         @update:page-size="onPageSizeChange"
         @retry="onRetry"
       >
+        <template #cell-status="{ row }">
+          <StatusTag :status="(row as RagDocumentListItem).status" />
+        </template>
         <template #table-head-extra>
-          <th
-            class="pt-th"
-            style="width: 110px"
-          >
-            status
-          </th>
           <th
             class="pt-th"
             style="width: 170px"
@@ -535,9 +501,6 @@ async function onReindex(): Promise<void> {
           </th>
         </template>
         <template #table-row-extra="{ row }">
-          <td class="pt-td">
-            <StatusTag :status="(row as RagDocumentListItem).status" />
-          </td>
           <td class="pt-td">
             <!-- processing 行按后端 ingest_progress（stage→progress 映射，README §G）
                  展示进度条；其余态直出 stage 原文 -->

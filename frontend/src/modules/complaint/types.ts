@@ -29,7 +29,7 @@
  * 用 `T | null`（后端 model_dump 把 None 序列化为 null），不用 undefined；时间一律
  * ISO 8601 字符串透传不隐式时区改写；UUID 按 string；分页复用 shared 的 PageResult<T>。
  */
-import type { PageResult } from '@/shared/types/envelope'
+import type { PageResult } from '@/shared'
 
 // ── 枚举（字符串字面量联合，与后端逐字一致，前端禁止发明状态）──
 
@@ -70,6 +70,19 @@ export const WAITING_HUMAN_TASK_STATUS = [
   'pending_review',
   'pending_senior_review',
   'pending_callback',
+] as const satisfies readonly TaskStatus[]
+
+/**
+ * 在途（执行中）状态集合（session_service.py:29-36 状态机）：
+ * pending / evidence_gathering / reflection_retry / judging 均为图执行中，
+ * 轮询启动条件必须覆盖（漏掉会导致证据收集/反思阶段进度条冻结）。
+ * draft_generated 已产出草稿、即将进入 pending_review，无需轮询。
+ */
+export const INFLIGHT_TASK_STATUS = [
+  'pending',
+  'evidence_gathering',
+  'reflection_retry',
+  'judging',
 ] as const satisfies readonly TaskStatus[]
 
 /** 判责类型 4 值，不含 normal（state.py:39-45） */
@@ -199,6 +212,18 @@ export interface ComplaintEventsResponse {
 
 // ── 详情 ──
 
+/** 有序证据条目（service/ordered_evidence.py:53 build_ordered_evidence 输出形状）。
+ *  字段逐字对齐：category（MCP/RAG/Agent/LLM/其他）、name、summary（后端已脱敏）、
+ *  started_at（可空 ISO 8601）、status、ord（1 起序号）。禁止弱化为 Record。 */
+export interface EvidenceItem {
+  category: string
+  name: string
+  summary: string
+  started_at: string | null
+  status: string
+  ord: number
+}
+
 /** 详情响应（schemas/complaint.py:59-77） */
 export interface ComplaintDetailResponse {
   complaint_id: string
@@ -209,7 +234,7 @@ export interface ComplaintDetailResponse {
   disposition_verdict: VerdictType | null
   disposition_reason: string | null
   callback_scheduled: boolean
-  ordered_evidence: Record<string, unknown>[]
+  ordered_evidence: EvidenceItem[]
   evidence_refs: string[]
   confidence: number | null
   response_draft: string | null

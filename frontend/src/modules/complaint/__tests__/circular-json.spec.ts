@@ -15,7 +15,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createRouter, createWebHashHistory } from 'vue-router'
 import ComplaintList from '../views/ComplaintList.vue'
-import PageTable from '@/shared/components/base/PageTable.vue'
+import { PageTable } from '@/shared'
 
 const mockRouter = createRouter({
   history: createWebHashHistory(),

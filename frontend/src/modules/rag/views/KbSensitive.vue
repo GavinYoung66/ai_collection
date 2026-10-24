@@ -19,48 +19,25 @@
  *   对越权角色（含 ai_trainer）置灰 + el-tooltip 悬浮说明
  *   「该操作需 admin/supervisor 权限」，入口前置守卫，置灰态不发起请求。
  */
-import { onActivated, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { AsyncState, useAsyncTask } from '@/shared'
 import { getSensitiveWordsDict, refreshSensitiveWords } from '../api'
-import { RAG_WRITE_FORBIDDEN_TIP, useKbWriteAllowed } from '../composables/useCurrentRole'
+import { RAG_WRITE_FORBIDDEN_TIP, useKbWriteAllowed } from '../permissions'
 
 defineOptions({ name: 'KbSensitive' })
 
 // ── 按钮级权限（tasks 7.1）：词库刷新按后端词表 admin/supervisor（§5.0 F）──
 const writeAllowed = useKbWriteAllowed()
 
-// ── 词典状态 ──
-const dict = ref('')
-const loading = ref(false)
-const error = ref<Error | null>(null)
-
-/** 拉取生效词典；404 被拦截器映射为空串 → 空态「词典暂不可用」 */
-async function fetchDict(): Promise<void> {
-  loading.value = true
-  error.value = null
-  try {
-    dict.value = await getSensitiveWordsDict()
-  } catch (e) {
-    dict.value = ''
-    error.value = e instanceof Error ? e : new Error(String(e))
-  } finally {
-    loading.value = false
-  }
-}
-
-// keepAlive 语义：首个 activated 与 mounted 同序触发，标志位去重（同 QcRules 先例）
-let skipNextActivated = false
-onMounted(() => {
-  skipNextActivated = true
-  void fetchDict()
-})
-onActivated(() => {
-  if (skipNextActivated) {
-    skipNextActivated = false
-    return
-  }
-  void fetchDict()
-})
+// ── 词典三态由 shared 维护（SSOT §19.4）；404 被拦截器映射为空串 → 空态「词典暂不可用」──
+const {
+  data: dictData,
+  loading,
+  error,
+  run: fetchDict,
+} = useAsyncTask(getSensitiveWordsDict, { refetchOnActivated: true })
+const dict = computed(() => dictData.value ?? '')
 
 /** 复制词典全文到剪贴板（同 TraceIdText 复制语义；剪贴板被拒时降级提示） */
 async function onCopy(): Promise<void> {
@@ -162,43 +139,22 @@ async function onRefresh(): Promise<void> {
       </template>
     </p>
 
-    <!-- 加载态 -->
-    <div
-      v-if="loading"
-      class="kbt-state"
+    <!-- 三态统一由 shared AsyncState 承载（SSOT §19.7）：
+         404 被拦截器映射为空串 → 空态「词典暂不可用」；其他错误前缀保持原文案 -->
+    <AsyncState
+      :loading="loading"
+      :error="error"
+      error-prefix="词典加载失败："
+      :empty="!dict"
+      empty-text="词典暂不可用"
+      @retry="fetchDict"
     >
-      加载中…
-    </div>
-
-    <!-- 错误态（非 404 的传输/信封错误）：message 直出 + 手动重试 -->
-    <div
-      v-else-if="error"
-      class="kbt-state kbt-state--error"
-      role="alert"
-    >
-      <span>词典加载失败：{{ error.message }}</span>
-      <button
-        type="button"
-        class="kbt-btn"
-        @click="fetchDict"
-      >
-        重试
-      </button>
-    </div>
-
-    <!-- 空态：404（词典不存在/加载失败）→ 空态文案而非错误弹窗 -->
-    <div
-      v-else-if="!dict"
-      class="kbt-state"
-    >
-      词典暂不可用
-    </div>
-
-    <!-- 词典只读展示：等宽纯文本 -->
-    <pre
-      v-else
-      class="kbt-dict"
-    >{{ dict }}</pre>
+      <!-- 词典只读展示：等宽纯文本 -->
+      <pre
+        v-if="dict"
+        class="kbt-dict"
+      >{{ dict }}</pre>
+    </AsyncState>
   </div>
 </template>
 

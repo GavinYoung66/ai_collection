@@ -213,7 +213,9 @@ describe('modules/rag/KbSearch', () => {
     expect(wrapper.text()).toContain('检索失败：系统繁忙，稍后重试')
 
     apiMocks.searchKb.mockResolvedValueOnce(searchResp())
-    await wrapper.find('.kbs-btn').trigger('click')
+    const retryBtn = wrapper.findAll('button').find((b) => b.text() === '重试')
+    expect(retryBtn, '错误态必须提供重试入口').toBeTruthy()
+    await retryBtn!.trigger('click')
     await flushPromises()
     expect(apiMocks.searchKb).toHaveBeenCalledTimes(2)
   })

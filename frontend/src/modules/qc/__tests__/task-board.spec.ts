@@ -154,7 +154,7 @@ describe('modules/qc/QcTaskBoard', () => {
     await btn.trigger('click')
 
     expect(apiMocks.replayQcSession).toHaveBeenCalledTimes(1)
-    expect(apiMocks.replayQcSession).toHaveBeenCalledWith('s-1')
+    expect(apiMocks.replayQcSession.mock.calls[0][0]).toBe('s-1')
     // 在途期间同行按钮 disabled（防连点、禁重复触发）
     expect(btn.attributes('disabled')).toBeDefined()
   })

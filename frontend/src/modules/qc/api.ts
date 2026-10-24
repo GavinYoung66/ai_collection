@@ -10,6 +10,7 @@
  * body.force 或 X-QC-Force-Rerun 头透传，replay/raw 仅 X-QC-Force-Rerun 头。
  */
 import http, { TIMEOUT } from '@/shared/request'
+import { randomUuid } from '@/shared'
 import type {
   QcAlertAckResponse,
   QcAlertListQuery,
@@ -122,13 +123,15 @@ export function getQcRecord(sessionId: string): Promise<QcRecordDetailResponse> 
 export function replayQcRaw(
   body: QcReplayRawRequest,
   options?: QcForceRerunOptions,
+  signal?: AbortSignal,
 ): Promise<QcReplayResponse> {
   return http.post<QcReplayResponse, QcReplayResponse>('/api/v1/qc/replay/raw', body, {
     headers: {
-      'X-Idempotency-Key': crypto.randomUUID(),
+      'X-Idempotency-Key': randomUuid(),
       ...forceRerunHeaders(options),
     },
     timeout: TIMEOUT.qcReplay,
+    ...(signal ? { signal } : {}),
   })
 }
 
@@ -138,6 +141,7 @@ export function replayQcSession(
   sessionId: string,
   body: QcReplayRequest = {},
   options?: QcForceRerunOptions,
+  signal?: AbortSignal,
 ): Promise<QcReplayResponse> {
   return http.post<QcReplayResponse, QcReplayResponse>(
     `/api/v1/qc/replay/${sessionId}`,
@@ -145,16 +149,20 @@ export function replayQcSession(
     {
       headers: forceRerunHeaders(options),
       timeout: TIMEOUT.qcReplay,
+      ...(signal ? { signal } : {}),
     },
   )
 }
 
 /** 9. 批量质检 POST /api/v1/qc/check/batch（check.py:187，长请求 110s） */
-export function checkQcBatch(body: QcCheckBatchRequest): Promise<QcCheckBatchResponse> {
+export function checkQcBatch(
+  body: QcCheckBatchRequest,
+  signal?: AbortSignal,
+): Promise<QcCheckBatchResponse> {
   return http.post<QcCheckBatchResponse, QcCheckBatchResponse>(
     '/api/v1/qc/check/batch',
     body,
-    { timeout: TIMEOUT.qcReplay },
+    { timeout: TIMEOUT.qcReplay, ...(signal ? { signal } : {}) },
   )
 }
 

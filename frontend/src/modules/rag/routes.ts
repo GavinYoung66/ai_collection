@@ -15,7 +15,7 @@
  * 真实实现属批次④-⑥（tasks 4.x/5.x/6.x）。
  */
 import type { RouteRecordRaw } from 'vue-router'
-import PassthroughLayout from '@/shared/components/base/PassthroughLayout.vue'
+import { PassthroughLayout } from '@/shared'
 
 export const routes: RouteRecordRaw[] = [
   {

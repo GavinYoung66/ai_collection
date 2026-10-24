@@ -9,10 +9,10 @@
  * - 会话证据对照：命中词 <mark> 高亮
  * - trace 时间线：无 langsmith_url 不渲染外链，有才渲染
  * - 人审按钮组（ReviewActions 完整逻辑）：零扣分组不渲染按钮、REVIEWED 禁用、
- *   admin 置灰+说明、CONFIRM 直提、CORRECT 缺 revised_deduction 前端拦截不发请求
+ *   agent 置灰+说明、admin 可用、CONFIRM 直提、CORRECT 缺 revised_deduction 前端拦截不发请求
  * - B0004/A2005 → 空态 + 返回列表
  *
- * 注：角色经 provide/inject 桥注入（key 'app:currentRole'，生产由 AdminLayout provide），
+ * 注：角色经 provide/inject 桥注入（key 见 shared/permissions.ts，生产由 AdminLayout provide），
  * 测试直接 provide 裸角色字符串。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -38,6 +38,7 @@ vi.mock('vue-router', () => ({
 }))
 
 import QcRecordDetail from '../views/QcRecordDetail.vue'
+import { CURRENT_ROLE_INJECT_KEY } from '@/shared'
 // ?raw 导入视图源码，佐证模板无已退役评级字段残留
 import DETAIL_SOURCE from '../views/QcRecordDetail.vue?raw'
 
@@ -125,7 +126,7 @@ function traceResp(over: Record<string, unknown> = {}) {
 /** 挂载详情页；role 经 inject 桥注入（生产由 AdminLayout provide ComputedRef） */
 function mountDetail(role = 'qc_reviewer') {
   return mount(QcRecordDetail, {
-    global: { provide: { 'app:currentRole': role } },
+    global: { provide: { [CURRENT_ROLE_INJECT_KEY]: role } },
   })
 }
 
@@ -278,15 +279,36 @@ describe('modules/qc/QcRecordDetail', () => {
     expect(apiMocks.submitQcReview).not.toHaveBeenCalled()
   })
 
-  it('admin 角色：人审按钮组置灰 + 说明，不发起请求', async () => {
-    const wrapper = mountDetail('admin')
+  it('agent 角色：人审按钮组置灰 + 说明，不发起请求', async () => {
+    const wrapper = mountDetail('agent')
     await flushPromises()
 
     const confirmBtn = findButtonByText(wrapper, '扣分正确')
     expect(confirmBtn?.attributes('disabled')).toBeDefined()
-    expect(wrapper.text()).toContain('仅 qc_reviewer/supervisor 可复核')
+    expect(wrapper.text()).toContain('仅 admin/qc_reviewer/supervisor 可复核')
     await confirmBtn?.trigger('click')
     expect(apiMocks.submitQcReview).not.toHaveBeenCalled()
+  })
+
+  it('admin 角色（最高权限）：人审按钮可用且可提交复核', async () => {
+    apiMocks.submitQcReview.mockResolvedValue({
+      qc_record_id: 'rec-1',
+      action: 'CONFIRM',
+      qc_status: 'REVIEWED',
+      deduction_total: 20,
+      compliance_score: 80,
+      qc_result: 'violation',
+      risk: 'high',
+      grade: null,
+    })
+    const wrapper = mountDetail('admin')
+    await flushPromises()
+
+    const confirmBtn = findButtonByText(wrapper, '扣分正确')
+    expect(confirmBtn?.attributes('disabled')).toBeUndefined()
+    await confirmBtn!.trigger('click')
+    await flushPromises()
+    expect(apiMocks.submitQcReview).toHaveBeenCalledWith('rec-1', { action: 'CONFIRM' })
   })
 
   it('CONFIRM 直提：调 reviews/{qc_record_id} 并刷新详情', async () => {

@@ -98,7 +98,11 @@ type AnyColumn = Column<unknown>
 </script>
 
 <template>
-  <div class="page-table" role="region" aria-live="polite">
+  <div
+    class="page-table"
+    role="region"
+    aria-live="polite"
+  >
     <!-- ① loading 骨架：占位表格 + 分页条 -->
     <template v-if="loading">
       <div class="pt-skeleton">
@@ -107,7 +111,11 @@ type AnyColumn = Column<unknown>
           :key="i"
           class="pt-skeleton-row"
         >
-          <div v-for="(_, j) in columns.length" :key="j" class="pt-skeleton-cell" />
+          <div
+            v-for="(_, j) in columns.length"
+            :key="j"
+            class="pt-skeleton-cell"
+          />
         </div>
       </div>
       <div class="pt-pagination pt-pagination--skeleton">
@@ -117,18 +125,34 @@ type AnyColumn = Column<unknown>
 
     <!-- ② error：错误提示 + 重试按钮 -->
     <template v-else-if="isErrorState">
-      <div class="pt-error" role="alert">
-        <div class="pt-error-icon" aria-hidden="true">!</div>
-        <div class="pt-error-msg">{{ error?.message || '请求失败' }}</div>
-        <button class="pt-error-retry" type="button" @click="onRetry">重试</button>
+      <div
+        class="pt-error"
+        role="alert"
+      >
+        <div
+          class="pt-error-icon"
+          aria-hidden="true"
+        >
+          !
+        </div>
+        <div class="pt-error-msg">
+          {{ error?.message || '请求失败' }}
+        </div>
+        <button
+          class="pt-error-retry"
+          type="button"
+          @click="onRetry"
+        >
+          重试
+        </button>
       </div>
     </template>
 
     <!-- ③ normal 或 empty：表格体 + 分页 -->
     <template v-else>
       <table
-        class="pt-table"
         v-if="isNormalState"
+        class="pt-table"
         :aria-rowcount="rows.length"
         :aria-colcount="columns.length"
       >
@@ -158,14 +182,23 @@ type AnyColumn = Column<unknown>
               class="pt-td"
               :style="{ textAlign: col.align ?? 'left' }"
             >
-              <!-- render 函数：输出用 String() 强制安全化，防止调用方返回非原始值（如 VNode）触发
-                   toDisplayString → JSON.stringify 循环引用中断 Vue patch（2026-10-23 f1-complaint-console 修复） -->
-              <template v-if="col.render">
-                {{ String((col.render as (r: unknown) => unknown)(row) ?? '') }}
-              </template>
-              <template v-else>
-                {{ String(cellValue(row, col) ?? '-') }}
-              </template>
+              <!-- 单元格插槽：按列 key 命名（cell-<key>），调用方可用业务组件渲染单元格，
+                   未覆盖的列落到默认分支；render 函数输出仍用 String() 强制安全化，防止
+                   调用方返回非原始值（如 VNode）触发 toDisplayString → JSON.stringify
+                   循环引用中断 Vue patch（2026-10-23 f1-complaint-console 修复） -->
+              <slot
+                :name="`cell-${String(col.key)}`"
+                :row="row"
+                :col="col"
+                :value="col.render ? (col.render as (r: unknown) => unknown)(row) : cellValue(row, col)"
+              >
+                <template v-if="col.render">
+                  {{ String((col.render as (r: unknown) => unknown)(row) ?? '') }}
+                </template>
+                <template v-else>
+                  {{ String(cellValue(row, col) ?? '-') }}
+                </template>
+              </slot>
             </td>
             <!-- 调用方可在每行末尾追加操作列（如研判/详情按钮） -->
             <slot
@@ -177,14 +210,17 @@ type AnyColumn = Column<unknown>
       </table>
 
       <!-- empty 空态（rows 为空时渲染空态块 + 分页） -->
-      <div v-if="isEmptyState" class="pt-empty">
+      <div
+        v-if="isEmptyState"
+        class="pt-empty"
+      >
         <span class="pt-empty-text">{{ emptyText }}</span>
       </div>
 
       <!-- 分页控件——仅 total 足够大时才显示；pageSizeMax 与后端对齐 -->
       <div
-        class="pt-pagination"
         v-if="total > 0"
+        class="pt-pagination"
         role="navigation"
         aria-label="分页导航"
       >
@@ -213,7 +249,13 @@ type AnyColumn = Column<unknown>
           aria-label="每页条数"
           @change="onPageSizeChange(Number(($event.target as HTMLSelectElement).value))"
         >
-          <option v-for="s in [10, 20, 50, pageSizeMax]" :key="s" :value="s">{{ s }} 条/页</option>
+          <option
+            v-for="s in [10, 20, 50, pageSizeMax]"
+            :key="s"
+            :value="s"
+          >
+            {{ s }} 条/页
+          </option>
         </select>
       </div>
     </template>

@@ -43,6 +43,7 @@ const formStubs = vi.hoisted(() => ({ validate: vi.fn(), clearValidate: vi.fn() 
 import KbDocuments from '../views/KbDocuments.vue'
 import { KB_SUMMARY_RULES } from '../composables/kbSummaryRules'
 import { KB_SUMMARY_MAX_LEN } from '../types'
+import { CURRENT_ROLE_INJECT_KEY } from '@/shared'
 
 // ── 固定数据 ──
 function rowItem(over: Record<string, unknown> = {}) {
@@ -151,7 +152,7 @@ function ragStubs() {
 function mountDocuments(role = 'admin') {
   return mount(KbDocuments, {
     global: {
-      provide: { 'app:currentRole': role },
+      provide: { [CURRENT_ROLE_INJECT_KEY]: role },
       stubs: ragStubs(),
     },
   })

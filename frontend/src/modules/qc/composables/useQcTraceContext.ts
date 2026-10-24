@@ -10,13 +10,7 @@
  */
 import { onScopeDispose, ref } from 'vue'
 import { getTraceContext, setTraceContext } from '@/shared/request'
-
-function generateTraceId(): string {
-  // crypto.randomUUID 在 jsdom/vitest 下可能不存在
-  const c = globalThis.crypto as undefined | { randomUUID?: () => string }
-  if (c?.randomUUID) return c.randomUUID()
-  return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
-}
+import { randomTraceId } from '@/shared'
 
 export interface UseQcTraceContextResult {
   /** 当前 trace_id（只读展示用，禁止直接操作请求头） */
@@ -33,7 +27,7 @@ export function useQcTraceContext(): UseQcTraceContextResult {
   const traceId = ref<string | null>(null)
 
   function write(id?: string): string {
-    const value = id ?? generateTraceId()
+    const value = id ?? randomTraceId()
     traceId.value = value
     setTraceContext(value)
     return value

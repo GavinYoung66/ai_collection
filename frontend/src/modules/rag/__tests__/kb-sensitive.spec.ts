@@ -27,6 +27,7 @@ const epMocks = vi.hoisted(() => ({
 vi.mock('element-plus', () => ({ ...epMocks }))
 
 import KbSensitive from '../views/KbSensitive.vue'
+import { CURRENT_ROLE_INJECT_KEY } from '@/shared'
 
 function findButtonByText(wrapper: ReturnType<typeof mount>, text: string) {
   return wrapper.findAll('button').find((b) => b.text().includes(text))
@@ -35,7 +36,7 @@ function findButtonByText(wrapper: ReturnType<typeof mount>, text: string) {
 function mountSensitive(role = 'admin') {
   return mount(KbSensitive, {
     global: {
-      provide: { 'app:currentRole': role },
+      provide: { [CURRENT_ROLE_INJECT_KEY]: role },
       stubs: {
         'el-tooltip': {
           props: ['content', 'disabled', 'placement'],

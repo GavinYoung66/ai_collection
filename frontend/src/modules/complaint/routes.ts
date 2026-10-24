@@ -18,7 +18,7 @@
  * - meta.menu: false 表示该路由不在侧边栏显示（详情页是导航目标，不是菜单入口）
  */
 import type { RouteRecordRaw } from 'vue-router'
-import PassthroughLayout from '@/shared/components/base/PassthroughLayout.vue'
+import { PassthroughLayout } from '@/shared'
 
 export const routes: RouteRecordRaw[] = [
   {

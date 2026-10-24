@@ -14,7 +14,7 @@
  * meta.roles 按 design D3 收窄表（与后端 require_roles 词表对齐，回填 SSOT §11.1/§3.2 注③）：
  * - rules   = ['admin']                          （rules/active=admin/ai_trainer、apply=admin）
  * - alerts  = ['admin','supervisor']             （alerts=supervisor/admin）
- * - reviews = ['supervisor','qc_reviewer']       （reviews=qc_reviewer/supervisor，词表不含 admin）
+ * - reviews = ['admin','supervisor','qc_reviewer'] （reviews=qc_reviewer/supervisor/admin）
  * - 其余三条 = ['admin','supervisor','qc_reviewer']
  * 收窄属纯可见性修正，授权边界仍在后端；详情页人审按钮组按 §5.0 F 按钮级置灰（批次5 落地）。
  *
@@ -22,7 +22,7 @@
  * 当前为批次2 骨架视图（仅 defineOptions name + 占位文案），批次3-5 填充实现。
  */
 import type { RouteRecordRaw } from 'vue-router'
-import PassthroughLayout from '@/shared/components/base/PassthroughLayout.vue'
+import { PassthroughLayout } from '@/shared'
 
 export const routes: RouteRecordRaw[] = [
   {
@@ -80,7 +80,7 @@ export const routes: RouteRecordRaw[] = [
         name: 'QcReview',
         component: () => import('./views/QcReview.vue'),
         meta: {
-          roles: ['supervisor', 'qc_reviewer'],
+          roles: ['admin', 'supervisor', 'qc_reviewer'],
           title: '人工复核',
           icon: 'EditPen',
           keepAlive: true,

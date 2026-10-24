@@ -22,7 +22,7 @@
  */
 import { reactive, ref } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
-import TraceIdText from '@/shared/components/base/TraceIdText.vue'
+import { AsyncState, TraceIdText } from '@/shared'
 import { searchKb } from '../api'
 import type { RagCategory, RagSearchResponse } from '../types'
 import { RAG_CATEGORY_LABELS } from '../types'
@@ -176,77 +176,63 @@ function onRetry(): void {
       </el-form-item>
     </el-form>
 
-    <!-- 结果区 -->
+    <!-- 结果区（三态统一由 shared AsyncState 承载，SSOT §19.7） -->
     <section class="kbs-result">
-      <!-- 加载态 -->
-      <div
-        v-if="searching"
-        class="kbs-state"
+      <AsyncState
+        :loading="searching"
+        :error="error"
+        error-prefix="检索失败："
+        loading-text="检索中…"
+        @retry="onRetry"
       >
-        检索中…
-      </div>
+        <template #default>
+          <template v-if="response">
+            <!-- 兜底降级警示徽章：degraded=true 时展示 message 原文 -->
+            <el-alert
+              v-if="response.degraded"
+              type="warning"
+              :title="response.message ?? '检索已降级'"
+              :closable="false"
+              show-icon
+              class="kbs-degraded"
+            />
 
-      <!-- 错误态：message 直出（拦截器已附 trace 后 8 位），手动重试 -->
-      <div
-        v-else-if="error"
-        class="kbs-state kbs-state--error"
-        role="alert"
-      >
-        <span>检索失败：{{ error.message }}</span>
-        <button
-          type="button"
-          class="kbs-btn"
-          @click="onRetry"
-        >
-          重试
-        </button>
-      </div>
+            <!-- 响应 trace_id（可复制；D6：不注入 trace 上下文，仅展示响应值） -->
+            <div class="kbs-trace">
+              响应 trace_id：
+              <TraceIdText :trace-id="response.trace_id" />
+            </div>
 
-      <template v-else-if="response">
-        <!-- 兜底降级警示徽章：degraded=true 时展示 message 原文 -->
-        <el-alert
-          v-if="response.degraded"
-          type="warning"
-          :title="response.message ?? '检索已降级'"
-          :closable="false"
-          show-icon
-          class="kbs-degraded"
-        />
+            <!-- 空结果空态（results.length===0 判定，§15.1 A3004 注） -->
+            <div
+              v-if="response.results.length === 0"
+              class="kbs-state"
+            >
+              未找到相关内容
+            </div>
 
-        <!-- 响应 trace_id（可复制；D6：不注入 trace 上下文，仅展示响应值） -->
-        <div class="kbs-trace">
-          响应 trace_id：
-          <TraceIdText :trace-id="response.trace_id" />
-        </div>
+            <!-- 召回明细卡片列表 -->
+            <div
+              v-else
+              class="kbs-cards"
+            >
+              <KbSearchResultCard
+                v-for="(item, idx) in response.results"
+                :key="`${item.doc_id}-${item.chunk_index}-${idx}`"
+                :item="item"
+              />
+            </div>
+          </template>
 
-        <!-- 空结果空态（results.length===0 判定，§15.1 A3004 注） -->
-        <div
-          v-if="response.results.length === 0"
-          class="kbs-state"
-        >
-          未找到相关内容
-        </div>
-
-        <!-- 召回明细卡片列表 -->
-        <div
-          v-else
-          class="kbs-cards"
-        >
-          <KbSearchResultCard
-            v-for="(item, idx) in response.results"
-            :key="`${item.doc_id}-${item.chunk_index}-${idx}`"
-            :item="item"
-          />
-        </div>
-      </template>
-
-      <!-- 初始态（尚未发起检索） -->
-      <div
-        v-else-if="!searched"
-        class="kbs-state"
-      >
-        填写检索参数后点击「发起检索」
-      </div>
+          <!-- 初始态（尚未发起检索） -->
+          <div
+            v-else-if="!searched"
+            class="kbs-state"
+          >
+            填写检索参数后点击「发起检索」
+          </div>
+        </template>
+      </AsyncState>
     </section>
   </div>
 </template>

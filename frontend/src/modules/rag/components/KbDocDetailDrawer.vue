@@ -14,11 +14,10 @@
  *   置灰态不 emit（容器侧另有前置守卫兜底，双保险）。
  */
 import { computed } from 'vue'
-import StatusTag from '@/shared/components/base/StatusTag.vue'
-import TraceIdText from '@/shared/components/base/TraceIdText.vue'
+import { StatusTag, TraceIdText } from '@/shared'
 import type { RagDocumentDetailResponse } from '../types'
 import { RAG_CATEGORY_LABELS } from '../types'
-import { RAG_WRITE_FORBIDDEN_TIP } from '../composables/useCurrentRole'
+import { RAG_WRITE_FORBIDDEN_TIP } from '../permissions'
 
 const props = defineProps<{
   /** 抽屉显隐（v-model） */

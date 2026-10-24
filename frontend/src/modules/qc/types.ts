@@ -51,7 +51,7 @@
  * 用 `T | null`（后端 None 序列化为 null），不用 undefined；时间一律 ISO 8601
  * 字符串透传不隐式时区改写；UUID 按 string；分页复用 shared 的 PageResult<T>。
  */
-import type { PageResult } from '@/shared/types/envelope'
+import type { PageResult } from '@/shared'
 
 // ── 枚举（字符串字面量联合，与后端逐字一致，前端禁止发明状态）──
 

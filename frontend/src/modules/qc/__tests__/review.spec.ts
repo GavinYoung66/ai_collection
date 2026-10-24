@@ -7,7 +7,7 @@
  * - ReviewActions 三态（独立挂载，角色经 inject 桥 provide 裸角色字符串）：
  *   零扣分（deduction_total=0 或缺省）不渲染提交按钮；CONFIRM 直提不带 revised_deduction；
  *   CORRECT 必填 revised_deduction（>=0 整数，空/非数字/负数均拦截不发请求）；
- *   REVIEWED 禁用；角色 ∉ {qc_reviewer, supervisor} 置灰+说明
+ *   REVIEWED 禁用；角色 ∉ {admin, qc_reviewer, supervisor} 置灰+说明
  * - ReviewActions 模板不出现后端三值枚举中的驳回动作名（?raw 源码佐证）
  * - QcRules：rules/active 只读渲染（无任何编辑控件）；热应用需 ElMessageBox 二次确认，
  *   取消不发请求，确认后才调 rules/apply；失败可解释提示
@@ -44,6 +44,7 @@ import QcReview from '../views/QcReview.vue'
 import QcRules from '../views/QcRules.vue'
 import QcAlerts from '../views/QcAlerts.vue'
 import ReviewActions from '../components/ReviewActions.vue'
+import { CURRENT_ROLE_INJECT_KEY } from '@/shared'
 // ?raw 导入组件源码，佐证模板不出现后端三值枚举中的驳回动作名
 import REVIEW_ACTIONS_SOURCE from '../components/ReviewActions.vue?raw'
 
@@ -108,7 +109,7 @@ function mountActions(
       qcStatus: 'PENDING_REVIEW',
       ...props,
     } as never,
-    global: { provide: { 'app:currentRole': role } },
+    global: { provide: { [CURRENT_ROLE_INJECT_KEY]: role } },
   })
 }
 
@@ -140,7 +141,7 @@ describe('modules/qc/QcReview', () => {
 
   function mountReview(role = 'qc_reviewer') {
     return mount(QcReview, {
-      global: { provide: { 'app:currentRole': role } },
+      global: { provide: { [CURRENT_ROLE_INJECT_KEY]: role } },
     })
   }
 
@@ -270,11 +271,19 @@ describe('modules/qc/ReviewActions 三态', () => {
     expect(apiMocks.submitQcReview).not.toHaveBeenCalled()
   })
 
-  it.each(['admin', 'agent', 'ai_trainer'])('角色 %s 不在复核词表：置灰 + 说明，不发起请求', async (role) => {
+  it('admin（最高权限）：在复核词表内，按钮可用', async () => {
+    apiMocks.submitQcReview.mockResolvedValue(reviewedResp)
+    const wrapper = mountActions({}, 'admin')
+    const confirmBtn = findButtonByText(wrapper, '扣分正确')
+    expect(confirmBtn?.attributes('disabled')).toBeUndefined()
+    expect(wrapper.text()).not.toContain('可复核，当前角色不可操作')
+  })
+
+  it.each(['agent', 'ai_trainer'])('角色 %s 不在复核词表：置灰 + 说明，不发起请求', async (role) => {
     const wrapper = mountActions({}, role)
     const confirmBtn = findButtonByText(wrapper, '扣分正确')
     expect(confirmBtn?.attributes('disabled')).toBeDefined()
-    expect(wrapper.text()).toContain('仅 qc_reviewer/supervisor 可复核')
+    expect(wrapper.text()).toContain('仅 admin/qc_reviewer/supervisor 可复核')
     await confirmBtn?.trigger('click')
     expect(apiMocks.submitQcReview).not.toHaveBeenCalled()
   })

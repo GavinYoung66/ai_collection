@@ -1,6 +1,6 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElMessage } from 'element-plus'
 import 'element-plus/dist/index.css'
 import App from './App.vue'
 import { router } from './router'
@@ -19,6 +19,13 @@ app.use(router)
 
 // UI 组件库
 app.use(ElementPlus)
+
+// 全局异常兜底（SSOT §19.3）：渲染/生命周期内未捕获异常统一提示，避免白屏且无痕；
+// 完整堆栈仍进 console，便于排查。
+app.config.errorHandler = (err, _instance, info) => {
+  console.error('[app:error]', info, err)
+  ElMessage.error('页面出现异常，请刷新或返回重试')
+}
 
 // 注册请求层回调（401 清态跳转 / 429 退避提示）
 setupAuthHandlers(router)
