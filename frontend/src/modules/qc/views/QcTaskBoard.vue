@@ -27,10 +27,11 @@ export const QC_BATCH_LIMIT = 10
  * - 网关 504/B0009 等 → ElMessage 可解释提示（拦截器已附白名单文案 + trace 后 8 位）；
  * - 其余 A20xx → 默认分支 message 直出。
  */
-import { computed, onActivated, onMounted, ref, watchEffect } from 'vue'
+import { computed, onActivated, onMounted, onUnmounted, ref, watchEffect } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { RequestError } from '@/shared/request'
+import { randomUuid } from '@/shared'
 import {
   checkQcBatch,
   listQcDemoPending,
@@ -55,6 +56,9 @@ defineOptions({ name: 'QcTaskBoard' })
 const isDev = import.meta.env.DEV
 
 const router = useRouter()
+
+// 卸载时取消在途长请求（replay/check/batch 同步含 LLM 复核，最坏 ~90s）
+const unmountAbort = new AbortController()
 
 // ── 状态标签（前端展示文案，状态值本身以 types.ts 枚举为准，不发明状态）──
 const QC_STATUS_LABELS: Record<QcStatus, string> = {
@@ -190,6 +194,7 @@ onActivated(() => {
   }
   void fetchBoard()
 })
+onUnmounted(() => { unmountAbort.abort() })
 
 /** 行内开检：POST replay/{session_id}；全程加载态 + 防连点 + 禁同行重复触发 */
 async function startQc(row: QcBoardRow): Promise<void> {
@@ -201,7 +206,7 @@ async function startQc(row: QcBoardRow): Promise<void> {
   if (replayingIds.value.includes(id)) return
   replayingIds.value = [...replayingIds.value, id]
   try {
-    await replayQcSession(id)
+    await replayQcSession(id, {}, undefined, unmountAbort.signal)
     ElMessage.success(`开检完成：${id}`)
     await fetchBoard()
   } catch (e) {
@@ -275,7 +280,7 @@ async function submitBatch(): Promise<void> {
   }
   batchSubmitting.value = true
   try {
-    const res = await checkQcBatch({ batch_id: crypto.randomUUID(), session_ids: ids })
+    const res = await checkQcBatch({ batch_id: randomUuid(), session_ids: ids }, unmountAbort.signal)
     batchResult.value = res
     selectedIds.value = []
     ElMessage.success(`批量质检完成：受理 ${res.accepted.length} 条，拒收 ${res.rejected.length} 条`)
@@ -321,7 +326,7 @@ async function submitRawReplay(): Promise<void> {
   }
   rawSubmitting.value = true
   try {
-    await replayQcRaw(body)
+    await replayQcRaw(body, undefined, unmountAbort.signal)
     rawDialogOpen.value = false
     rawJsonText.value = ''
     ElMessage.success('原始回放已受理')
