@@ -293,7 +293,7 @@ except Exception:
     sys.exit(3)
 
 try:
-    print(create_token({"sub": str(uuid4()), "role": "SUPV"}))
+    print(create_token({"sub": str(uuid4()), "role": "supervisor"}))
 except Exception:
     traceback.print_exc()
     sys.exit(4)
