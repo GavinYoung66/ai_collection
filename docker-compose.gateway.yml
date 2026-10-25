@@ -51,6 +51,23 @@ services:
       - default
       - ai-shared-net
 
+  # 前端管理台（F4）：多阶段构建（node build → nginx 托管），仅接 ai-shared-net
+  # 内网，MUST NOT publish 端口——经网关 /admin/ 统一入口对外，保证同源。
+  frontend:
+    build:
+      context: ./frontend
+    image: ai-collection-frontend:latest
+    container_name: ai-collection-frontend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/admin/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - ai-shared-net
+
   # 指标 exporter（api-gateway-hardening D10 / tasks 8.1）：抓取网关
   # stub_status 并转 Prometheus 格式；仅接 ai-shared-net 内网，
   # MUST NOT publish 端口（不对外裸奔）。网关经 location = /metrics 反代它。

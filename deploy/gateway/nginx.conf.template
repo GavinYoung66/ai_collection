@@ -106,6 +106,14 @@ http {
         keepalive 64;
     }
 
+    # 前端静态托管（F4）：ai-collection-frontend 镜像多阶段构建产物（nginx 承载），
+    # 与 auth-sidecar/metrics 同为内网基础设施服务，compose 服务名固定，不挂 UPSTREAM_*。
+    upstream frontend {
+        zone frontend_up 64k;
+        server frontend:80 resolve;
+        keepalive 64;
+    }
+
     # 鉴权 sidecar（api-gateway-hardening D3 / tasks 4.3 + F0）：
     # 两条用途：① auth_request 子请求 `/internal/authz`（仅内网 internal）；
     # ② 对外登录入口 `location /api/v1/auth`（login/me，不挂 auth_request）。

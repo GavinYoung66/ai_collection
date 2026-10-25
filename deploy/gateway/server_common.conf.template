@@ -32,6 +32,29 @@ if ($request_method = OPTIONS) {
     return 204;
 }
 
+# 前端管理台静态托管（F4）：反代到 frontend 容器（nginx 承载 vite 产物），
+# SPA try_files 兜底在前端容器 nginx 内。MUST NOT include auth_request.conf——
+# 登录页与静态资源必须匿名可达，API 鉴权由 /api/* 各 location 承担（401 信封 + 前端跳登录）。
+# MUST NOT 加 limit_req：首屏并发加载数十个静态资源，20r/s 限流会误伤 429。
+location /admin/ {
+    proxy_pass http://frontend;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Trace-Id $trace_id;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 15s;
+}
+
+# 裸路径引导到管理台（F4 后网关为全栈唯一入口）
+location = /admin {
+    return 301 /admin/;
+}
+
+location = / {
+    return 302 /admin/;
+}
+
 location = /gateway/health {
     access_log off;
     default_type application/json;
