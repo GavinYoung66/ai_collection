@@ -5,7 +5,12 @@
       <header class="rw-queue-head">
         <h3>待复核队列</h3>
         <span class="rw-count">{{ items.length }} 条</span>
-        <button type="button" class="rw-refresh" :disabled="listLoading" @click="fetchQueue">
+        <button
+          type="button"
+          class="rw-refresh"
+          :disabled="listLoading"
+          @click="fetchQueue"
+        >
           {{ listLoading ? '刷新中…' : '刷新' }}
         </button>
       </header>
@@ -17,9 +22,16 @@
         show-icon
         :title="`队列加载失败：${listError.message}`"
       />
-      <el-skeleton v-else-if="listLoading && !items.length" :rows="6" animated />
+      <el-skeleton
+        v-else-if="listLoading && !items.length"
+        :rows="6"
+        animated
+      />
 
-      <ul v-else class="rw-list">
+      <ul
+        v-else
+        class="rw-list"
+      >
         <li
           v-for="item in items"
           :key="item.complaint_id"
@@ -29,11 +41,16 @@
         >
           <div class="rw-item-top">
             <code class="rw-id">{{ shortId(item.complaint_id) }}</code>
-            <el-tag size="small" :type="statusTagType(item.task_status)">
+            <el-tag
+              size="small"
+              :type="statusTagType(item.task_status)"
+            >
               {{ STATUS_LABELS[item.task_status] }}
             </el-tag>
           </div>
-          <p class="rw-text">{{ item.complaint_text }}</p>
+          <p class="rw-text">
+            {{ item.complaint_text }}
+          </p>
           <div class="rw-item-bottom">
             <span class="rw-verdict">{{ item.verdict ? VERDICT_LABELS[item.verdict] : '待研判' }}</span>
             <span class="rw-time">{{ item.created_at }}</span>
@@ -41,32 +58,61 @@
         </li>
       </ul>
 
-      <el-empty v-if="!listLoading && !items.length && !listError" description="暂无待复核工单" :image-size="60" />
+      <el-empty
+        v-if="!listLoading && !items.length && !listError"
+        description="暂无待复核工单"
+        :image-size="60"
+      />
     </aside>
 
     <!-- 右栏：复核面板（原地处理，不跳详情页） -->
     <section class="rw-panel">
-      <el-empty v-if="!selectedId" description="从左侧选择一条工单开始复核" :image-size="80" />
+      <el-empty
+        v-if="!selectedId"
+        description="从左侧选择一条工单开始复核"
+        :image-size="80"
+      />
 
       <template v-else>
         <header class="rw-panel-head">
           <div>
             <h3>复核：{{ shortId(selectedId) }}</h3>
-            <el-tag v-if="detail" size="small" :type="statusTagType(detail.task_status)">
+            <el-tag
+              v-if="detail"
+              size="small"
+              :type="statusTagType(detail.task_status)"
+            >
               {{ STATUS_LABELS[detail.task_status] }}
             </el-tag>
           </div>
-          <el-button size="small" @click="openFullDetail">打开完整详情</el-button>
+          <el-button
+            size="small"
+            @click="openFullDetail"
+          >
+            打开完整详情
+          </el-button>
         </header>
 
-        <el-skeleton v-if="detailLoading" :rows="6" animated />
-        <el-alert v-else-if="detailError" type="error" :closable="false" show-icon :title="`详情加载失败：${detailError.message}`" />
+        <el-skeleton
+          v-if="detailLoading"
+          :rows="6"
+          animated
+        />
+        <el-alert
+          v-else-if="detailError"
+          type="error"
+          :closable="false"
+          show-icon
+          :title="`详情加载失败：${detailError.message}`"
+        />
 
         <template v-else-if="detail">
           <!-- 投诉原文 -->
           <div class="rw-block">
             <h4>投诉原文</h4>
-            <p class="rw-raw">{{ detail.complaint_text }}</p>
+            <p class="rw-raw">
+              {{ detail.complaint_text }}
+            </p>
           </div>
 
           <!-- AI 判责 -->
@@ -83,11 +129,22 @@
           </div>
 
           <!-- AI 取证链 -->
-          <div v-if="chainItems.length" class="rw-block">
+          <div
+            v-if="chainItems.length"
+            class="rw-block"
+          >
             <h4>AI 取证链（{{ chainItems.length }} 条）</h4>
             <ol class="rw-evidence">
-              <li v-for="(ev, i) in chainItems" :key="i">
-                <el-tag size="small" class="rw-ev-tag">{{ ev.category }}</el-tag>
+              <li
+                v-for="(ev, i) in chainItems"
+                :key="i"
+              >
+                <el-tag
+                  size="small"
+                  class="rw-ev-tag"
+                >
+                  {{ ev.category }}
+                </el-tag>
                 <strong>{{ ev.name }}</strong>
                 <span class="rw-ev-summary">{{ ev.summary }}</span>
               </li>
@@ -98,18 +155,39 @@
           <div class="rw-block">
             <h4>
               应答草稿
-              <el-button v-if="detail.response_draft" size="small" @click="copyDraft">复制</el-button>
+              <el-button
+                v-if="detail.response_draft"
+                size="small"
+                @click="copyDraft"
+              >
+                复制
+              </el-button>
             </h4>
-            <pre v-if="detail.response_draft" class="rw-draft">{{ detail.response_draft }}</pre>
-            <p v-else class="rw-muted">该工单暂无应答草稿</p>
+            <pre
+              v-if="detail.response_draft"
+              class="rw-draft"
+            >{{ detail.response_draft }}</pre>
+            <p
+              v-else
+              class="rw-muted"
+            >
+              该工单暂无应答草稿
+            </p>
           </div>
 
           <!-- 定责确认 -->
-          <div v-if="canDisposition" class="rw-block">
+          <div
+            v-if="canDisposition"
+            class="rw-block"
+          >
             <h4>定责确认</h4>
             <div class="rw-form">
               <label>定责类型</label>
-              <el-select v-model="verdictForm.verdict" placeholder="请选择" style="width: 180px">
+              <el-select
+                v-model="verdictForm.verdict"
+                placeholder="请选择"
+                style="width: 180px"
+              >
                 <el-option
                   v-for="opt in ESTABLISHMENT_OPTIONS"
                   :key="opt.value"
@@ -118,19 +196,34 @@
                 />
               </el-select>
               <label>改判原因</label>
-              <el-input v-model="verdictForm.reason" placeholder="与 AI 不一致时必填" style="width: 260px" />
-              <el-button type="primary" :loading="verdictSubmitting" @click="submitVerdict">
+              <el-input
+                v-model="verdictForm.reason"
+                placeholder="与 AI 不一致时必填"
+                style="width: 260px"
+              />
+              <el-button
+                type="primary"
+                :loading="verdictSubmitting"
+                @click="submitVerdict"
+              >
                 提交定责
               </el-button>
             </div>
           </div>
 
           <!-- 人工复核 -->
-          <div v-if="canReview" class="rw-block">
+          <div
+            v-if="canReview"
+            class="rw-block"
+          >
             <h4>人工复核</h4>
             <div class="rw-form">
               <label>复核动作</label>
-              <el-select v-model="reviewForm.action" placeholder="请选择" style="width: 180px">
+              <el-select
+                v-model="reviewForm.action"
+                placeholder="请选择"
+                style="width: 180px"
+              >
                 <el-option
                   v-for="opt in REVIEW_ACTION_OPTIONS"
                   :key="opt.value"
@@ -139,26 +232,55 @@
                 />
               </el-select>
               <label>备注</label>
-              <el-input v-model="reviewForm.comment" placeholder="选填" style="width: 220px" />
-              <el-button type="primary" :loading="reviewSubmitting" @click="submitReview">
+              <el-input
+                v-model="reviewForm.comment"
+                placeholder="选填"
+                style="width: 220px"
+              />
+              <el-button
+                type="primary"
+                :loading="reviewSubmitting"
+                @click="submitReview"
+              >
                 提交复核
               </el-button>
             </div>
-            <p v-if="needReason && !reviewForm.reason.trim()" class="rw-warn">
+            <p
+              v-if="needReason && !reviewForm.reason.trim()"
+              class="rw-warn"
+            >
               该动作需填写理由（下方「理由」必填）
             </p>
-            <div v-if="needReason" class="rw-form">
+            <div
+              v-if="needReason"
+              class="rw-form"
+            >
               <label>理由</label>
-              <el-input v-model="reviewForm.reason" placeholder="必填" style="width: 380px" />
+              <el-input
+                v-model="reviewForm.reason"
+                placeholder="必填"
+                style="width: 380px"
+              />
             </div>
           </div>
 
           <!-- 回电登记 -->
-          <div v-if="canCallback" class="rw-block">
+          <div
+            v-if="canCallback"
+            class="rw-block"
+          >
             <h4>回电登记</h4>
             <div class="rw-form">
-              <el-input v-model="callbackNote" placeholder="回电结果备注" style="width: 320px" />
-              <el-button type="primary" :loading="callbackSubmitting" @click="submitCallback">
+              <el-input
+                v-model="callbackNote"
+                placeholder="回电结果备注"
+                style="width: 320px"
+              />
+              <el-button
+                type="primary"
+                :loading="callbackSubmitting"
+                @click="submitCallback"
+              >
                 登记回电完成
               </el-button>
             </div>

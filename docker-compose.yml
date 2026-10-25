@@ -190,28 +190,6 @@ services:
         echo "rocketmq-init: failed to create csmp_business_events" >&2
         exit 1
 
-  # ===== V5 新增：Gradio 浏览器前端（独立进程，仅内部网络，见 services/rag-service/README.md §E）=====
-  gradio:
-    build:
-      context: .
-      dockerfile: deploy/gradio/Dockerfile
-    ports:
-      - "7860:7860"
-    environment:
-      - RAG_API_BASE=http://rag-service:8000/api/v1
-      # 内部访问 token（生产由运维提供 ADMIN/SUPERVISOR 角色的 JWT，前端不硬编码）
-      - RAG_API_TOKEN=${RAG_API_TOKEN:?must set internal token}
-      - GRADIO_SERVER_NAME=0.0.0.0
-      - GRADIO_ROOT_PATH=/rag
-      # 与 rag-service 共享资产数据卷（图片/表格预览源），gradio app.py 读取同一 env 名
-      - KB_ASSETS_DIR=/app/data/assets
-    volumes:
-      - rag_assets:/app/data/assets
-    depends_on:
-      rag-service:
-        condition: service_healthy
-    restart: unless-stopped
-
   # ===== 可观测性（openspec change: observability-metrics-llm-usage）=====
   # 抓取目标锁定 docker-compose.dev.yml 单实例全栈（design D6），经宿主机端口映射 +
   # host.docker.internal（macOS 原生支持；Linux 由 extra_hosts 补齐，design D1）
@@ -257,5 +235,3 @@ volumes:
   minio_data:
   milvus_data:
   es_data:
-  # V5 新增：内嵌资产本地存储（图片/表格预览源），rag-service 与 gradio 共享
-  rag_assets:

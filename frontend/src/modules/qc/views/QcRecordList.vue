@@ -10,16 +10,15 @@
  * - 行点击 / 操作列按钮跳详情 /qc/records/:sessionId；
  * - keepAlive：onMounted 拉一次，onActivated 刷新（首个 activated 与 mounted 同序，标志位去重）。
  */
-import { onActivated, onMounted, ref } from 'vue'
+import { ref } from 'vue'
 import { useRouter } from 'vue-router'
-import PageTable from '@/shared/components/base/PageTable.vue'
-import type { Column } from '@/shared/components/base/PageTable.vue'
+import { PageTable, useAsyncTask, useTableQuery } from '@/shared'
+import type { Column } from '@/shared'
 import { getQcRecordStats, listQcRecords } from '../api'
 import type {
   QcRecordListItem,
   QcRiskLevel,
   QcStatsGroupBy,
-  QcStatsResponse,
   QcStatus,
 } from '../types'
 
@@ -40,19 +39,34 @@ const RISK_LABELS: Record<QcRiskLevel, string> = {
   high: '高',
 }
 
-// ── 列表状态 ──
-const rows = ref<QcRecordListItem[]>([])
-const total = ref(0)
-const page = ref(1)
-const pageSize = ref(20)
-const loading = ref(false)
-const error = ref<Error | null>(null)
+// ── 列表三态 / 分页统一由 shared 维护（SSOT §19.4）──
+const {
+  rows,
+  total,
+  page,
+  pageSize,
+  loading,
+  error,
+  reload: fetchList,
+  setPage: onPageChange,
+  setPageSize: onPageSizeChange,
+} = useTableQuery<QcRecordListItem, Record<string, never>>({
+  fetcher: (_q, p, ps) => listQcRecords({ page: p, page_size: ps }),
+  initialQuery: {},
+  pageSize: 20,
+  refetchOnActivated: true,
+})
 
-// ── 统计卡状态（records/stats；group_by 必填，默认按日维度）──
+// ── 统计卡（records/stats；group_by 必填，默认按日维度）──
 const statsGroupBy = ref<QcStatsGroupBy>('day')
-const stats = ref<QcStatsResponse | null>(null)
-const statsLoading = ref(false)
-const statsError = ref<Error | null>(null)
+const {
+  data: stats,
+  loading: statsLoading,
+  error: statsError,
+  run: fetchStats,
+} = useAsyncTask(() => getQcRecordStats({ group_by: statsGroupBy.value }), {
+  refetchOnActivated: true,
+})
 
 const STATS_GROUP_OPTIONS: { value: QcStatsGroupBy; label: string }[] = [
   { value: 'day', label: '按日' },
@@ -60,58 +74,6 @@ const STATS_GROUP_OPTIONS: { value: QcStatsGroupBy; label: string }[] = [
   { value: 'rule_id', label: '按规则' },
 ]
 
-async function fetchList(): Promise<void> {
-  loading.value = true
-  error.value = null
-  try {
-    const res = await listQcRecords({ page: page.value, page_size: pageSize.value })
-    rows.value = res.items
-    total.value = res.total
-  } catch (e) {
-    error.value = e instanceof Error ? e : new Error(String(e))
-  } finally {
-    loading.value = false
-  }
-}
-
-/** 统计卡：后端字段透传渲染，不自行聚合 */
-async function fetchStats(): Promise<void> {
-  statsLoading.value = true
-  statsError.value = null
-  try {
-    stats.value = await getQcRecordStats({ group_by: statsGroupBy.value })
-  } catch (e) {
-    statsError.value = e instanceof Error ? e : new Error(String(e))
-  } finally {
-    statsLoading.value = false
-  }
-}
-
-// keepAlive 语义：首个 activated 与 mounted 同序触发，标志位去重（同 QcTaskBoard 先例）
-let skipNextActivated = false
-onMounted(() => {
-  skipNextActivated = true
-  void fetchList()
-  void fetchStats()
-})
-onActivated(() => {
-  if (skipNextActivated) {
-    skipNextActivated = false
-    return
-  }
-  void fetchList()
-  void fetchStats()
-})
-
-function onPageChange(p: number): void {
-  page.value = p
-  void fetchList()
-}
-function onPageSizeChange(s: number): void {
-  pageSize.value = s
-  page.value = 1
-  void fetchList()
-}
 function onRetry(): void {
   void fetchList()
   void fetchStats()

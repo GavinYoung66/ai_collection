@@ -4,7 +4,6 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.health import router as health_router
 from app.auth import register_auth_handlers
@@ -14,6 +13,7 @@ from app.mcp.http import router as mcp_router
 from app.routers.alerts import router as alerts_router
 from app.routers.check import router as check_router
 from app.routers.demo import router as demo_router
+from app.routers.llm_usage import router as llm_usage_router
 from app.routers.records import router as records_router
 from app.routers.review import router as review_router
 from app.routers.rules import router as rules_router
@@ -89,21 +89,10 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="QC Service", version="1.0.0", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-        "http://localhost:5500",
-        "http://127.0.0.1:5500",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 跨域消费者（本地静态演示页）已移除；真实前端经网关同源访问，无需 CORS 中间件。
 app.add_middleware(TraceMiddleware)
 # 统一 Prometheus 指标：必须在所有 add_middleware 之后调用，
-# 确保 MetricsMiddleware 处于最外层（Metrics→Trace→CORS→路由）；
+# 确保 MetricsMiddleware 处于最外层（Metrics→Trace→路由）；
 # 同时注册无需鉴权的 GET /metrics（原生 exposition，不包统一信封）。
 mount_metrics(app, service_name="qc-service")
 register_exception_handlers(app)
@@ -116,4 +105,5 @@ app.include_router(records_router)
 app.include_router(alerts_router)
 app.include_router(review_router)
 app.include_router(rules_router)
+app.include_router(llm_usage_router)
 app.include_router(mcp_router)

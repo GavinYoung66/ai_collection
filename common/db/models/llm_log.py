@@ -16,12 +16,23 @@ class LLMCallLog(Base):
     session_id = Column(String(100), nullable=True, index=True)
     provider = Column(String(50), nullable=False)
     model = Column(String(50), nullable=True)
+    svc = Column(
+        String(50),
+        nullable=True,
+        index=True,
+        comment="上报服务名（qc/rag/complaint）；NULL 为本列落地前的历史行",
+    )
     prompt = Column(Text, nullable=False, comment="入参，落库前经 mask.py 脱敏")
     response = Column(Text, nullable=True)
     token_usage = Column(JSONB, nullable=True)
     latency_ms = Column(Integer, nullable=True)
     confidence = Column(Float, nullable=True)
     temperature = Column(Float, default=0.1, server_default="0.1")
-    status = Column(String(20), nullable=False, index=True, comment="success/failed/timeout/circuit_open")
+    status = Column(
+        String(20),
+        nullable=False,
+        index=True,
+        comment="success/failed/timeout/circuit_open（计划值）+ ok/qc_review_exemption/skipped（实际写入）",
+    )
     error_msg = Column(Text, nullable=True)
     create_time = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)

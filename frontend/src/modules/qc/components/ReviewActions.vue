@@ -9,7 +9,7 @@
  * - 前端不暴露后端三值枚举中的驳回动作（spec 禁令）；REVIEWED 后全部按钮禁用；
  * - §15.1 白名单：CORRECT 表单收到 A2002（质检入参不合法，qc 的 422 不叠 B0001）→
  *   输入框行内标红 + 行内错误文案，不弹全局错误；其余码走默认分支 ElMessage 直出；
- * - 当前角色 ∉ {qc_reviewer, supervisor} → 置灰 + 说明「仅 qc_reviewer/supervisor 可复核」，
+ * - 当前角色 ∉ {admin, qc_reviewer, supervisor} → 置灰 + 说明「仅 admin/qc_reviewer/supervisor 可复核」，
  *   不发起请求（角色经 useCurrentRole inject 桥取，模块不 import app store）；
  * - 提交中防连点；成功后 emit('submitted') 由宿主页面刷新。
  */
@@ -18,7 +18,7 @@ import { ElMessage } from 'element-plus'
 import type { RequestError } from '@/shared/request'
 import { submitQcReview } from '../api'
 import type { QcReviewSubmitResponse, QcStatus } from '../types'
-import { useCurrentRole } from '../composables/useCurrentRole'
+import { useCurrentRole } from '@/shared'
 
 const props = defineProps<{
   /** 复核路径参数（reviews/{qc_record_id}） */
@@ -32,8 +32,8 @@ const emit = defineEmits<{
   (e: 'submitted', res: QcReviewSubmitResponse): void
 }>()
 
-/** 按钮级 allowlist（后端 reviews 词表，design D3；admin 不在列） */
-const REVIEW_ROLES = ['qc_reviewer', 'supervisor'] as const
+/** 按钮级 allowlist（后端 reviews 词表，design D3；admin 具备最高权限故在列） */
+const REVIEW_ROLES = ['admin', 'qc_reviewer', 'supervisor'] as const
 
 const role = useCurrentRole()
 const roleAllowed = computed(() => !!role.value && (REVIEW_ROLES as readonly string[]).includes(role.value))
@@ -52,7 +52,7 @@ const buttonsDisabled = computed(() => !roleAllowed.value || isReviewed.value ||
 
 /** 置灰原因说明（仅置灰时展示） */
 const disabledReason = computed(() => {
-  if (!roleAllowed.value) return '仅 qc_reviewer/supervisor 可复核，当前角色不可操作'
+  if (!roleAllowed.value) return '仅 admin/qc_reviewer/supervisor 可复核，当前角色不可操作'
   if (isReviewed.value) return '本通已人审，复核按钮已锁定'
   return ''
 })

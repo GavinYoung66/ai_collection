@@ -1,5 +1,5 @@
 import type { RouteRecordRaw } from 'vue-router'
-import ModulePlaceholder from '@/shared/components/base/ModulePlaceholder.vue'
+import { ModulePlaceholder } from '@/shared'
 
 /**
  * 系统管理模块路由（F0 仅占位，P1 实现用户管理）。

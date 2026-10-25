@@ -133,15 +133,6 @@ HTTP JSON SHALL 遵循 DD-02 §4.0.1.1 的 V1.18 口径：`deduction_total`（�
 - **WHEN** apply 目标版本不存在或阈值非法
 - **THEN** HTTP 200 `code=A2009`，上一版 active 保持
 
-### Requirement: CORS 放行本地静态页
-
-qc-service SHALL 允许来源 `http://localhost:8080` 与 `http://127.0.0.1:8080` 的浏览器跨域访问业务 API（MAY 额外放行 5500，与投诉页一致）。未放行源 MUST NOT 作为演示主路径依赖。
-
-#### Scenario: 8080 可跨域调用
-
-- **WHEN** 浏览器页托管在 localhost:8080 并请求 8003 `/api/v1/qc/demo/pending`
-- **THEN** CORS 预检或响应允许该源，请求不被浏览器同源策略拒绝（服务侧放行该 Origin）
-
 ### Requirement: hits 含 source、word 与条款
 
 `GET /api/v1/qc/records/{session_id}` 与 replay 成功 `data.hits` SHALL 为每条命中提供 `source`（`ac` | `rule` | `llm`）、本条扣分 `points`、制度条款号 `policy_clause`、制度条款原文 `policy_text`、可选 `word`（AC 命中词）、以及 RAG 检索片段字段 `kb_snippet`（无检索则为空/省略）。`policy_text` 与 `kb_snippet` MUST 为两个独立字段。`skipped_rules` 语义不变。evidence 仍 MUST 脱敏。

@@ -34,10 +34,10 @@ import type {
   TraceEventItem,
   VerdictResponse,
 } from '../types'
-import { WAITING_HUMAN_TASK_STATUS, VERDICT_LABELS, ESTABLISHMENT_OPTIONS } from '../types'
+import { INFLIGHT_TASK_STATUS, WAITING_HUMAN_TASK_STATUS, VERDICT_LABELS, ESTABLISHMENT_OPTIONS } from '../types'
 import { usePolling } from '../composables/usePolling'
 import { useTraceContext } from '../composables/useTraceContext'
-import TraceIdText from '@/shared/components/base/TraceIdText.vue'
+import { TraceIdText } from '@/shared'
 import EvidencePanel from '../components/EvidencePanel.vue'
 import TraceTimeline from '../components/TraceTimeline.vue'
 import AgentLogs from '../components/AgentLogs.vue'
@@ -51,6 +51,11 @@ useTraceContext()
 const route = useRoute()
 const router = useRouter()
 const complaintId = computed(() => route.params.id as string)
+
+// 卸载时取消在途长请求（judge），避免路由离开后响应写回已卸载组件
+const unmountAbort = new AbortController()
+// 详情请求序号：快速切换工单时丢弃过期响应（后发先至竞态防护）
+let loadSeq = 0
 
 // ── 状态步骤条配置（TaskStatus 枚举，前端不发明） ──
 const STATUS_STEPS: { status: TaskStatus; label: string }[] = [
@@ -74,6 +79,10 @@ const verdict = ref<VerdictResponse | null>(null)
 const errorMessage = ref<string | null>(null)
 const errorCode = ref<string | null>(null)
 const errorTrace = ref<string | null>(null)
+
+// judge 返回的 thread_id（LangGraph checkpoint key）与演示 stub 标识
+const judgeThreadId = ref<string | null>(null)
+const isDemoJudge = ref(false)
 
 const isNotFound = computed(() => errorCode.value === 'A5001')
 const currentStepIndex = computed(() => {
@@ -107,14 +116,8 @@ const hasAnyAction = computed(() =>
   canJudge.value || canDisposition.value || canReview.value || canCallback.value || canClose.value,
 )
 
-// 证据链规整（后端 ordered_evidence 为 Record，此处归一化供模板直接渲染）
-const evidenceList = computed(() =>
-  (detail.value?.ordered_evidence ?? []).map((e) => ({
-    category: String(e.category ?? '其他'),
-    name: String(e.name ?? '—'),
-    summary: String(e.summary ?? ''),
-  })),
-)
+// 证据清单（后端 ordered_evidence 已结构化 EvidenceItem，直接透传渲染，不再弱化为 Record）
+const evidenceList = computed(() => detail.value?.ordered_evidence ?? [])
 
 // AI 取证链：来自 Trace 事件（详情加载后即拉取，不必等用户切 Tab）
 const chainItems = computed(() =>
@@ -129,8 +132,14 @@ async function loadAiTrace(): Promise<void> {
   const id = complaintId.value
   if (!id) return
   traceLoading.value = true
-  try { traceEvents.value = (await getComplaintTrace(id)).events } catch { traceEvents.value = [] }
-  finally { traceLoading.value = false }
+  try {
+    const res = await getComplaintTrace(id)
+    traceEvents.value = res.events
+    traceLangsmithUrl.value = res.langsmith_url ?? null
+  } catch {
+    traceEvents.value = []
+    traceLangsmithUrl.value = null
+  } finally { traceLoading.value = false }
   tabLoaded.value.trace = true
 }
 
@@ -171,6 +180,7 @@ const tabLoaded = ref<Record<TabKey, boolean>>({
   evidence: false, trace: false, 'agent-logs': false, draft: false,
 })
 const traceEvents = ref<TraceEventItem[]>([])
+const traceLangsmithUrl = ref<string | null>(null)
 const agentLogItems = ref<AgentLogItem[]>([])
 const traceLoading = ref(false)
 const agentLogsLoading = ref(false)
@@ -196,18 +206,26 @@ async function onTabChange(tab: TabKey): Promise<void> {
 async function loadDetail(): Promise<void> {
   const id = complaintId.value
   if (!id) { errorMessage.value = '缺少工单 ID'; return }
+  const seq = ++loadSeq
   loading.value = true
   errorMessage.value = null; errorCode.value = null; errorTrace.value = null
   try {
-    detail.value = await getComplaint(id)
-    verdict.value = await getComplaintVerdict(id).catch(() => null)
+    const d = await getComplaint(id)
+    if (seq !== loadSeq) return // 已切换到其它工单，丢弃过期响应
+    detail.value = d
+    const v = await getComplaintVerdict(id).catch(() => null)
+    if (seq !== loadSeq) return
+    verdict.value = v
   } catch (err: unknown) {
+    if (seq !== loadSeq) return
     const e = err as { message?: string; code?: string; trace?: string }
     errorMessage.value = e?.message ?? '加载失败'
     errorCode.value = e?.code ?? null
     errorTrace.value = e?.trace ?? null
     // A5001 → 404 空态（computed isNotFound 驱动）
-  } finally { loading.value = false }
+  } finally {
+    if (seq === loadSeq) loading.value = false
+  }
 }
 
 // ── 错误码模块侧动作（白名单 code 判定，不看 HTTP 状态） ──
@@ -269,7 +287,12 @@ const { isPolling, start: startPolling, stop: stopPolling } = usePolling(
 function maybeStartPolling(): void {
   const ts = detail.value?.task_status
   if (!ts) return
-  if (ts === 'judging' || (WAITING_HUMAN_TASK_STATUS as readonly string[]).includes(ts)) {
+  // 在途态（pending/evidence_gathering/reflection_retry/judging）+ 等待人工三态都要轮询；
+  // 只轮询 judging 会漏掉证据收集/反思重试这两个最耗时阶段，进度条冻结（session_service.py 状态机）。
+  if (
+    (INFLIGHT_TASK_STATUS as readonly string[]).includes(ts) ||
+    (WAITING_HUMAN_TASK_STATUS as readonly string[]).includes(ts)
+  ) {
     void startPolling()
   }
 }
@@ -281,7 +304,10 @@ async function handleJudge(): Promise<void> {
   if (!id) return
   judgeLoading.value = true
   try {
-    await judgeComplaint(id)
+    const res = await judgeComplaint(id, {}, unmountAbort.signal)
+    // 记录 thread_id（LangGraph checkpoint key）供溯源；stub 路径返回 mock 结论，明确标识演示数据
+    judgeThreadId.value = res.thread_id ?? null
+    isDemoJudge.value = res.message.includes('stub')
     ElMessage.success('研判已触发')
     // 不手动启动轮询——onTabChange/操作后 loadDetail 会根据 task_status 自动启动
     await loadDetail()
@@ -393,31 +419,55 @@ onMounted(async () => {
 watch(complaintId, async (newId, oldId) => {
   if (newId === oldId) return
   stopPolling()
+  judgeThreadId.value = null
+  isDemoJudge.value = false
   await loadDetail()
   maybeStartPolling()
 })
 
-onUnmounted(() => { stopPolling() })
+onUnmounted(() => { stopPolling(); unmountAbort.abort() })
 </script>
 
 <template>
   <div class="complaint-detail">
     <!-- 加载态 -->
-    <el-skeleton v-if="loading" :rows="6" animated />
+    <el-skeleton
+      v-if="loading"
+      :rows="6"
+      animated
+    />
 
     <!-- A5001 工单不存在 → 404 空态 -->
-    <div v-else-if="isNotFound" class="not-found">
+    <div
+      v-else-if="isNotFound"
+      class="not-found"
+    >
       <el-empty description="投诉工单不存在">
-        <el-button type="primary" @click="router.push('/complaints')">返回列表</el-button>
+        <el-button
+          type="primary"
+          @click="router.push('/complaints')"
+        >
+          返回列表
+        </el-button>
       </el-empty>
     </div>
 
     <!-- 通用错误态（非 A5001） -->
-    <div v-else-if="errorMessage" class="error-state">
-      <el-alert type="error" :title="errorMessage" show-icon>
+    <div
+      v-else-if="errorMessage"
+      class="error-state"
+    >
+      <el-alert
+        type="error"
+        :title="errorMessage"
+        show-icon
+      >
         <template #default>
           <span v-if="errorTrace">trace: </span>
-          <TraceIdText v-if="errorTrace" :trace-id="errorTrace" />
+          <TraceIdText
+            v-if="errorTrace"
+            :trace-id="errorTrace"
+          />
         </template>
       </el-alert>
     </div>
@@ -427,59 +477,134 @@ onUnmounted(() => { stopPolling() })
       <header class="detail-header">
         <div class="complaint-meta">
           <span class="complaint-id">工单 #{{ detail.complaint_id }}</span>
-          <el-tag :type="currentStepIndex >= 8 ? 'success' : currentStepIndex >= 5 ? 'warning' : 'info'" size="small">
+          <el-tag
+            :type="currentStepIndex >= 8 ? 'success' : currentStepIndex >= 5 ? 'warning' : 'info'"
+            size="small"
+          >
             {{ STATUS_STEPS[currentStepIndex]?.label ?? detail.task_status }}
           </el-tag>
-          <span v-if="isPolling" class="polling-indicator">● 轮询中</span>
+          <span
+            v-if="isPolling"
+            class="polling-indicator"
+          >● 轮询中</span>
+          <span
+            v-if="judgeThreadId"
+            class="thread-id"
+          >
+            thread <TraceIdText :trace-id="judgeThreadId" />
+          </span>
         </div>
-        <p class="complaint-text">{{ detail.complaint_text }}</p>
+        <p class="complaint-text">
+          {{ detail.complaint_text }}
+        </p>
       </header>
 
       <!-- ① 状态步骤条 -->
       <section class="step-bar">
-        <el-steps :active="currentStepIndex" align-center finish-status="success" process-status="primary">
-          <el-step v-for="step in STATUS_STEPS" :key="step.status" :title="step.label" />
+        <el-steps
+          :active="currentStepIndex"
+          align-center
+          finish-status="success"
+          process-status="primary"
+        >
+          <el-step
+            v-for="step in STATUS_STEPS"
+            :key="step.status"
+            :title="step.label"
+          />
         </el-steps>
       </section>
 
       <!-- ② AI vs 人审对照 -->
       <section class="verdict-compare">
         <h3>定责对照</h3>
-        <el-descriptions :column="2" border>
-          <el-descriptions-item label="AI 初选">{{ detail.ai_verdict ? VERDICT_LABELS[detail.ai_verdict] : '—' }}</el-descriptions-item>
+        <el-descriptions
+          :column="2"
+          border
+        >
+          <el-descriptions-item label="AI 初选">
+            {{ detail.ai_verdict ? VERDICT_LABELS[detail.ai_verdict] : '—' }}
+          </el-descriptions-item>
           <el-descriptions-item label="人审定责">
             <span :class="{ 'verdict-changed': verdictChanged }">{{ detail.disposition_verdict ? VERDICT_LABELS[detail.disposition_verdict] : '—' }}</span>
           </el-descriptions-item>
-          <el-descriptions-item v-if="verdictChanged" label="改判原因" :span="2">
+          <el-descriptions-item
+            v-if="verdictChanged"
+            label="改判原因"
+            :span="2"
+          >
             {{ detail.disposition_reason ?? '（未填写）' }}
           </el-descriptions-item>
         </el-descriptions>
       </section>
 
+      <!-- 演示数据标识：研判命中后端 stub（run_graph 默认 false）时结论为 mock，非真实模型输出 -->
+      <el-alert
+        v-if="isDemoJudge"
+        type="warning"
+        :closable="false"
+        show-icon
+        title="当前为演示 stub 结果（非真实模型研判）"
+        class="demo-badge"
+      />
+
       <!-- ③ 结论卡 -->
-      <section class="verdict-card" v-if="verdict">
+      <section
+        v-if="verdict"
+        class="verdict-card"
+      >
         <h3>研判结论</h3>
-        <el-descriptions :column="2" border>
-          <el-descriptions-item label="判责类型">{{ verdict.verdict ? VERDICT_LABELS[verdict.verdict] : '—' }}</el-descriptions-item>
+        <el-descriptions
+          :column="2"
+          border
+        >
+          <el-descriptions-item label="判责类型">
+            {{ verdict.verdict ? VERDICT_LABELS[verdict.verdict] : '—' }}
+          </el-descriptions-item>
           <el-descriptions-item label="置信度">
             {{ verdict.confidence != null ? `${(verdict.confidence * 100).toFixed(1)}%` : '—' }}
           </el-descriptions-item>
-          <el-descriptions-item v-if="verdict.rag_source_ids.length" label="RAG 源" :span="2">
-            <el-tag v-for="sid in verdict.rag_source_ids" :key="sid" size="small" style="margin-right: 4px">{{ sid }}</el-tag>
+          <el-descriptions-item
+            v-if="verdict.rag_source_ids.length"
+            label="RAG 源"
+            :span="2"
+          >
+            <el-tag
+              v-for="sid in verdict.rag_source_ids"
+              :key="sid"
+              size="small"
+              style="margin-right: 4px"
+            >
+              {{ sid }}
+            </el-tag>
           </el-descriptions-item>
         </el-descriptions>
       </section>
 
       <!-- ④ AI 产出物：取证链 + 违规清单（定责后）+ 应答草稿，直接展示不必翻 Tab -->
-      <section v-if="chainItems.length || evidenceList.length || detail.response_draft" class="ai-output">
+      <section
+        v-if="chainItems.length || evidenceList.length || detail.response_draft"
+        class="ai-output"
+      >
         <h3>AI 产出物</h3>
 
         <!-- 取证链：AI 调用了哪些工具、拿到什么（来自 trace） -->
-        <div v-if="chainItems.length" class="ai-output-block">
+        <div
+          v-if="chainItems.length"
+          class="ai-output-block"
+        >
           <h4>AI 取证链（{{ chainItems.length }} 条）</h4>
           <ol class="ev-list">
-            <li v-for="(ev, i) in chainItems" :key="`c-${i}`">
-              <el-tag size="small" class="ev-cat">{{ ev.category }}</el-tag>
+            <li
+              v-for="(ev, i) in chainItems"
+              :key="`c-${i}`"
+            >
+              <el-tag
+                size="small"
+                class="ev-cat"
+              >
+                {{ ev.category }}
+              </el-tag>
               <strong class="ev-name">{{ ev.name }}</strong>
               <span class="ev-summary">{{ ev.summary }}</span>
             </li>
@@ -487,11 +612,22 @@ onUnmounted(() => { stopPolling() })
         </div>
 
         <!-- 违规清单：仅人审定责=坐实违规后由后端生成 -->
-        <div v-if="evidenceList.length" class="ai-output-block">
+        <div
+          v-if="evidenceList.length"
+          class="ai-output-block"
+        >
           <h4>违规清单（{{ evidenceList.length }} 条，已定责）</h4>
           <ol class="ev-list">
-            <li v-for="(ev, i) in evidenceList" :key="`e-${i}`">
-              <el-tag size="small" class="ev-cat">{{ ev.category }}</el-tag>
+            <li
+              v-for="(ev, i) in evidenceList"
+              :key="`e-${i}`"
+            >
+              <el-tag
+                size="small"
+                class="ev-cat"
+              >
+                {{ ev.category }}
+              </el-tag>
               <strong class="ev-name">{{ ev.name }}</strong>
               <span class="ev-summary">{{ ev.summary }}</span>
             </li>
@@ -499,10 +635,19 @@ onUnmounted(() => { stopPolling() })
         </div>
 
         <!-- 应答草稿 -->
-        <div v-if="detail.response_draft" class="ai-output-block">
+        <div
+          v-if="detail.response_draft"
+          class="ai-output-block"
+        >
           <h4>
             应答草稿
-            <el-button size="small" class="copy-btn" @click="copyDraft">复制草稿</el-button>
+            <el-button
+              size="small"
+              class="copy-btn"
+              @click="copyDraft"
+            >
+              复制草稿
+            </el-button>
           </h4>
           <pre class="draft-pre">{{ detail.response_draft }}</pre>
         </div>
@@ -537,7 +682,11 @@ onUnmounted(() => { stopPolling() })
             >
               触发研判
             </el-button>
-            <el-button :loading="judgeLoading" :disabled="detail.task_status === 'judging'" @click="handleRejudge">
+            <el-button
+              :loading="judgeLoading"
+              :disabled="detail.task_status === 'judging'"
+              @click="handleRejudge"
+            >
               重新研判
             </el-button>
           </div>
@@ -550,10 +699,20 @@ onUnmounted(() => { stopPolling() })
           class="op-block"
           :class="{ 'op-focus': focusTarget === 'disposition' }"
         >
-          <el-divider content-position="left">定责确认</el-divider>
-          <el-form :model="dispositionForm" label-width="100px" inline>
+          <el-divider content-position="left">
+            定责确认
+          </el-divider>
+          <el-form
+            :model="dispositionForm"
+            label-width="100px"
+            inline
+          >
             <el-form-item label="定责类型">
-              <el-select v-model="dispositionForm.verdict" placeholder="请选择" style="width: 220px">
+              <el-select
+                v-model="dispositionForm.verdict"
+                placeholder="请选择"
+                style="width: 220px"
+              >
                 <el-option
                   v-for="opt in ESTABLISHMENT_OPTIONS"
                   :key="opt.value"
@@ -563,10 +722,20 @@ onUnmounted(() => { stopPolling() })
               </el-select>
             </el-form-item>
             <el-form-item label="改判原因">
-              <el-input v-model="dispositionForm.reason" placeholder="AI 不一致时必填" style="width: 280px" />
+              <el-input
+                v-model="dispositionForm.reason"
+                placeholder="AI 不一致时必填"
+                style="width: 280px"
+              />
             </el-form-item>
             <el-form-item>
-              <el-button type="primary" :loading="dispositionLoading" @click="handleDisposition">提交定责</el-button>
+              <el-button
+                type="primary"
+                :loading="dispositionLoading"
+                @click="handleDisposition"
+              >
+                提交定责
+              </el-button>
             </el-form-item>
           </el-form>
         </div>
@@ -578,22 +747,56 @@ onUnmounted(() => { stopPolling() })
           class="op-block"
           :class="{ 'op-focus': focusTarget === 'review' }"
         >
-          <el-divider content-position="left">人工复核</el-divider>
-        <el-form :model="reviewForm" label-width="100px" inline>
-          <el-form-item label="复核动作">
-            <el-select v-model="reviewForm.action" placeholder="请选择" style="width: 220px">
-              <el-option label="approve（通过）" value="approve" />
-              <el-option label="modify_verdict（改判）" value="modify_verdict" />
-              <el-option label="modify_response（改回应）" value="modify_response" />
-              <el-option label="reject_rejudge（驳回重研判）" value="reject_rejudge" />
-              <el-option label="add_evidence（补充证据）" value="add_evidence" />
-              <el-option label="escalate（升级）" value="escalate" />
-            </el-select>
-          </el-form-item>
-          <el-form-item>
-            <el-button type="primary" :loading="reviewLoading" @click="handleReview">提交复核</el-button>
-          </el-form-item>
-        </el-form>
+          <el-divider content-position="left">
+            人工复核
+          </el-divider>
+          <el-form
+            :model="reviewForm"
+            label-width="100px"
+            inline
+          >
+            <el-form-item label="复核动作">
+              <el-select
+                v-model="reviewForm.action"
+                placeholder="请选择"
+                style="width: 220px"
+              >
+                <el-option
+                  label="approve（通过）"
+                  value="approve"
+                />
+                <el-option
+                  label="modify_verdict（改判）"
+                  value="modify_verdict"
+                />
+                <el-option
+                  label="modify_response（改回应）"
+                  value="modify_response"
+                />
+                <el-option
+                  label="reject_rejudge（驳回重研判）"
+                  value="reject_rejudge"
+                />
+                <el-option
+                  label="add_evidence（补充证据）"
+                  value="add_evidence"
+                />
+                <el-option
+                  label="escalate（升级）"
+                  value="escalate"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item>
+              <el-button
+                type="primary"
+                :loading="reviewLoading"
+                @click="handleReview"
+              >
+                提交复核
+              </el-button>
+            </el-form-item>
+          </el-form>
         </div>
 
         <!-- 回电与关单：回电仅 pending_callback，关单仅 resolved -->
@@ -603,12 +806,23 @@ onUnmounted(() => { stopPolling() })
           class="op-block"
           :class="{ 'op-focus': focusTarget === 'callback' }"
         >
-          <el-divider content-position="left">回电与关单</el-divider>
+          <el-divider content-position="left">
+            回电与关单
+          </el-divider>
           <div class="operation-row">
-            <el-button v-if="canCallback" :loading="callbackLoading" @click="handleCallback">
+            <el-button
+              v-if="canCallback"
+              :loading="callbackLoading"
+              @click="handleCallback"
+            >
               回电登记
             </el-button>
-            <el-button v-if="canClose" type="danger" :loading="closeLoading" @click="handleClose">
+            <el-button
+              v-if="canClose"
+              type="danger"
+              :loading="closeLoading"
+              @click="handleClose"
+            >
               关单
             </el-button>
           </div>
@@ -624,19 +838,52 @@ onUnmounted(() => { stopPolling() })
 
       <!-- Tab 组：证据包/草稿在标签上带条目提示，避免"看不到内容"的误判 -->
       <section class="detail-tabs">
-        <el-tabs v-model="activeTab" @tab-change="onTabChange">
-          <el-tab-pane :label="`证据包 (${(detail.ordered_evidence ?? []).length})`" name="evidence">
-            <EvidencePanel :evidence="detail.ordered_evidence ?? []" :refs="detail.evidence_refs ?? []" />
+        <el-tabs
+          v-model="activeTab"
+          @tab-change="onTabChange"
+        >
+          <el-tab-pane
+            :label="`证据包 (${(detail.ordered_evidence ?? []).length})`"
+            name="evidence"
+          >
+            <EvidencePanel
+              :evidence="detail.ordered_evidence ?? []"
+              :refs="detail.evidence_refs ?? []"
+            />
           </el-tab-pane>
-          <el-tab-pane label="Trace 时间线" name="trace">
-            <el-skeleton v-if="traceLoading" :rows="3" animated />
-            <TraceTimeline v-else :events="traceEvents" />
+          <el-tab-pane
+            label="Trace 时间线"
+            name="trace"
+          >
+            <el-skeleton
+              v-if="traceLoading"
+              :rows="3"
+              animated
+            />
+            <TraceTimeline
+              v-else
+              :events="traceEvents"
+              :langsmith-url="traceLangsmithUrl"
+            />
           </el-tab-pane>
-          <el-tab-pane label="Agent 日志" name="agent-logs">
-            <el-skeleton v-if="agentLogsLoading" :rows="3" animated />
-            <AgentLogs v-else :logs="agentLogItems" />
+          <el-tab-pane
+            label="Agent 日志"
+            name="agent-logs"
+          >
+            <el-skeleton
+              v-if="agentLogsLoading"
+              :rows="3"
+              animated
+            />
+            <AgentLogs
+              v-else
+              :logs="agentLogItems"
+            />
           </el-tab-pane>
-          <el-tab-pane :label="detail.response_draft ? '响应草稿 ✓' : '响应草稿'" name="draft">
+          <el-tab-pane
+            :label="detail.response_draft ? '响应草稿 ✓' : '响应草稿'"
+            name="draft"
+          >
             <DraftPanel :draft="detail.response_draft" />
           </el-tab-pane>
         </el-tabs>
@@ -651,6 +898,8 @@ onUnmounted(() => { stopPolling() })
 .complaint-meta { display: flex; align-items: center; gap: 12px; }
 .complaint-id { font-weight: 600; font-family: monospace; }
 .polling-indicator { color: #67c23a; font-size: 12px; }
+.thread-id { display: inline-flex; align-items: center; gap: 4px; color: #909399; font-size: 12px; }
+.demo-badge { margin-top: 8px; }
 .complaint-text { background: #f5f7fa; padding: 12px; border-radius: 4px; margin: 0; line-height: 1.6; }
 .step-bar { padding: 16px 0; overflow-x: auto; }
 h3 { margin: 0 0 12px; font-size: 16px; color: #303133; }

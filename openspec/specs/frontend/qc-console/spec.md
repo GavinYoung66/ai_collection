@@ -114,9 +114,13 @@
 - **WHEN** 记录 qc_status 为 REVIEWED
 - **THEN** 全部人审按钮禁用
 
-#### Scenario: admin 人审置灰
-- **WHEN** admin 打开有扣分记录的详情页
-- **THEN** 人审按钮组置灰并提示「仅 qc_reviewer/supervisor 可复核」，不发起请求
+#### Scenario: 非复核角色人审置灰
+- **WHEN** agent 或 ai_trainer 打开有扣分记录的详情页
+- **THEN** 人审按钮组置灰并提示「仅 admin/qc_reviewer/supervisor 可复核」，不发起请求
+
+#### Scenario: admin 可人审
+- **WHEN** admin 打开有扣分记录（qc_status 非 REVIEWED）的详情页
+- **THEN** 人审按钮可用，提交后调用 `POST /api/v1/qc/reviews/{qc_record_id}`
 
 ### Requirement: 规则管理必须为只读展示加热应用
 规则页 MUST 展示生效规则列表（GET rules/active，R01~R14）；MUST NOT 提供规则编辑/新增/删除；规则热应用（POST rules/apply）MUST 二次确认后发起。

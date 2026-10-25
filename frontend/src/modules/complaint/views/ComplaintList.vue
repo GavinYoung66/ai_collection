@@ -13,10 +13,10 @@
  * - 运行模式切换入口已下线（灰度运维能力，普通使用者易误解为 AI Agent 模式）；后端接口保留
  */
 <script setup lang="ts">
-import { ref, onMounted, onActivated, computed } from 'vue'
+import { ref } from 'vue'
 import { useRouter } from 'vue-router'
-import PageTable from '@/shared/components/base/PageTable.vue'
-import type { Column } from '@/shared/components/base/PageTable.vue'
+import { PageTable, useAsyncTask, useTableQuery } from '@/shared'
+import type { Column } from '@/shared'
 import {
   listComplaints,
   createComplaint,
@@ -28,7 +28,6 @@ import type {
   ComplaintListItem,
   TaskStatus,
   ComplaintCreateRequest,
-  StatsResponse,
 } from '../types'
 import { VERDICT_LABELS, STATUS_LABELS } from '../types'
 import type { VerdictType } from '../types'
@@ -48,80 +47,49 @@ defineOptions({ name: 'ComplaintList' })
 // 在 script setup 里赋值给变量（define 能替换），template 引用这个变量
 const isDev = import.meta.env.DEV
 
-const loading = ref(false)
-const error = ref<Error | null>(null)
-const rows = ref<ComplaintListItem[]>([])
-const total = ref(0)
-const page = ref(1)
-const pageSize = ref(20)
+// 列表三态 / 分页 / 筛选统一由 shared 维护（SSOT §19.4）
+const {
+  rows,
+  total,
+  page,
+  pageSize,
+  query,
+  loading,
+  error,
+  reload: fetchList,
+  setPage: onPageChange,
+  setPageSize: onPageSizeChange,
+} = useTableQuery<ComplaintListItem, { status: TaskStatus | '' }>({
+  fetcher: (q, p, ps) =>
+    listComplaints({
+      page: p,
+      page_size: ps,
+      task_status: q.status ? [q.status] : undefined,
+    }),
+  initialQuery: { status: '' },
+  pageSize: 20,
+  refetchOnActivated: true,
+})
 
-// 状态筛选（单选；复核工作台已改为独立分栏页，不再复用本组件锁定筛选）
-const statusFilter = ref<TaskStatus | ''>('')
-const effectiveStatusParams = computed<TaskStatus[] | undefined>(() =>
-  statusFilter.value ? [statusFilter.value] : undefined,
-)
+// 统计区：单次异步任务，三态同样由 shared 维护（SSOT §19.4）
+const {
+  data: stats,
+  loading: statsLoading,
+  error: statsError,
+  run: fetchStats,
+} = useAsyncTask(getComplaintStats, { refetchOnActivated: true })
 
 // 建单弹窗状态
 const createDialogOpen = ref(false)
 const createSubmitting = ref(false)
 const createForm = ref<ComplaintCreateRequest>({ complaint_text: '' })
 
-// ── 4.1 统计区状态 ──
-const stats = ref<StatsResponse | null>(null)
-const statsLoading = ref(false)
-const statsError = ref<Error | null>(null)
-
 /** VerdictType → 中文标签映射统一由 types.ts 提供（VERDICT_LABELS） */
 
-// ── 请求 ──
-async function fetchList() {
-  loading.value = true
-  error.value = null
-  try {
-    const res = await listComplaints({
-      page: page.value,
-      page_size: pageSize.value,
-      task_status: effectiveStatusParams.value,
-    })
-    rows.value = res.items
-    total.value = res.total
-  } catch (e) {
-    error.value = e instanceof Error ? e : new Error(String(e))
-  } finally {
-    loading.value = false
-  }
-}
-
-/** 4.1 拉统计——onMounted 时调用，后端字段逐字呈现，不自行聚合 */
-async function fetchStats() {
-  statsLoading.value = true
-  statsError.value = null
-  try {
-    stats.value = await getComplaintStats()
-  } catch (e) {
-    statsError.value = e instanceof Error ? e : new Error(String(e))
-  } finally {
-    statsLoading.value = false
-  }
-}
-
-// ── 生命周期：列表 + 统计各拉一次（keepAlive 双实例各自刷新）──
-onMounted(() => { fetchList(); fetchStats() })
-onActivated(() => { fetchList(); fetchStats() })
-
 // ── 事件处理 ──
-function onPageChange(p: number) {
-  page.value = p
-  fetchList()
-}
-function onPageSizeChange(s: number) {
-  pageSize.value = s
-  page.value = 1
-  fetchList()
-}
 function onRetry() {
-  fetchList()
-  fetchStats()
+  void fetchList()
+  void fetchStats()
 }
 async function submitCreate() {
   if (!createForm.value.complaint_text.trim()) return
@@ -130,20 +98,20 @@ async function submitCreate() {
     await createComplaint(createForm.value)
     createDialogOpen.value = false
     createForm.value.complaint_text = ''
-    fetchList()
-    fetchStats() // 建单后统计也刷新
+    void fetchList()
+    void fetchStats() // 建单后统计也刷新
   } finally {
     createSubmitting.value = false
   }
 }
 async function seedDemo() {
   await seedDemoComplaints()
-  fetchList()
-  fetchStats()
+  void fetchList()
+  void fetchStats()
 }
 async function viewEvents() {
   await listComplaintEvents()
-  fetchList()
+  void fetchList()
 }
 
 /** 行内入口跳转：带 focus 锚点，详情页据此定位并高亮对应操作区块 */
@@ -170,10 +138,9 @@ const columns: Column<ComplaintListItem>[] = [
       <div class="cl-tools">
         <!-- 状态筛选 -->
         <select
-          v-model="statusFilter"
+          v-model="query.status"
           class="cl-filter"
           aria-label="状态筛选"
-          @change="fetchList"
         >
           <option value="">
             全部状态
@@ -220,33 +187,85 @@ const columns: Column<ComplaintListItem>[] = [
     </div>
 
     <!-- 4.1 统计卡片区（PageTable 上方） -->
-    <section class="cl-stats" aria-label="统计概览">
-      <div v-if="statsLoading" class="cl-stats-loading">加载统计中…</div>
-      <div v-else-if="statsError" class="cl-stats-error">
+    <section
+      class="cl-stats"
+      aria-label="统计概览"
+    >
+      <div
+        v-if="statsLoading"
+        class="cl-stats-loading"
+      >
+        加载统计中…
+      </div>
+      <div
+        v-else-if="statsError"
+        class="cl-stats-error"
+      >
         统计加载失败：{{ statsError.message }}
-        <button type="button" class="cl-btn" @click="fetchStats">重试</button>
+        <button
+          type="button"
+          class="cl-btn"
+          @click="fetchStats"
+        >
+          重试
+        </button>
       </div>
       <template v-else-if="stats">
         <div class="cl-stats-row">
-          <div class="cl-stat-card" data-stat="total">
-            <div class="cl-stat-label">工单总数</div>
-            <div class="cl-stat-value">{{ stats.total }}</div>
+          <div
+            class="cl-stat-card"
+            data-stat="total"
+          >
+            <div class="cl-stat-label">
+              工单总数
+            </div>
+            <div class="cl-stat-value">
+              {{ stats.total }}
+            </div>
           </div>
-          <div class="cl-stat-card" data-stat="avg_processing_minutes">
-            <div class="cl-stat-label">平均处理时长（分钟）</div>
-            <div class="cl-stat-value">{{ stats.avg_processing_minutes }}</div>
+          <div
+            class="cl-stat-card"
+            data-stat="avg_processing_minutes"
+          >
+            <div class="cl-stat-label">
+              平均处理时长（分钟）
+            </div>
+            <div class="cl-stat-value">
+              {{ stats.avg_processing_minutes }}
+            </div>
           </div>
-          <div class="cl-stat-card" data-stat="evidence_insufficient_rate">
-            <div class="cl-stat-label">证据不足率</div>
-            <div class="cl-stat-value">{{ (stats.evidence_insufficient_rate * 100).toFixed(1) }}%</div>
+          <div
+            class="cl-stat-card"
+            data-stat="evidence_insufficient_rate"
+          >
+            <div class="cl-stat-label">
+              证据不足率
+            </div>
+            <div class="cl-stat-value">
+              {{ (stats.evidence_insufficient_rate * 100).toFixed(1) }}%
+            </div>
           </div>
-          <div class="cl-stat-card" data-stat="mcp_failure_rate">
-            <div class="cl-stat-label">MCP 调用失败率</div>
-            <div class="cl-stat-value">{{ (stats.mcp_failure_rate * 100).toFixed(1) }}%</div>
+          <div
+            class="cl-stat-card"
+            data-stat="mcp_failure_rate"
+          >
+            <div class="cl-stat-label">
+              MCP 调用失败率
+            </div>
+            <div class="cl-stat-value">
+              {{ (stats.mcp_failure_rate * 100).toFixed(1) }}%
+            </div>
           </div>
-          <div class="cl-stat-card" data-stat="ai_human_consistency_rate">
-            <div class="cl-stat-label">AI-人审一致率</div>
-            <div class="cl-stat-value">{{ (stats.ai_human_consistency_rate * 100).toFixed(1) }}%</div>
+          <div
+            class="cl-stat-card"
+            data-stat="ai_human_consistency_rate"
+          >
+            <div class="cl-stat-label">
+              AI-人审一致率
+            </div>
+            <div class="cl-stat-value">
+              {{ (stats.ai_human_consistency_rate * 100).toFixed(1) }}%
+            </div>
           </div>
         </div>
         <div class="cl-stats-by-verdict">
@@ -279,12 +298,18 @@ const columns: Column<ComplaintListItem>[] = [
       @retry="onRetry"
     >
       <template #table-head-extra>
-        <th class="pt-th" style="width: 160px">
+        <th
+          class="pt-th"
+          style="width: 160px"
+        >
           操作
         </th>
       </template>
       <template #table-row-extra="{ row }">
-        <td class="pt-td" style="width: 160px">
+        <td
+          class="pt-td"
+          style="width: 160px"
+        >
           <div style="display: flex; gap: 8px">
             <!-- 主入口：研判（进详情并定位到研判操作区） -->
             <button

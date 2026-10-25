@@ -1,4 +1,4 @@
-"""qc-service 演示时间线 GET /api/v1/qc/demo/{session_id}/trace，以及 CORS。"""
+"""qc-service 演示时间线 GET /api/v1/qc/demo/{session_id}/trace。"""
 from __future__ import annotations
 
 from uuid import UUID
@@ -11,8 +11,6 @@ from tests.test_job_store import MemoryRedis
 from tests.test_replay_api import ApiFakeSession, ENVELOPE_KEYS, FakeDp, FakeQualityRepo
 
 _TRACE = "/api/v1/qc/demo/{session_id}/trace"
-_PENDING = "/api/v1/qc/demo/pending"
-_ORIGIN_8080 = "http://localhost:8080"
 
 
 def _trace_client():
@@ -116,26 +114,3 @@ class TestDemoTrace:
         assert "110101" not in blob
         assert redis.ttl.get(trace_events_key(sid)) == TRACE_TTL_SECONDS
 
-
-class TestDemoCors:
-    def teardown_method(self):
-        _cleanup()
-
-    def test_origin_8080_allowed_on_pending(self):
-        client, *_rest = _trace_client()
-        resp = client.get(_PENDING, headers={"Origin": _ORIGIN_8080})
-        assert resp.status_code == 200
-        assert resp.json()["code"] == "0"
-        assert resp.headers.get("access-control-allow-origin") == _ORIGIN_8080
-
-    def test_origin_8080_preflight_allowed(self):
-        client, *_rest = _trace_client()
-        resp = client.options(
-            _PENDING,
-            headers={
-                "Origin": _ORIGIN_8080,
-                "Access-Control-Request-Method": "GET",
-            },
-        )
-        assert resp.status_code in {200, 204}
-        assert resp.headers.get("access-control-allow-origin") == _ORIGIN_8080

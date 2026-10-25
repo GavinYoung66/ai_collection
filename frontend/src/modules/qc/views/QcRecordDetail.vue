@@ -14,7 +14,7 @@
  * - trace 时间线取 demo/{session_id}/trace（模块内自建 TraceTimeline，design D4），
  *   仅当响应含 langsmith_url 时显示外链；
  * - 内嵌人审按钮组 ReviewActions（CONFIRM/CORRECT 完整逻辑，批次5 QcReview 复用）；
- *   当前角色 ∉ {qc_reviewer, supervisor} 时置灰 + 说明（角色经 useCurrentRole inject 桥取）；
+ *   当前角色 ∉ {admin, qc_reviewer, supervisor} 时置灰 + 说明（角色经 useCurrentRole inject 桥取）；
  * - trace 上下文：挂载写入、卸载清空（useQcTraceContext，design D5），业务代码不手写 X-Trace-Id；
  * - B0004/A2005 → 空态 + 返回列表（§15.1 白名单动作）。
  */
@@ -22,7 +22,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { RequestError } from '@/shared/request'
-import TraceIdText from '@/shared/components/base/TraceIdText.vue'
+import { TraceIdText } from '@/shared'
 import { getQcDemoTrace, getQcRecord } from '../api'
 import type {
   QcHit,

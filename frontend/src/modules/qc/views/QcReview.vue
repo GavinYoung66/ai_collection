@@ -6,14 +6,13 @@
  * - 待复核队列 GET reviews/pending（review.py:40-60，分页 page 从 1、page_size 默认 20）；
  * - 行内嵌人审操作组 ReviewActions（与详情页共用同一组件，props 传入行数据），
  *   零扣分不渲染提交按钮、CONFIRM 直提、CORRECT 必填 revised_deduction、REVIEWED 禁用、
- *   角色 ∉ {qc_reviewer, supervisor} 置灰（组件内自行判定，本页不重复实现）；
+ *   角色 ∉ {admin, qc_reviewer, supervisor} 置灰（组件内自行判定，本页不重复实现）；
  * - 复核提交成功（submitted）后刷新队列；行内提供「查看详情」跳 /qc/records/:sessionId；
  * - keepAlive：onMounted 拉一次，onActivated 刷新（首个 activated 与 mounted 同序，标志位去重）。
  */
-import { onActivated, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import PageTable from '@/shared/components/base/PageTable.vue'
-import type { Column } from '@/shared/components/base/PageTable.vue'
+import { PageTable, useTableQuery } from '@/shared'
+import type { Column } from '@/shared'
 import { listQcReviewsPending } from '../api'
 import type { QcReviewPendingItem, QcResult, QcRiskLevel, QcStatus } from '../types'
 import ReviewActions from '../components/ReviewActions.vue'
@@ -40,51 +39,24 @@ const RISK_LABELS: Record<QcRiskLevel, string> = {
   high: '高',
 }
 
-// ── 列表状态 ──
-const rows = ref<QcReviewPendingItem[]>([])
-const total = ref(0)
-const page = ref(1)
-const pageSize = ref(20)
-const loading = ref(false)
-const error = ref<Error | null>(null)
-
-async function fetchQueue(): Promise<void> {
-  loading.value = true
-  error.value = null
-  try {
-    const res = await listQcReviewsPending({ page: page.value, page_size: pageSize.value })
-    rows.value = res.items
-    total.value = res.total
-  } catch (e) {
-    error.value = e instanceof Error ? e : new Error(String(e))
-  } finally {
-    loading.value = false
-  }
-}
-
-// keepAlive 语义：首个 activated 与 mounted 同序触发，标志位去重（同 QcRecordList 先例）
-let skipNextActivated = false
-onMounted(() => {
-  skipNextActivated = true
-  void fetchQueue()
-})
-onActivated(() => {
-  if (skipNextActivated) {
-    skipNextActivated = false
-    return
-  }
-  void fetchQueue()
+// ── 列表三态 / 分页统一由 shared 维护（SSOT §19.4）──
+const {
+  rows,
+  total,
+  page,
+  pageSize,
+  loading,
+  error,
+  reload: fetchQueue,
+  setPage: onPageChange,
+  setPageSize: onPageSizeChange,
+} = useTableQuery<QcReviewPendingItem, Record<string, never>>({
+  fetcher: (_q, p, ps) => listQcReviewsPending({ page: p, page_size: ps }),
+  initialQuery: {},
+  pageSize: 20,
+  refetchOnActivated: true,
 })
 
-function onPageChange(p: number): void {
-  page.value = p
-  void fetchQueue()
-}
-function onPageSizeChange(s: number): void {
-  pageSize.value = s
-  page.value = 1
-  void fetchQueue()
-}
 function onRetry(): void {
   void fetchQueue()
 }

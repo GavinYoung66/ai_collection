@@ -146,7 +146,7 @@ bash scripts/smoke/smoke_rag_v2.sh
 | `KB_EXCEL_SHEET_ALL`       | `true`         | Excel 全部 sheet 入库（`false`=仅首个 sheet）                                                   |
 | `KB_EXCEL_HEADER_ROW`      | `1`            | Excel 表头行号（首行=表头，行切块列名前缀）                                                     |
 | `KB_ASR_AMR_WMA_ENABLED`   | `false`        | `true` AMR/WMA ffmpeg 解码 → 复用 VAD/ASR 转写（关闭=白名单外 A3001，V4 行为）                  |
-| `KB_ASSETS_DIR`            | `data/assets/` | 内嵌资产本地存储目录（Docker 挂载 volume，与 Gradio 共享预览源）                                |
+| `KB_ASSETS_DIR`            | `data/assets/` | 内嵌资产本地存储目录（Docker 挂载 volume）                                                      |
 | `KB_ASSETS_MAX_SIZE`       | `1024`         | 图片渲染最大边长（px，等比缩放）                                                                |
 | `KB_DOC_CHUNK_KEEP`        | `5`            | RRF 后同 doc_id 保留 chunk 数上限；实际保留 N = min(请求 top_k, keep)                           |
 
@@ -224,47 +224,9 @@ export KB_ASR_OPENING_TRIM_ENABLED=false
 1. **reindex 后 ES 摘要副本丢失**：`PUT /kb/documents/{doc_id}/reindex` 走"删除旧分块 → 重建分块"路径，不会重写 `doc_summary`，导致 ES 侧摘要副本被清空、PG 侧 `kb_documents.summary` 保留（出现"PG 有、ES 无"）。影响面：仅开关开启时该文档在 ES 路的摘要加权召回弱化；响应 `results[].summary` 始终从 PG 返回，不产生错误数据。恢复方式：对目标文档重新调用 `PUT /kb/documents/{doc_id}/summary` 补全，或对全库重跑 `scripts/rag/reindex_es_v4.py`。
 2. **降级入库路径丢弃携带摘要**：入库链路触发降级（embedding 不可用且 `KB_EMBED_DEGRADED_KEEP_TEXT` 开启 / ES 写入失败且 `KB_ES_DEGRADED_KEEP_MILVUS` 开启）时提前返回，携带的 `summary` 被静默丢弃且不记 drop 告警。影响面：仅降级场景下该摘要不生效，正文入库与 degraded 语义不受影响；恢复方式：对目标文档调用 `PUT .../summary` 补全。
 
-## §E V5 Gradio 浏览器前端（独立 compose 服务）
+## §F V5 冒烟测试指引（11 步全链路）
 
-> 来源：`openspec/changes/rag-multimodal-kb-v5/design.md`（D10）与 delta spec `gradio-frontend`。
-
-### 功能说明
-
-- 提供**浏览器可视化入口**（独立进程，端口 7860，**仅内部网络，不映射公网**）：上传页 + 问答页。
-- **上传页**：`gr.File`（14 种扩展名白名单 txt/md/pdf/docx/xlsx/pptx/png/jpg/jpeg/mp3/wav/m4a/amr/wma）+ 分类下拉 → 调 `POST /api/v1/kb/documents`（multipart），成功展示 doc_id/status/chunks_count；失败 `gr.Error` 友好提示（错误码/原因），不白屏、不裸 500。
-- **问答页**：问题 + top_k + "生成回答"复选 → 调 `POST /api/v1/kb/search`（复选时传 `answer=true`，后端门控 `KB_LLM_ANSWER_ENABLED` 内部判定）→ 渲染"问题 → 召回 chunk（content/score/source/页码 + 图片 `gr.Image` 预览 + 表格 `gr.Dataframe` 预览）→ LLM 回答（`answer` 有值展示，无值展示"回答暂不可用"提示）"。
-- **预览链路**：Gradio 与 rag-service **共享挂载 `KB_ASSETS_DIR` 数据卷**（compose 卷 `rag_assets`）——图片按 `kb_doc_assets.storage_path` 相对路径读取渲染，表格按 storage_path 指向的 `content_json`（`{"headers","rows"}`）渲染；**不新增后端静态端点、不改动既有 API**。
-- **鉴权**：Gradio 调用 `/kb/*` 时携带 `Authorization: Bearer {RAG_API_TOKEN}`（env 注入，生产由运维配置，**不硬编码进镜像/代码**）；未配置 token 时页面提示"未配置访问凭证"，不发起调用。
-- 所有后端调用 try/except + 超时（30s，connect 5s），后端宕机展示友好提示、不卡死。
-
-### 启动方式（docker compose）
-
-```bash
-# 1) 注入内部访问 token（生产由运维提供 ADMIN/SUPERVISOR 角色的 JWT；开发可用内部直连 token）
-export RAG_API_TOKEN=<your-internal-token>
-# 2) 启动（gradio 依赖 rag-service healthy 后启动；rag-service/gradio 共享 rag_assets 卷）
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d gradio
-```
-
-### 页面地址与访问约束
-
-| 项       | 值                                                                    |
-| -------- | --------------------------------------------------------------------- |
-| 页面地址 | `http://<host>:7860/`（本地 `http://localhost:7860/`）                |
-| 上传接口 | 复用 `POST /api/v1/kb/documents`（不变）                              |
-| 检索接口 | 复用 `POST /api/v1/kb/search`（不变）                                 |
-| 网络约束 | 仅内部网络（compose 内部 DNS + 宿主机端口），**不映射公网**           |
-| 健康检查 | `curl -s -o /dev/null -w "%{http_code}" http://localhost:7860/` = 200 |
-
-### RAG_API_TOKEN 配置说明
-
-- 由 compose 环境注入 `RAG_API_TOKEN`（`docker-compose.yml` 使用 `${RAG_API_TOKEN:?must set internal token}` 强制必填）；Gradio 代码仅从 env 读取，**不落盘、不硬编码**。
-- token 语义为后端既有 JWT 鉴权（上传需 ADMIN/SUPERVISOR 角色；检索接口权限 ALL）。未配置时页面提示"后端服务暂不可用：未配置访问凭证（RAG_API_TOKEN）"。
-- 开发环境内部网络直连时可注入任意内部 token 绕过（仍走后端既有鉴权校验）。
-
-## §F V5 冒烟测试指引（12 步全链路）
-
-V5 冒烟脚本位于 `scripts/smoke/smoke_rag_v5.sh`，覆盖 12 步全链路（含 Gradio 页面检查）：
+V5 冒烟脚本位于 `scripts/smoke/smoke_rag_v5.sh`，覆盖 11 步全链路：
 
 |  #  | 步骤                           | 预期结果                                                                                      | 依赖/放行                                                                      |
 | :-: | :----------------------------- | :-------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------- |
@@ -279,7 +241,6 @@ V5 冒烟脚本位于 `scripts/smoke/smoke_rag_v5.sh`，覆盖 12 步全链路�
 |  9  | 检索 `answer=true`（开关开启） | `answer` 带溯源回答；无 LLM 环境 `answer=null+degraded=true` 降级正确                         | `KB_LLM_ANSWER_ENABLED` + Provider                                             |
 | 10  | 检索 `answer=true`（开关关闭） | 响应与 V4 完全一致：`answer=null` + `degraded=false`（零 LLM 调用），V5 契约字段恒存在        | 默认部署（开关全 false）                                                       |
 | 11  | 删除含资产文档                 | `kb_doc_assets` 计数 0 + 本地资产目录清理                                                     | `docker exec postgres` / `rag-service` 容器；不可用 WARN                       |
-| 12  | Gradio 页面可达性              | `GET http://localhost:7860/` = 200                                                            | gradio 服务 + `RAG_API_TOKEN`；不可达 WARN                                     |
 
 ### 运行方式
 

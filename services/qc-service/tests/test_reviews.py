@@ -283,6 +283,25 @@ class TestReviewHttp:
 
     def test_wrong_role_is_403_b0003(self):
         client = _client(FakeReviewRepo())
-        resp = client.get("/api/v1/qc/reviews/pending", headers=_token("ADMIN"))
+        resp = client.get("/api/v1/qc/reviews/pending", headers=_token("AGENT"))
         assert resp.status_code == 403
         assert resp.json()["code"] == "B0003"
+
+    def test_admin_can_list_pending_and_submit_review(self, _mock_event_bus):
+        """admin 具备最高权限：待复核队列与提交复核均放行。"""
+        repo = FakeReviewRepo()
+        row = _record(qc_status="PENDING_REVIEW")
+        repo.add(row)
+        client = _client(repo)
+
+        listed = client.get("/api/v1/qc/reviews/pending", headers=_token("admin"))
+        assert listed.status_code == 200
+        assert listed.json()["data"]["total"] == 1
+
+        submitted = client.post(
+            f"/api/v1/qc/reviews/{row.id}",
+            headers=_token("admin"),
+            json={"action": "CONFIRM"},
+        )
+        assert submitted.status_code == 200
+        assert submitted.json()["data"]["qc_status"] == "REVIEWED"

@@ -15,6 +15,7 @@
  */
 import { computed, onActivated, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { AsyncState } from '@/shared'
 import { applyQcRules, getQcRulesActive } from '../api'
 import type { QcRulesActiveResponse } from '../types'
 
@@ -137,131 +138,117 @@ async function onApply(): Promise<void> {
       </button>
     </header>
 
-    <!-- 加载态 -->
-    <div
-      v-if="loading"
-      class="qru-skeleton"
+    <!-- 三态统一由 shared AsyncState 承载（SSOT §19.7）；错误前缀保持原文案 -->
+    <AsyncState
+      :loading="loading"
+      :error="error"
+      error-prefix="规则加载失败："
+      @retry="fetchActive"
     >
-      加载中…
-    </div>
+      <template #default>
+        <template v-if="active">
+          <!-- 版本信息（只读，响应字段透传） -->
+          <section class="qru-section">
+            <h3>生效版本</h3>
+            <dl class="qru-kv">
+              <div class="qru-kv-item">
+                <dt>版本号</dt>
+                <dd><code>{{ active.version }}</code></dd>
+              </div>
+              <div class="qru-kv-item">
+                <dt>状态</dt>
+                <dd>{{ active.status }}</dd>
+              </div>
+              <div class="qru-kv-item">
+                <dt>生效时间</dt>
+                <dd>{{ active.effective_at ?? '—' }}</dd>
+              </div>
+              <div class="qru-kv-item">
+                <dt>同词窗口（ms）</dt>
+                <dd>{{ active.same_word_window_ms ?? '—' }}</dd>
+              </div>
+            </dl>
+          </section>
 
-    <!-- 错误态（含 A2009 无生效版本）：message 直出 + 重试 -->
-    <div
-      v-else-if="error"
-      class="qru-error"
-      role="alert"
-    >
-      <span>规则加载失败：{{ error.message }}</span>
-      <button
-        type="button"
-        class="qru-btn"
-        @click="fetchActive"
-      >
-        重试
-      </button>
-    </div>
+          <!-- 扣分档位（penalty：severity → points，透传） -->
+          <section class="qru-section">
+            <h3>扣分档位</h3>
+            <table class="qru-table qru-penalty">
+              <thead>
+                <tr>
+                  <th>严重度</th>
+                  <th>扣分</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="row in penaltyRows"
+                  :key="row.severity"
+                >
+                  <td><code>{{ row.severity }}</code></td>
+                  <td>-{{ row.points }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
 
-    <template v-else-if="active">
-      <!-- 版本信息（只读，响应字段透传） -->
-      <section class="qru-section">
-        <h3>生效版本</h3>
-        <dl class="qru-kv">
-          <div class="qru-kv-item">
-            <dt>版本号</dt>
-            <dd><code>{{ active.version }}</code></dd>
-          </div>
-          <div class="qru-kv-item">
-            <dt>状态</dt>
-            <dd>{{ active.status }}</dd>
-          </div>
-          <div class="qru-kv-item">
-            <dt>生效时间</dt>
-            <dd>{{ active.effective_at ?? '—' }}</dd>
-          </div>
-          <div class="qru-kv-item">
-            <dt>同词窗口（ms）</dt>
-            <dd>{{ active.same_word_window_ms ?? '—' }}</dd>
-          </div>
-        </dl>
-      </section>
+          <!-- 规则列表（只读：deduction_policy 键即 rule_id，R01~R14；无任何编辑入口） -->
+          <section class="qru-section">
+            <h3>生效规则（{{ ruleRows.length }} 条，只读）</h3>
+            <table class="qru-table qru-rules">
+              <thead>
+                <tr>
+                  <th style="width: 110px">
+                    规则 ID
+                  </th>
+                  <th style="width: 160px">
+                    条款编号
+                  </th>
+                  <th>条款内容</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="row in ruleRows"
+                  :key="row.rule_id"
+                  :data-rule-id="row.rule_id"
+                >
+                  <td><code>{{ row.rule_id }}</code></td>
+                  <td>{{ row.clause_no }}</td>
+                  <td>{{ row.clause_text }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
 
-      <!-- 扣分档位（penalty：severity → points，透传） -->
-      <section class="qru-section">
-        <h3>扣分档位</h3>
-        <table class="qru-table qru-penalty">
-          <thead>
-            <tr>
-              <th>严重度</th>
-              <th>扣分</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="row in penaltyRows"
-              :key="row.severity"
-            >
-              <td><code>{{ row.severity }}</code></td>
-              <td>-{{ row.points }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-
-      <!-- 规则列表（只读：deduction_policy 键即 rule_id，R01~R14；无任何编辑入口） -->
-      <section class="qru-section">
-        <h3>生效规则（{{ ruleRows.length }} 条，只读）</h3>
-        <table class="qru-table qru-rules">
-          <thead>
-            <tr>
-              <th style="width: 110px">
-                规则 ID
-              </th>
-              <th style="width: 160px">
-                条款编号
-              </th>
-              <th>条款内容</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="row in ruleRows"
-              :key="row.rule_id"
-              :data-rule-id="row.rule_id"
-            >
-              <td><code>{{ row.rule_id }}</code></td>
-              <td>{{ row.clause_no }}</td>
-              <td>{{ row.clause_text }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-
-      <!-- 规则热应用：二次确认后发起 -->
-      <section class="qru-section">
-        <h3>规则热应用</h3>
-        <div class="qru-apply">
-          <input
-            v-model="applyVersion"
-            class="qru-input"
-            type="text"
-            placeholder="目标版本号（如 v1.1）"
-            :disabled="applying"
-            aria-label="目标版本号"
-          >
-          <button
-            type="button"
-            class="qru-btn qru-btn--primary"
-            :disabled="applying || !applyVersion.trim()"
-            @click="onApply"
-          >
-            {{ applying ? '应用中…' : '热应用' }}
-          </button>
-        </div>
-        <p class="qru-muted">
-          热应用将原子切换生效规则版本，需二次确认；当前版本：{{ active.version }}。
-        </p>
-      </section>
-    </template>
+          <!-- 规则热应用：二次确认后发起 -->
+          <section class="qru-section">
+            <h3>规则热应用</h3>
+            <div class="qru-apply">
+              <input
+                v-model="applyVersion"
+                class="qru-input"
+                type="text"
+                placeholder="目标版本号（如 v1.1）"
+                :disabled="applying"
+                aria-label="目标版本号"
+              >
+              <button
+                type="button"
+                class="qru-btn qru-btn--primary"
+                :disabled="applying || !applyVersion.trim()"
+                @click="onApply"
+              >
+                {{ applying ? '应用中…' : '热应用' }}
+              </button>
+            </div>
+            <p class="qru-muted">
+              热应用将原子切换生效规则版本，需二次确认；当前版本：{{ active.version }}。
+            </p>
+          </section>
+        </template>
+      </template>
+    </AsyncState>
   </div>
 </template>
 

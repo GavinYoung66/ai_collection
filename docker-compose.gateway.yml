@@ -18,9 +18,6 @@ services:
       - ./deploy/gateway/docker-entrypoint.sh:/docker-entrypoint.sh:ro
       # TLS 证书目录（gen-self-signed.sh 生成）；false 时空目录挂载无害。
       - ./deploy/gateway/tls:/etc/nginx/tls:ro
-      - ./deploy/gateway/www:/usr/share/nginx/html/www:ro
-      - ./services/complaint-service/web:/usr/share/nginx/html/complaint:ro
-      - ./services/qc-service/web:/usr/share/nginx/html/qc:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/gateway/health"]

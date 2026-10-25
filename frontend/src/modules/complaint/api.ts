@@ -87,15 +87,17 @@ export function getComplaint(complaintId: string): Promise<ComplaintDetailRespon
   )
 }
 
-/** 6. 研判触发 POST /api/v1/complaints/{id}/judge（complaints.py:174，长请求 110s） */
+/** 6. 研判触发 POST /api/v1/complaints/{id}/judge（complaints.py:174，长请求 110s）。
+ *  signal 用于页面卸载时取消在途请求（SSOT §14 长任务取消）；不传时 config 与旧版一致。 */
 export function judgeComplaint(
   complaintId: string,
   body: JudgeRequest = {},
+  signal?: AbortSignal,
 ): Promise<JudgeResponse> {
   return http.post<JudgeResponse, JudgeResponse>(
     `/api/v1/complaints/${complaintId}/judge`,
     body,
-    { timeout: TIMEOUT.judge },
+    { timeout: TIMEOUT.judge, ...(signal ? { signal } : {}) },
   )
 }
 

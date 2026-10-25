@@ -11,6 +11,12 @@ interface ImportMetaEnv {
    * 故类型必须是 `string | undefined`，由 request.ts 兜底为 ''。
    */
   readonly VITE_API_BASE?: string
+  /**
+   * 开发态 mock 开关（SSOT §16.1）：仅当 === 'true' 时 mocks/browser.ts
+   * 安装请求拦截（与 main.ts 的 import.meta.env.DEV 门控构成双重门控），
+   * 生产构建不含 mock。
+   */
+  readonly VITE_USE_MOCK?: string
 }
 
 interface ImportMeta {

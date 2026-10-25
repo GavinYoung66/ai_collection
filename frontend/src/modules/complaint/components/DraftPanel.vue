@@ -10,8 +10,14 @@ defineProps<{
 
 <template>
   <div class="draft-panel">
-    <el-empty v-if="!draft" description="响应草稿尚未生成" />
-    <pre v-else class="draft-content">{{ draft }}</pre>
+    <el-empty
+      v-if="!draft"
+      description="响应草稿尚未生成"
+    />
+    <pre
+      v-else
+      class="draft-content"
+    >{{ draft }}</pre>
   </div>
 </template>
 

@@ -2,6 +2,7 @@
 import { computed, provide, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/app/stores/auth'
+import { CURRENT_ROLE_INJECT_KEY } from '@/shared/permissions'
 import {
   ChatDotRound,
   CircleCheck,
@@ -27,9 +28,9 @@ const auth = useAuthStore()
 
 // 按钮级权限桥（f2-qc-console）：向模块组件 provide 当前角色。
 // §7 铁律禁止 modules/ import app/stores/auth，模块侧统一经
-// modules/qc/composables/useCurrentRole.ts 的 useCurrentRole() 按此 key 读取
+// shared/permissions.ts 的 useCurrentRole() 按此 key 读取
 // （如 QC 详情人审按钮组对 admin 置灰，§5.0 F 按钮级 allowlist）。
-provide('app:currentRole', computed(() => auth.role))
+provide(CURRENT_ROLE_INJECT_KEY, computed(() => auth.role))
 
 // 侧边栏折叠状态
 const collapsed = ref(false)
@@ -165,7 +166,10 @@ function handleLogout(): void {
         active-text-color="#ffffff"
         @open="handleSubMenuOpen"
       >
-        <template v-for="group in menuRoutes" :key="group.path">
+        <template
+          v-for="group in menuRoutes"
+          :key="group.path"
+        >
           <!-- 多个可见子级 → el-sub-menu（可折叠）
                index 加 #group 后缀：与子级 el-menu-item 的 index（路由路径）区分，
                否则父级 index=/complaints 与「投诉列表」子项 index=/complaints 冲突（重复 key 警告） -->

@@ -50,6 +50,20 @@ module.exports = {
       to: { path: '^src/mocks/' },
       severity: 'error',
     },
+
+    // 5. modules 只能经 barrel 使用 shared，禁止深链到具体文件（SSOT §19.7）
+    //    例外仅 `shared/request.ts`：api 单测按该路径 vi.mock，走 barrel 会使 mock 失效。
+    //    例外登记在此，属「有意豁免」，不是遗漏——新增豁免必须同步更新前端架构.md §19.7。
+    {
+      name: 'no-modules-deep-import-shared',
+      comment: 'modules/ 只能从 @/shared 导入；唯一例外 @/shared/request（单测 mock 依赖路径）。',
+      from: { path: '^src/modules/' },
+      to: {
+        path: '^src/shared/',
+        pathNot: '^src/shared/(index\\.ts|request\\.ts)$',
+      },
+      severity: 'error',
+    },
   ],
 
   options: {

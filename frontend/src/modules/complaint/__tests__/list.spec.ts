@@ -23,6 +23,9 @@ const apiMocks = vi.hoisted(() => ({
   }),
   seedDemoComplaints: vi.fn().mockResolvedValue({ complaint_ids: [] }),
   listComplaintEvents: vi.fn().mockResolvedValue({ items: [], total: 0 }),
+  getComplaintStats: vi.fn().mockResolvedValue({
+    total: 0, pending: 0, completed: 0, needs_human: 0,
+  }),
 }))
 
 vi.mock('../api', () => ({
@@ -30,6 +33,7 @@ vi.mock('../api', () => ({
   createComplaint: apiMocks.createComplaint,
   seedDemoComplaints: apiMocks.seedDemoComplaints,
   listComplaintEvents: apiMocks.listComplaintEvents,
+  getComplaintStats: apiMocks.getComplaintStats,
 }))
 
 vi.mock('vue-router', () => ({

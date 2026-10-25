@@ -9,10 +9,10 @@
  * - 已确认行（status === 'ACKED'，以后端字段为准）禁用确认按钮；
  * - keepAlive：onMounted 拉一次，onActivated 刷新（首个激活去重，同其他列表页）。
  */
-import { onActivated, onMounted, ref } from 'vue'
+import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import PageTable from '@/shared/components/base/PageTable.vue'
-import type { Column } from '@/shared/components/base/PageTable.vue'
+import { PageTable, useTableQuery } from '@/shared'
+import type { Column } from '@/shared'
 import { ackQcAlert, listQcAlerts } from '../api'
 import type { QcAlertItem, QcAlertStatus } from '../types'
 
@@ -24,54 +24,27 @@ const ALERT_STATUS_LABELS: Record<QcAlertStatus, string> = {
   ACKED: '已确认',
 }
 
-// ── 列表状态 ──
-const rows = ref<QcAlertItem[]>([])
-const total = ref(0)
-const page = ref(1)
-const pageSize = ref(20)
-const loading = ref(false)
-const error = ref<Error | null>(null)
+// ── 列表三态 / 分页统一由 shared 维护（SSOT §19.4）──
+const {
+  rows,
+  total,
+  page,
+  pageSize,
+  loading,
+  error,
+  reload: fetchAlerts,
+  setPage: onPageChange,
+  setPageSize: onPageSizeChange,
+} = useTableQuery<QcAlertItem, Record<string, never>>({
+  fetcher: (_q, p, ps) => listQcAlerts({ page: p, page_size: ps }),
+  initialQuery: {},
+  pageSize: 20,
+  refetchOnActivated: true,
+})
 
 // ── 确认在途集合（防连点）──
 const ackingIds = ref<string[]>([])
 
-async function fetchAlerts(): Promise<void> {
-  loading.value = true
-  error.value = null
-  try {
-    const res = await listQcAlerts({ page: page.value, page_size: pageSize.value })
-    rows.value = res.items
-    total.value = res.total
-  } catch (e) {
-    error.value = e instanceof Error ? e : new Error(String(e))
-  } finally {
-    loading.value = false
-  }
-}
-
-// keepAlive 语义：首个 activated 与 mounted 同序触发，标志位去重
-let skipNextActivated = false
-onMounted(() => {
-  skipNextActivated = true
-  void fetchAlerts()
-})
-onActivated(() => {
-  if (skipNextActivated) {
-    skipNextActivated = false
-    return
-  }
-  void fetchAlerts()
-})
-
-function onPageChange(p: number): void {
-  page.value = p
-  void fetchAlerts()
-}
-function onPageSizeChange(s: number): void {
-  pageSize.value = s
-  page.value = 1
-  void fetchAlerts()
-}
 function onRetry(): void {
   void fetchAlerts()
 }

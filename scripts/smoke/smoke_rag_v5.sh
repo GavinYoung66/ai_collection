@@ -2,11 +2,11 @@
 set -e
 
 # RAG Service V5 冒烟测试（§12）
-# 12 步全链路：health → TXT 基线回归 → Excel 多 sheet → PPT 备注 → AMR 转写 → 损坏音频 A3001 →
+# 11 步全链路：health → TXT 基线回归 → Excel 多 sheet → PPT 备注 → AMR 转写 → 损坏音频 A3001 →
 # 内嵌图片抽取 → 内嵌表格抽取 → answer=true（开关开启：回答/降级）→ answer=true（开关关闭=V4）→
-# 资产级联清理 → Gradio 页面可达性
+# 资产级联清理
 #
-# 前置：docker compose up（rag-service + PG + Milvus + ES + Redis + OCR service + gradio）
+# 前置：docker compose up（rag-service + PG + Milvus + ES + Redis + OCR service）
 # 用法：bash scripts/smoke/smoke_rag_v5.sh
 # 退出码：0=全 PASS，1=有失败（可选组件不可用时按 WARN 放行，对齐 V2 先例）
 
@@ -442,16 +442,6 @@ if [ -n "$ASSET_DOC_ID" ]; then
     fi
 else
     step_warn "无含资产文档（Step 4/8 未上传成功），清理断言跳过"
-    step_pass
-fi
-
-# ---------- Step 12: Gradio 页面可达性 ----------
-echo "Step 12: Gradio 页面可达性检查（http://localhost:7860/ = 200）..."
-GRADIO_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:7860/ 2>/dev/null || echo "000")
-if [ "$GRADIO_CODE" = "200" ]; then
-    step_pass
-else
-    step_warn "Gradio 页面不可达（http_code=$GRADIO_CODE，gradio 服务未启动或未配置 RAG_API_TOKEN）"
     step_pass
 fi
 

@@ -44,29 +44,57 @@ VALID_RULE_IDS = frozenset(f"R{i:02d}" for i in range(1, 16))
 _AMOUNT_RE = re.compile(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*(?:元|块|万|圆)?")
 _OVERDUE_KEYS = ("due_amount", "overdue_amount", "overdue_days", "ptp_amount")
 _DASHSCOPE_COMPAT_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+_DEEPSEEK_DEFAULT_BASE = "https://api.deepseek.com"
 InvokeFn = Callable[..., Awaitable[str]]
+
+
+def _provider_for_model(model: str) -> tuple[str, str]:
+    """模型名 → (provider, base_url)。deepseek* 走 DeepSeek 官方 API，其余走 DashScope 兼容模式。"""
+    from common.config.settings import settings
+
+    if (model or "").lower().startswith("deepseek"):
+        base = (settings.DEEPSEEK_BASE_URL or _DEEPSEEK_DEFAULT_BASE).rstrip("/")
+        return "deepseek", base
+    return "dashscope", _DASHSCOPE_COMPAT_BASE
+
+
+def _api_key_for(provider: str) -> str:
+    """按 provider 解析 API Key（DeepSeek 复用平台 Settings 的兼容属性）。"""
+    from common.config.settings import settings
+
+    if provider == "deepseek":
+        return (settings.deepseek_api_key_resolved or "").strip()
+    return (settings.LLM_API_KEY or settings.DASHSCOPE_API_KEY or "").strip()
 
 
 async def json_object_transport(
     model: str,
     messages: list[dict[str, str]],
     timeout_seconds: float,
+    usage_sink: dict[str, Any] | None = None,
 ) -> str:
-    """QC 自有 transport：保留 json_object，使用 invoke_llm 传入的目标 model。"""
-    from common.config.settings import settings
+    """QC 自有 transport：保留 json_object，使用 invoke_llm 传入的目标 model。
 
+    usage_sink（可选）：成功响应后写入本次 ``usage`` 与 ``latency_ms``，
+    供调用方落 llm_call_logs；不传则纯返回内容（向后兼容）。
+    """
+    provider, base_url = _provider_for_model(model)
     api_key = require_real_secret(
-        (settings.LLM_API_KEY or settings.DASHSCOPE_API_KEY or "").strip(),
-        label="LLM_API_KEY / DASHSCOPE_API_KEY",
+        _api_key_for(provider),
+        label=f"{provider.upper()}_API_KEY",
     )
+    started = time.perf_counter()
     body = await post_chat_completions(
-        base_url=_DASHSCOPE_COMPAT_BASE,
+        base_url=base_url,
         api_key=api_key,
         model=model,
         messages=messages,
         timeout=float(timeout_seconds),
         response_format={"type": "json_object"},
     )
+    if usage_sink is not None:
+        usage_sink["usage"] = body.get("usage")
+        usage_sink["latency_ms"] = int((time.perf_counter() - started) * 1000)
     content = message_content_from_completions(body)
     if not content:
         raise RuntimeError("LLM returned empty content")
@@ -161,12 +189,16 @@ class LLMReviewer:
         job_store: QcJobStore | None = None,
         publisher: QcEventPublisher | None = None,
         db_session: Any | None = None,
+        persist_call_logs: bool = False,
         retry_delay: float = 0.0,
     ) -> None:
         self._invoke = invoke
         self.job_store = job_store
         self.publisher = publisher or QcEventPublisher()
         self.db_session = db_session
+        # True 时每次调用落 llm_call_logs（独立短事务，不依赖请求事务提交）；
+        # 默认 False 供单测/无 DB 场景使用，生产装配点显式开启。
+        self.persist_call_logs = persist_call_logs
         self.retry_delay = retry_delay
         self.degraded = False
         self.call_logs: list[dict[str, Any]] = []
@@ -178,29 +210,41 @@ class LLMReviewer:
         model: str,
         messages: list[dict[str, str]],
         timeout_seconds: float,
+        usage_sink: dict[str, Any] | None = None,
     ) -> str:
         if self._invoke is None:
-            return await json_object_transport(model, messages, timeout_seconds)
+            return await json_object_transport(model, messages, timeout_seconds, usage_sink)
         try:
             return await self._invoke(model, messages, timeout_seconds)
         except TypeError:
             return await self._invoke(messages)
 
+    def _make_transport(self, usage_sink: dict[str, Any]) -> InvokeFn:
+        """每次 review 独立 sink：并发调用之间 token/latency 不串。"""
+
+        async def _transport(
+            model: str, messages: list[dict[str, str]], timeout_seconds: float
+        ) -> str:
+            return await self._as_transport(model, messages, timeout_seconds, usage_sink)
+
+        return _transport
+
     def _require_transport_key(self) -> None:
-        from common.config.settings import settings
+        provider, _ = _provider_for_model(qc_settings.QC_LLM_MODEL)
+        require_real_secret(_api_key_for(provider), label=f"{provider.upper()}_API_KEY")
 
-        require_real_secret(
-            (settings.LLM_API_KEY or settings.DASHSCOPE_API_KEY or "").strip(),
-            label="LLM_API_KEY / DASHSCOPE_API_KEY",
-        )
-
-    async def _call_model(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+    async def _call_model(
+        self,
+        messages: list[dict[str, str]],
+        usage_sink: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        sink = usage_sink if usage_sink is not None else {}
         return await invoke_llm(
             model=qc_settings.QC_LLM_MODEL,
             messages=messages,
             fallback_chain=list(qc_settings.QC_LLM_FALLBACK_CHAIN or []),
             timeout=Timeout(total=float(qc_settings.QC_LLM_TIMEOUT)),
-            transport=self._as_transport,
+            transport=self._make_transport(sink),
         )
 
     async def _mark_chain_degraded(self) -> None:
@@ -225,7 +269,7 @@ class LLMReviewer:
         await self._mark_chain_degraded()
         await self.publisher.publish_system_alert_raised()
 
-    def _write_log(
+    async def _write_log(
         self,
         *,
         prompt: str,
@@ -234,13 +278,22 @@ class LLMReviewer:
         session_id: str | None,
         error_msg: str | None = None,
         confidence: float | None = None,
+        model: str | None = None,
+        token_usage: dict[str, Any] | None = None,
+        latency_ms: int | None = None,
     ) -> None:
+        # model 缺省记配置主模型；调用已命中的路径传实际模型（invoke_llm 返回），降级路径未知
+        used_model = model or qc_settings.QC_LLM_MODEL
+        provider, _ = _provider_for_model(used_model)
         row = {
             "id": str(uuid4()),
             "trace_id": get_trace_id() or "qc",
             "session_id": session_id,
-            "provider": "dashscope",
-            "model": qc_settings.QC_LLM_MODEL,
+            "provider": provider,
+            "model": used_model,
+            "svc": "qc",
+            "token_usage": token_usage,
+            "latency_ms": latency_ms,
             "prompt": mask_text(prompt),
             "response": mask_text(response) if response else None,
             "status": status,
@@ -249,20 +302,34 @@ class LLMReviewer:
             "temperature": None,
         }
         self.call_logs.append(row)
+        entry = LLMCallLog(
+            trace_id=row["trace_id"],
+            session_id=session_id,
+            provider=provider,
+            model=used_model,
+            svc="qc",
+            token_usage=token_usage,
+            latency_ms=latency_ms,
+            prompt=row["prompt"],
+            response=row["response"],
+            status=status,
+            error_msg=error_msg,
+            confidence=confidence,
+        )
         if self.db_session is not None:
-            self.db_session.add(
-                LLMCallLog(
-                    trace_id=row["trace_id"],
-                    session_id=session_id,
-                    provider="dashscope",
-                    model=qc_settings.QC_LLM_MODEL,
-                    prompt=row["prompt"],
-                    response=row["response"],
-                    status=status,
-                    error_msg=error_msg,
-                    confidence=confidence,
-                )
-            )
+            self.db_session.add(entry)
+            return
+        if not self.persist_call_logs:
+            return
+        # 独立短事务：用量埋点失败不影响质检主流程
+        from common.db.session import async_session_factory
+
+        try:
+            async with async_session_factory() as session:
+                session.add(entry)
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 — 埋点为旁路，不得阻塞质检
+            logger.warning("llm_call_log_persist_failed", error=str(exc))
 
     def _to_hits(
         self,
@@ -372,6 +439,8 @@ class LLMReviewer:
         )
         spec = load_prompt_sections(f"{_QC_PROMPT_ID}@{prompt_version}", service="qc-service")
         t0 = time.perf_counter()
+        # 本次调用的 usage/latency 收集器（provider 响应 usage 由 transport 写入）
+        usage_sink: dict[str, Any] = {}
         emit_llm_review_started(prompt_version=prompt_version, turn_count=len(turns))
         payload = turns_payload(turns)
         user = json.dumps({"turns": payload}, ensure_ascii=False)
@@ -384,7 +453,7 @@ class LLMReviewer:
         ]
         prompt_blob = messages[0]["content"] + "\n" + messages[1]["content"]
         if qc_settings.QC_MOCK_LLM:
-            self._write_log(
+            await self._write_log(
                 prompt=prompt_blob,
                 response=None,
                 status="qc_review_exemption",
@@ -401,7 +470,7 @@ class LLMReviewer:
             try:
                 self._require_transport_key()
             except RuntimeError as exc:
-                self._write_log(
+                await self._write_log(
                     prompt=prompt_blob,
                     response=None,
                     status="qc_review_exemption",
@@ -410,7 +479,7 @@ class LLMReviewer:
                 )
                 return []
         try:
-            result = await self._call_model(messages)
+            result = await self._call_model(messages, usage_sink)
         except (LLMCircuitOpenError, LLMRateLimitError, TimeoutError) as exc:
             reason = "circuit_open"
             if isinstance(exc, LLMRateLimitError):
@@ -419,23 +488,25 @@ class LLMReviewer:
                 reason = "timeout"
             await self._on_open()
             emit_llm_review_degraded(reason=reason)
-            self._write_log(
+            await self._write_log(
                 prompt=prompt_blob,
                 response=None,
                 status="qc_review_exemption",
                 session_id=session_id,
                 error_msg=reason,
+                latency_ms=int((time.perf_counter() - t0) * 1000),
             )
             return []
         if result.get("content") is None:
             await self._on_open()
             emit_llm_review_degraded(reason=result.get("error") or "all models failed")
-            self._write_log(
+            await self._write_log(
                 prompt=prompt_blob,
                 response=None,
                 status="qc_review_exemption",
                 session_id=session_id,
                 error_msg=str(result.get("error") or "all models failed")[:300],
+                latency_ms=int((time.perf_counter() - t0) * 1000),
             )
             return []
         raw = result["content"]
@@ -443,22 +514,28 @@ class LLMReviewer:
         try:
             parsed = self._parse_hits(raw)
         except (json.JSONDecodeError, TypeError, ValueError):
-            self._write_log(
+            await self._write_log(
                 prompt=prompt_blob,
                 response=raw,
                 status="qc_review_exemption",
                 session_id=session_id,
                 error_msg="invalid_json",
+                model=result.get("model"),
+                token_usage=usage_sink.get("usage"),
+                latency_ms=usage_sink.get("latency_ms"),
             )
             return []
         hits = self._to_hits(parsed, turns)
         conf = parsed[0].confidence if parsed else None
-        self._write_log(
+        await self._write_log(
             prompt=prompt_blob,
             response=raw,
             status="qc_review_exemption",
             session_id=session_id,
             confidence=conf,
+            model=result.get("model"),
+            token_usage=usage_sink.get("usage"),
+            latency_ms=usage_sink.get("latency_ms"),
         )
         emit_llm_review_completed(
             latency_ms=int((time.perf_counter() - t0) * 1000),

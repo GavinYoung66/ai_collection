@@ -19,13 +19,12 @@ set -eu
 : "${UPSTREAM_COMPLAINT:?missing UPSTREAM_COMPLAINT (set it in .env)}"
 : "${UPSTREAM_QC:?missing UPSTREAM_QC (set it in .env)}"
 : "${UPSTREAM_RAG:?missing UPSTREAM_RAG (set it in .env)}"
-: "${UPSTREAM_WEB:?missing UPSTREAM_WEB (set it in .env)}"
 : "${CORS_ALLOWED_ORIGINS:=http://localhost:8080,http://127.0.0.1:8080}"
 : "${ENABLE_AUTH:=false}"
 : "${TLS_ENABLED:=false}"
 : "${CANARY_WEIGHT:=0}"
 : "${LOG_JSON:=false}"
-export UPSTREAM_COMPLAINT UPSTREAM_QC UPSTREAM_RAG UPSTREAM_WEB
+export UPSTREAM_COMPLAINT UPSTREAM_QC UPSTREAM_RAG
 export CORS_ALLOWED_ORIGINS ENABLE_AUTH TLS_ENABLED CANARY_WEIGHT LOG_JSON
 
 # 1.5) CANARY_WEIGHT 合法性（D11 / tasks 10.1）：0-100 整数，非法即 fail fast，
@@ -45,7 +44,7 @@ COMMON_OUTPUT=/etc/nginx/server_common.conf
 
 # 2) 白名单渲染：仅下列 ${VAR} 被替换，nginx 内置 $变量一律原样保留。
 #    server_common.conf 同白名单渲染（8080 与 8443 共用，唯一事实源）。
-VARS='${UPSTREAM_COMPLAINT} ${UPSTREAM_QC} ${UPSTREAM_RAG} ${UPSTREAM_WEB} ${CORS_ALLOWED_ORIGINS} ${ENABLE_AUTH} ${TLS_ENABLED} ${CANARY_WEIGHT} ${LOG_JSON}'
+VARS='${UPSTREAM_COMPLAINT} ${UPSTREAM_QC} ${UPSTREAM_RAG} ${CORS_ALLOWED_ORIGINS} ${ENABLE_AUTH} ${TLS_ENABLED} ${CANARY_WEIGHT} ${LOG_JSON}'
 envsubst "$VARS" < "$TEMPLATE" > "$OUTPUT"
 envsubst "$VARS" < "$COMMON_TEMPLATE" > "$COMMON_OUTPUT"
 
@@ -155,7 +154,6 @@ gen_split() {
   gen_split complaint_upstream complaint complaint_v2
   gen_split qc_upstream qc qc_v2
   gen_split kb_upstream kb kb_v2
-  gen_split web_upstream web web_v2
 } > "$CANARY_CONF"
 
 # 2.10) 灰度 proxy_pass 形态（D11 / tasks 10.1 优化）：CANARY_WEIGHT=0 时用定名
