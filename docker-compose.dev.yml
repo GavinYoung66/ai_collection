@@ -24,7 +24,7 @@
 #   ES 首次用 build 而不是 pull：
 #     docker compose -f docker-compose.yml build elasticsearch
 #   镜像已在本地时加 --pull never，避免再走死镜像源。
-#   qc 冒烟不需要 call-service；也不要 docker compose up（无服务名）把 ocr/gradio 全拉起来。
+#   qc 冒烟不需要 call-service；也不要 docker compose up（无服务名）把 ocr 等重服务全拉起来。
 #   看日志：       docker compose -f docker-compose.yml -f docker-compose.dev.yml logs -f <svc>
 #   跑冒烟：       bash scripts/smoke/smoke_all.sh
 #   qc 冒烟（不起 call-service）：bash scripts/smoke/smoke_qc.sh
@@ -216,8 +216,7 @@ services:
       - ./scripts/rag:/app/scripts/rag
       - ./migrations:/app/migrations
       - ./alembic.ini:/app/alembic.ini
-      # V5：资产预览源目录（镜像内默认 data/assets = /app/data/assets），
-      # dev bind mount 与 gradio 共享同一宿主机目录（覆盖生产命名卷 rag_assets）
+      # V5：资产预览源目录（镜像内默认 data/assets = /app/data/assets）
       - ./services/rag-service/data/assets:/app/data/assets
     # entrypoint 覆盖：保留 es_init_v4 + alembic 初始化，仅给 uvicorn 加 --reload 热重载
     entrypoint:
@@ -548,18 +547,6 @@ services:
       timeout: 3s
       retries: 30
       start_period: 30s
-
-  # ===== V5：Gradio 前端 dev 覆盖（build/ports/environment/depends_on 继承 base）=====
-  gradio:
-    # dev 热更新：预览源改 bind mount，与 rag-service 共享同一宿主机目录
-    # （覆盖 base 的命名卷挂载 rag_assets:/app/data/assets）
-    volumes:
-      - ./services/rag-service/data/assets:/app/data/assets
-      # 热更新工作台源码（镜像内路径为 /app/app/app.py）
-      - ./services/rag-service/gradio:/app/app
-    networks:
-      - default
-      - ai-shared-net
 
 networks:
   default: {}

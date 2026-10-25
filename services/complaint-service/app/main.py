@@ -9,7 +9,6 @@ import contextlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from common.config.logging import setup_logging
 from common.errors.handlers import register_exception_handlers
@@ -409,22 +408,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="complaint-service", version="1.0.0", lifespan=lifespan)
-# 本地人审静态页（默认 :8080）跨域访问 :8006
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-        "http://localhost:5500",
-        "http://127.0.0.1:5500",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 跨域消费者（本地人审静态页）已移除；真实前端经网关同源访问，无需 CORS 中间件。
 app.add_middleware(TraceMiddleware)
 # 统一 Prometheus 指标：必须在所有 add_middleware 之后调用，
-# 确保 MetricsMiddleware 处于最外层（Metrics→Trace→CORS→路由）；
+# 确保 MetricsMiddleware 处于最外层（Metrics→Trace→路由）；
 # 同时注册无需鉴权的 GET /metrics（原生 exposition，不包统一信封）。
 mount_metrics(app, service_name="complaint-service")
 register_exception_handlers(app)

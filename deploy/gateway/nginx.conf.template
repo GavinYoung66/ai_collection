@@ -86,12 +86,6 @@ http {
         keepalive 64;
     }
 
-    upstream web {
-        zone web_up 64k;
-        server ${UPSTREAM_WEB} resolve max_fails=3 fail_timeout=10s;
-        keepalive 64;
-    }
-
     # v2 灰度占位（D11 / tasks 10.1）：与 v1 指向相同后端，CANARY_WEIGHT=0
     #（默认）时无流量；启用灰度时仅需把 v2 的 server 指向新版本后端。
     upstream complaint_v2 {
@@ -109,12 +103,6 @@ http {
     upstream kb_v2 {
         zone kb_v2_up 64k;
         server ${UPSTREAM_RAG} resolve max_fails=3 fail_timeout=10s;
-        keepalive 64;
-    }
-
-    upstream web_v2 {
-        zone web_v2_up 64k;
-        server ${UPSTREAM_WEB} resolve max_fails=3 fail_timeout=10s;
         keepalive 64;
     }
 
