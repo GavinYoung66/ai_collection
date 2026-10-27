@@ -25,6 +25,7 @@ from common.errors.exceptions import BizException
 from common.resilience._redis import configure_redis
 from common.resilience.rate_limit import allow as rate_limit_allow
 from common.trace.middleware import get_trace_id
+from common.utils.ip import get_client_ip
 
 router = APIRouter(prefix="/api/v1/qc", tags=["qc-check"])
 
@@ -36,7 +37,7 @@ RAW_RATE_WINDOW = 1
 def _raw_rate_user(request: Request) -> str:
     """用户维：X-User-Id → 客户端 IP → anon。"""
     return request.headers.get("X-User-Id") or (
-        request.client.host if request.client else "anon"
+        get_client_ip(request) or "anon"
     )
 
 

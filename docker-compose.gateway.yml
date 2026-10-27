@@ -39,9 +39,11 @@ services:
     container_name: ai-api-auth
     env_file:
       - .env
-    # .env 的 PG_HOST=localhost 是宿主机调试口径；容器内必须走 postgres 服务名。
+    # .env 的 PG_HOST=localhost / REDIS_HOST=localhost 是宿主机调试口径；
+    # 容器内必须走 compose 服务名。
     environment:
       PG_HOST: postgres
+      REDIS_HOST: redis
     volumes:
       - ./common:/app/common:ro
     restart: unless-stopped

@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     JWT_SECRET: str = "change_me"
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_HOURS: int = 24
+    JWT_REFRESH_HOURS: int = 168
     # 网关鉴权：iss/aud 为空字符串表示未配置，跳过对应 claims 校验（零回归）。
     JWT_ISSUER: str = ""
     JWT_AUDIENCE: str = ""

@@ -19,7 +19,9 @@ RUN pip install --no-cache-dir \
     "sqlalchemy[asyncio]==2.0.23" \
     "asyncpg==0.29.0" \
     "passlib[bcrypt]==1.7.4" \
-    "bcrypt==4.0.1"
+    "bcrypt==4.0.1" \
+    "redis[hiredis]" \
+    structlog
 
 ENV PYTHONPATH=/app
 
