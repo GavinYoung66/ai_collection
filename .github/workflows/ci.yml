@@ -183,6 +183,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # 依赖安全扫描（frontend-security-hardening REQ-4）：高危漏洞即 fail build。
+      # 仅审计 level=high（critical 含于 high 以下，--audit-level=high 会同时拦截 critical）。
+      - name: npm audit (high)
+        run: npm audit --audit-level=high
+
       # —— 以下四步为四道独立闸门，任一步非 0 退出即中断 job ——
       # ESLint：0 error 为硬红线；warning 冻结基线（--max-warnings 271 定义在 package.json），
       # 禁止新增 warning；存量逐批清理后同步下调该阈值（只降不升）。

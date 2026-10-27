@@ -5,7 +5,59 @@ import 'element-plus/dist/index.css'
 import App from './App.vue'
 import { router } from './router'
 import { useAuthStore, setupAuthHandlers } from './stores/auth'
+import { http, registerErrorReporter } from '../shared/request'
 import './styles/index.css'
+
+// ── backend-security-completion REQ-5a：全局错误 → 审计端点 fire-and-forget ──
+// 钩子闭包：捕获 window 级 + Vue 生命周期内 + axios 业务非零码三类错误
+// 统一 POST 到后端 /api/v1/audit/frontend-error（_skipAuthInterceptor=true
+// 避免拦截器覆盖 Authorization 头——此端点走已登录态，拦截器会自动注入 token）
+function setupErrorAuditBridge(): void {
+  const post = (payload: Record<string, unknown>) => {
+    http
+      .post<unknown, unknown>('/api/v1/audit/frontend-error', payload)
+      .catch(() => { /* 审计失败静默吞：绝不阻塞 UI */ })
+  }
+
+  // axios 请求层：注册 reporter，401/B0002 等非零码自动遍历
+  registerErrorReporter((err) => {
+    post({
+      error_type: err.code || 'RequestError',
+      message: err.message,
+      url: err.config?.url || location.pathname,
+      line: undefined,
+      col: undefined,
+      user_agent: navigator.userAgent.slice(0, 300),
+      trace_id: err.trace,
+    })
+  })
+
+  // window 级 JS 错误（同步 + 事件处理）
+  window.addEventListener('error', (evt: ErrorEvent) => {
+    post({
+      error_type: 'UnhandledError',
+      message: evt.message || (evt.error?.message ?? ''),
+      stack_trace: evt.error?.stack,
+      url: evt.filename || location.href,
+      line: evt.lineno || undefined,
+      col: evt.colno || undefined,
+      user_agent: navigator.userAgent.slice(0, 300),
+    })
+  })
+
+  // Promise 未捕获拒绝
+  window.addEventListener('unhandledrejection', (evt: PromiseRejectionEvent) => {
+    const reason = evt.reason
+    post({
+      error_type: 'UnhandledRejection',
+      message: reason instanceof Error ? reason.message : String(reason),
+      stack_trace: reason instanceof Error ? reason.stack : undefined,
+      url: location.href,
+      user_agent: navigator.userAgent.slice(0, 300),
+    })
+  })
+}
+setupErrorAuditBridge()
 
 // 创建应用实例
 const app = createApp(App)
