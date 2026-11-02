@@ -789,7 +789,7 @@ class ComplaintService:
         except GraphInterrupt as e:
             # 正常人审挂起：转 pending_review，不写 exception_info（spec session-service）
             interrupt_err = e
-        except TimeoutError as e:
+        except TimeoutError:
             # G5 执行超 30min：发 complaint.degraded/A5010，再走 G3 超时分支
             from app.service.degrade_flow import GLOBAL_TIMEOUT_SECONDS, degrade_flow
 
