@@ -29,6 +29,10 @@ class DataPlatformSettings(BaseSettings):
     # 种子入库后等待 qc.check.completed 的超时告警阈值（分钟）。
     QC_TIMEOUT_MINUTES: int = 10
 
+    # 事件早于落库时的补偿：有限重试次数 + 固定间隔；耗尽后告警，不静默丢弃。
+    QC_RECOVERY_MAX_ATTEMPTS: int = 10
+    QC_RECOVERY_INTERVAL_SECONDS: float = 3.0
+
     @model_validator(mode="after")
     def _redis_db_must_not_be_default_zero(self) -> DataPlatformSettings:
         if self.QC_REDIS_DB == 0:
