@@ -56,6 +56,13 @@ class GatewaySettings(BaseSettings):
     # qc-service：call_qc MCP server endpoint /mcp（容器内 8000；宿主机映射 8003）
     QC_SERVICE_URL: str = "http://qc-service:8000"
 
+    # ===== T22：出站 URL 白名单（SSRF 防护）=====
+    # 协议白名单（逗号分隔）；白名单外的协议一律拒绝
+    BRIDGE_ALLOWED_SCHEMES: str = "http,https"
+    # 主机白名单（逗号分隔）：默认仅 docker network 服务名。
+    # 注意：回环/内网/链路本地/云元数据 IP 即使加入白名单也会被拒绝（见 bridge_http）。
+    BRIDGE_ALLOWED_HOSTS: str = "rag-service,data-platform,qc-service"
+
     # 桥 HTTP 超时（秒）：快照/回写等内部快接口
     BRIDGE_HTTP_TIMEOUT: float = 5.0
     # rag 检索超时（秒）：检索含 ES+向量+rerank，源桥为 30s
