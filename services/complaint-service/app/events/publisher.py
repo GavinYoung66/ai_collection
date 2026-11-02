@@ -33,6 +33,16 @@ CHANNELS = (
 _BUS_TOPICS = frozenset(CHANNELS)
 _HOOK_PREFIX = "csmp."
 
+# 业务事件投递任务的强引用：create_task 的返回值若无人持有，事件循环仅保留
+# 弱引用，任务可能在 GC 时被静默回收（事件丢失且无异常可观测）。
+# 与 app/main.py `_running_queued` 同构：add 后注册 done_callback(discard)。
+_bus_publish_tasks: set[asyncio.Task[None]] = set()
+
+
+def pending_bus_publish_tasks() -> int:
+    """在途业务事件投递任务数（供单测/运维观测）。"""
+    return len(_bus_publish_tasks)
+
 
 @dataclass
 class EventRecord:
@@ -97,7 +107,9 @@ class EventPublisher:
 
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(_go())
+            task = loop.create_task(_go())
+            _bus_publish_tasks.add(task)
+            task.add_done_callback(_bus_publish_tasks.discard)
         except RuntimeError:
             try:
                 asyncio.run(_go())
