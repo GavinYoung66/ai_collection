@@ -25,14 +25,14 @@
 - [x] ✅ 3.3 [T11] ASR 音频分段 `[open(p).read()...]` 不关闭，fd 泄漏｜位置：`dashscope_provider.py:117`｜整改：改用 `Path(p).read_bytes()` 或 `with open`｜验证：连续处理 100 段后进程 fd 数不线性增长｜状态：已完成（改为 `Path(p).read_bytes()` 确定性关闭句柄；单测 5 passed（本次评审环境实测复跑通过），含 100 段 fd 水位与裸 `open` 零命中断言）｜估算：S
 - [x] ✅ 3.4 [T12] RocketMQ receive 异常 `raise` 冲出循环，订阅永久停止、无自动重启｜位置：`common/eventbus/rocketmq.py:194-208`｜整改：异常处 `continue` + 退避 sleep，或加看门狗重启｜验证：receive 注入异常后退避续跑，后续消息仍被消费（消息级异常由既有 retry→DLQ + `gather(return_exceptions=True)` 兜底，S-004 口径修正）｜状态：已完成（receive 异常不再抛出：指数退避（1s 起、30s 封顶）+ `continue`，恢复后打 `eventbus_consumer_receive_recovered`；Q-001 裁决纳入边界：consumer 启动失败同属「订阅永久停止」缺陷类，同样退避重试（`eventbus_consumer_start_failed/recovered`）并补回归测试；同步更新既有 `test_rocketmq.py` 契约。单测 4 passed（含启动重试 1 用例），eventbus 全量 57 passed）｜估算：M（实测 S~M-）
 
-## 4. 🟢 时间、状态与资源生命周期（#16A34A）｜预期规模：以 S 为主（T13/T15/T16/T17/T18 单点修复、T14=M，粗估）
+## 4. ✅🟢 时间、状态与资源生命周期（#16A34A）｜预期规模：以 S 为主（T13/T15/T16/T17/T18 单点修复、T14=M，粗估）｜（2026-11-02 全部完成：新增单测 47 passed；common 51 passed、rag 388 passed、complaint 367 passed 回归）
 
-- [ ] 4.1 [T13] 外呼时段用 naive `datetime.now()`，容器 UTC 时整体偏 8 小时（合规风险）｜位置：`common/utils/time_guard.py:11`｜整改：显式 `datetime.now(timezone(settings.CALL_TIMEZONE))`｜验证：`TZ=UTC` 下时段判定与 Asia/Shanghai 一致（固定时钟单测）
-- [ ] 4.2 [T14] SessionService 半锁：仅 `create_session` 加锁，其余读写裸操作｜位置：`session_service.py:111-235`｜整改：统一加锁，或确认单线程后移除锁并注释｜验证：并发读写会话无竞态；若移除锁则注释说明单线程前提
-- [ ] 4.3 [T15] Pillow `Image.open` 未 close，大批量摄入内存累积｜位置：`asset_extractor.py:49-56`｜整改：用 `with Image.open(...) as img`｜验证：批量摄入内存水位稳定；裸 `Image.open` 调用零命中
-- [ ] 4.4 [T16] 默认 LLM transport 每次调用新建 `httpx.AsyncClient`，无 keep-alive｜位置：`common/llm/transport.py:58`｜整改：复用共享 `AsyncClient`｜验证：50 次调用仅创建 1 个 client（计数断言）
-- [ ] 4.5 [T17] `call_log_sink` 文件句柄永不关闭｜位置：`call_log_sink.py:39`｜整改：实现 `close()` + `__del__`，替换前关闭旧 sink｜验证：替换 sink 后旧句柄关闭，退出前 flush 完成
-- [ ] 4.6 [T18] 熔断器 `record_success` 在 OPEN 态也清零失败计数（语义不严谨）｜位置：`common/resilience/breaker.py:168-175`｜整改：仅 CLOSED/HALF_OPEN 态处理 success｜验证：OPEN 态上报 success 后失败计数与熔断状态均不变
+- [x] ✅ 4.1 [T13] 外呼时段用 naive `datetime.now()`，容器 UTC 时整体偏 8 小时（合规风险）｜位置：`common/utils/time_guard.py:11`｜整改：显式 `datetime.now(ZoneInfo(settings.CALL_TIMEZONE))`（S-001 修订：原 `timezone(...)` 仅接受固定偏移，无法传入 IANA 时区名）｜验证：`TZ=UTC` 下时段判定与 Asia/Shanghai 一致（固定时钟单测）｜状态：已完成（新增 `CALL_TIMEZONE=Asia/Shanghai` 配置，时段判定统一经 `ZoneInfo(CALL_TIMEZONE)` 换算，支持注入固定时钟；UTC 容器下北京时间 10:00 允许、07:59/21:00 拒绝等 8 用例通过）
+- [x] ✅ 4.2 [T14] SessionService 半锁：仅 `create_session` 加锁，其余读写裸操作｜位置：`session_service.py:111-235`｜整改：统一加锁，或确认单线程后移除锁并注释｜验证：并发读写会话无竞态；若移除锁则注释说明单线程前提｜状态：已完成（采用「确认单线程后移除锁」路径：路由/后台循环均为 `async def`，全仓无 `to_thread`/`run_in_executor` 触达本类，类 docstring 固化单线程前提与未来下沉线程池的加锁要求；新增 9 用例覆盖并发建单唯一性、状态机与超时边界）
+- [x] ✅ 4.3 [T15] Pillow `Image.open` 未 close，大批量摄入内存累积｜位置：`asset_extractor.py:49-56`｜整改：用 `with Image.open(...) as img`｜验证：批量摄入内存水位稳定；裸 `Image.open` 调用零命中｜状态：已完成（`_scale_image` 改为 `with Image.open(...)` 确定性释放解码器；100 张图 fd 增量 ≤5、解码器 `fp` 归零、源码裸调用零命中断言，8 用例通过）
+- [x] ✅ 4.4 [T16] 默认 LLM transport 每次调用新建 `httpx.AsyncClient`，无 keep-alive｜位置：`common/llm/transport.py:58`｜整改：复用共享 `AsyncClient`｜验证：50 次调用仅创建 1 个 client（计数断言）｜状态：已完成（按事件循环复用共享 client（WeakKeyDictionary 隔离 loop），并提供 `aclose_shared_client()` 显式关闭入口；50 次调用仅 1 个 client、显式 client 不入池、关闭后按需重建、跨 loop 隔离共 6 用例通过）
+- [x] ✅ 4.5 [T17] `call_log_sink` 文件句柄永不关闭｜位置：`call_log_sink.py:39`｜整改：实现 `close()` + `__del__`，替换前关闭旧 sink｜验证：替换 sink 后旧句柄关闭，退出前 flush 完成｜状态：已完成（mcp-gateway `TempFileCallLogSink` 增幂等 `close()`（flush+close）与 `__del__` 兜底，`set_call_log_sink` 替换/清空前关闭旧实例；10 用例覆盖替换关闭、写后关闭报错、close 失败不阻断替换与 100 次创建关闭 fd 水位）
+- [x] ✅ 4.6 [T18] 熔断器 `record_success` 在 OPEN 态也清零失败计数（语义不严谨）｜位置：`common/resilience/breaker.py:168-175`｜整改：仅 CLOSED/HALF_OPEN 态处理 success｜验证：OPEN 态上报 success 后失败计数与熔断状态均不变｜状态：已完成（OPEN 态 `record_success` 直接返回：失败计数、状态、`opened_at` 均不变，重置窗口不顺延；6 用例覆盖窗口、half-open 闭合与杂散上报通过）
 
 ## 5. 🔵 安全加固（中危）（#2563EB）｜预期规模：T19=S、T20=L（依赖升级+CI 门禁）、T21=S、T22=M、T23=S（粗估）
 
