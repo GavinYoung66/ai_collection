@@ -179,8 +179,9 @@ async def test_judge_async_skips_when_graph_lock_held(monkeypatch):
     assert out["task_status"] == TaskStatus.pending.value
 
 
-async def test_judge_async_proceeds_when_lock_unavailable(monkeypatch):
-    """Redis 不可用（UNAVAILABLE）时必须继续跑图，服务保持可用。"""
+async def test_judge_async_rejects_when_lock_unavailable(monkeypatch):
+    """Q-001 裁决（fail-closed）：Redis 不可用（UNAVAILABLE）时保守拒绝进图，
+    工单转 pending_review 人工兜底，绝不退化双跑（checkpoint 分叉防护）。"""
     from app.service import complaint_service as cs_module
     from app.service.complaint_service import complaint_service
 
@@ -199,8 +200,10 @@ async def test_judge_async_proceeds_when_lock_unavailable(monkeypatch):
     monkeypatch.setattr(cs_module, "acquire_graph_lock", _unavailable)
     monkeypatch.setattr(complaint_service, "_judge_with_graph", _spy_judge)
 
-    await complaint_service.judge_async(cid, run_graph=True)
-    assert ran == [cid], "Redis 不可用时不应阻断研判"
+    out = await complaint_service.judge_async(cid, run_graph=True)
+    assert ran == [], "Redis 不可用时不得进入图执行（fail-closed）"
+    assert out["task_status"] == TaskStatus.pending_review.value
+    assert not cs_module.is_graph_inflight(cid), "拒绝路径必须释放在途登记"
 
 
 async def test_judge_async_releases_lock_on_success(monkeypatch):

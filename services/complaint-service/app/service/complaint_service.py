@@ -18,6 +18,7 @@ from app.models.state import ReviewAction, TaskStatus, VerdictType
 from app.service.graph_lock import (
     LOCK_ACQUIRED,
     LOCK_HELD,
+    LOCK_UNAVAILABLE,
     acquire_graph_lock,
     acquire_resume_lock,
     extend_resume_lock,
@@ -201,6 +202,7 @@ class ComplaintService:
         import uuid as _uuid
 
         from sqlalchemy import select
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
 
         from app.models.complaint import Complaint
         from common.db.session import async_session_factory
@@ -215,34 +217,39 @@ class ComplaintService:
         db = async_session_factory()
         try:
             async with db:
+                # 原子幂等：主键即 case_id，ON CONFLICT DO NOTHING 把
+                # 「检查-插入」合并为单条语句，并发后到请求不再报主键冲突。
+                stmt = (
+                    pg_insert(Complaint)
+                    .values(
+                        id=case_uuid,
+                        case_id=case_uuid,
+                        complaint_text=complaint_text,
+                        status="pending",
+                    )
+                    .on_conflict_do_nothing(index_elements=[Complaint.id])
+                )
+                result = await db.execute(stmt)
+                if getattr(result, "rowcount", 0) == 1:
+                    await db.commit()
+                    logger.info("complaint_persisted", complaint_id=cid, case_id=case_id)
+                    return
+
+                # 命中已有行：并发重复请求 / 幂等重试。仅软删行需要恢复为活跃行。
                 existing = await db.execute(
                     select(Complaint)
-                    .where(Complaint.case_id == case_uuid)
+                    .where(Complaint.id == case_uuid)
                     .limit(1)
                 )
                 row = existing.scalar_one_or_none()
-                if row is not None:
-                    if row.is_delete == "0":
-                        # 幂等 no-op，不插第二行
-                        logger.info("complaint_persist_idempotent_hit", case_id=case_id)
-                        return
-                    # 软删行存在：恢复为活跃行（软删后重建同 id 工单）
+                if row is not None and row.is_delete == "1":
                     row.is_delete = "0"
                     row.complaint_text = complaint_text
                     row.status = "pending"
                     await db.commit()
                     logger.info("complaint_persist_restored", case_id=case_id)
                     return
-                db.add(
-                    Complaint(
-                        id=case_uuid,
-                        case_id=case_uuid,
-                        complaint_text=complaint_text,
-                        status="pending",
-                    )
-                )
-                await db.commit()
-                logger.info("complaint_persisted", complaint_id=cid, case_id=case_id)
+                logger.info("complaint_persist_idempotent_hit", case_id=case_id)
         except ComplaintPersistError:
             raise
         except Exception as e:
@@ -453,42 +460,52 @@ class ComplaintService:
             rec = self.get_or_raise(complaint_id)
             # G1b 在途守卫：同线程已有真图在跑（HTTP 5s 超时重试/订阅者与脚本双驱动）
             # → 直接返回当前态，不并发跑第二遍图（避免 checkpoint 分叉导致 resume 失效）
+            # 检查与登记必须原子：二者之间不得有 await。原实现先检查、等 deadline 与
+            # 跨进程锁后才 add，两个并发请求都能通过检查，形成 check-then-act 双跑。
             if complaint_id in _graph_inflight:
                 logger.info("judge_skip_graph_inflight", complaint_id=complaint_id)
                 return self._sync_from_session(rec)
-            # G5 排队 deadline：入队超 10min（queue_start 已失效）→ A5010 转人审，不进图
-            if not await rate_limiter.check_queue_deadline(complaint_id):
-                return self._handle_queue_timeout(rec)
-
-            # 跨进程图锁：单副本时上面那条进程内判断已足够；多副本时两路 astream
-            # 写同一 thread_id 会让 checkpoint 分叉、resume 失效，故需跨进程互斥。
-            # Redis 不可用 → LOCK_UNAVAILABLE，退化为仅进程内守卫（fail-open）。
-            #
-            # TTL = exec_timeout（1800s）是**刻意与执行超时对齐**，不是随手取值：
-            # 超过 1800s 的执行本就会被 asyncio.wait_for 判超时转人工，锁同时到期
-            # 是自洽的。代价是进程硬崩溃（无 finally）时同单最多被挡 30min。
-            # 评估结论：当前单实例部署下该路径不触发，不值得引入看门狗续期来换
-            # 5min 的恢复时间（纯增复杂度）。若将来真上多副本且对恢复时间敏感，
-            # 再考虑「缩短 TTL + 后台续期」，届时须同时评估续期失败的处理。
-            token = new_token()
-            lock_state = await acquire_graph_lock(
-                complaint_id, ttl=int(rate_limiter.exec_timeout_seconds), token=token
-            )
-            if lock_state == LOCK_HELD:
-                logger.info("judge_skip_graph_lock_held", complaint_id=complaint_id)
-                return self._sync_from_session(rec)
-
-            out = rec
             _graph_inflight.add(complaint_id)
             try:
-                out = await self._judge_with_graph(rec, complaint_id)
+                # G5 排队 deadline：入队超 10min（queue_start 已失效）→ A5010 转人审，不进图
+                if not await rate_limiter.check_queue_deadline(complaint_id):
+                    return self._handle_queue_timeout(rec)
+
+                # 跨进程图锁：单副本时上面那条进程内判断已足够；多副本时两路 astream
+                # 写同一 thread_id 会让 checkpoint 分叉、resume 失效，故需跨进程互斥。
+                # Q-001 裁决（fail-closed）：Redis 不可用 → LOCK_UNAVAILABLE 时无法
+                # 保证跨进程互斥，保守拒绝本次进入（转 pending_review 人工兜底），
+                # 绝不退化为双跑（runtime-correctness：在途任务互斥与幂等落库）。
+                token = new_token()
+                lock_state = await acquire_graph_lock(
+                    complaint_id, ttl=int(rate_limiter.exec_timeout_seconds), token=token
+                )
+                if lock_state == LOCK_UNAVAILABLE:
+                    logger.warning(
+                        "judge_reject_lock_unavailable", complaint_id=complaint_id
+                    )
+                    return self._reject_lock_unavailable(rec)
+                if lock_state == LOCK_HELD:
+                    logger.info("judge_skip_graph_lock_held", complaint_id=complaint_id)
+                    return self._sync_from_session(rec)
+
+                # TTL = exec_timeout（1800s）是**刻意与执行超时对齐**，不是随手取值：
+                # 超过 1800s 的执行本就会被 asyncio.wait_for 判超时转人工，锁同时到期
+                # 是自洽的。代价是进程硬崩溃（无 finally）时同单最多被挡 30min。
+                # 评估结论：当前单实例部署下该路径不触发，不值得引入看门狗续期来换
+                # 5min 的恢复时间（纯增复杂度）。若将来真上多副本且对恢复时间敏感，
+                # 再考虑「缩短 TTL + 后台续期」，届时须同时评估续期失败的处理。
+                try:
+                    out = await self._judge_with_graph(rec, complaint_id)
+                finally:
+                    if lock_state == LOCK_ACQUIRED:
+                        await release_graph_lock(complaint_id, token)
+                # 5.4：judge 返回后同栈检查；仅 next 含 human_review 且开关开才 resume
+                await self._maybe_sim_auto_review(complaint_id)
+                return self.get(complaint_id) or out
             finally:
+                # 任何路径（排队超时/锁被占/异常）都必须释放登记，否则同单永久被挡
                 _graph_inflight.discard(complaint_id)
-                if lock_state == LOCK_ACQUIRED:
-                    await release_graph_lock(complaint_id, token)
-            # 5.4：judge 返回后同栈检查；仅 next 含 human_review 且开关开才 resume
-            await self._maybe_sim_auto_review(complaint_id)
-            return self.get(complaint_id) or out
         return self._judge_stub(complaint_id)
 
     async def _maybe_sim_auto_review(self, complaint_id: str) -> None:
@@ -541,6 +558,22 @@ class ComplaintService:
         if session is not None:
             session["exception_info"] = exc_info
         return rec
+
+    def _reject_lock_unavailable(self, rec: dict) -> dict:
+        """Q-001 裁决（fail-closed）：互斥依赖（Redis）不可用时保守拒绝进入图执行。
+
+        不跑图、不退化双跑（runtime-correctness：在途任务互斥与幂等落库——
+        互斥依赖不可用时 MUST 保守拒绝，MUST NOT 退化为双跑）。工单转
+        pending_review 人工兜底（HTTP 仍 200，前端按状态展示），与排队超时
+        同一套转人审语义；Redis 恢复后可重新发起研判。
+        """
+        sid = rec["session_id"]
+        if not session_service.transition(sid, TaskStatus.pending_review):
+            logger.warning(
+                "judge_reject_lock_unavailable_transition_failed",
+                complaint_id=rec["complaint_id"],
+            )
+        return self._sync_from_session(rec)
 
     async def fail_queue_timeout(self, complaint_id: str) -> dict:
         """排队超时公共入口（main.py 队列消费循环对 expired 工单调用的）：
@@ -1072,14 +1105,21 @@ class ComplaintService:
             # 整段 poll+resume 持 resume 锁，避免订阅者与脚本各调度一次时并发双跑。
             #
             # 跨进程互斥：多副本下订阅者与 HTTP 可能落在不同副本，进程内 asyncio.Lock
-            # 拦不住 → sample_backflow 双跑、write_session 重复。Redis 不可用时为
-            # LOCK_UNAVAILABLE，退化为仅进程内守卫（fail-open）。
+            # 拦不住 → sample_backflow 双跑、write_session 重复。
+            # Q-001 同类裁决（fail-closed）：Redis 不可用 → LOCK_UNAVAILABLE 时无法
+            # 保证跨进程互斥，保守放弃本次 resume（checkpoint 仍停在 human_review
+            # 断点，重试审批/重新触发即可恢复），绝不退化双跑写重复会话。
             resume_token = new_token()
             resume_lock_state = await acquire_resume_lock(
                 complaint_id, ttl=int(_RESUME_WAIT_TIMEOUT_S) + 30, token=resume_token
             )
             if resume_lock_state == LOCK_HELD:
                 logger.info("graph_resume_skip_lock_held", complaint_id=complaint_id)
+                return
+            if resume_lock_state == LOCK_UNAVAILABLE:
+                logger.warning(
+                    "graph_resume_reject_lock_unavailable", complaint_id=complaint_id
+                )
                 return
             try:
                 resume_lock = _resume_lock(complaint_id)

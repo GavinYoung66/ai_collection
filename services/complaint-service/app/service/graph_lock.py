@@ -4,7 +4,9 @@
 （Redis 不可用时返回 False = "未获得锁"），拿来做图锁会让 **Redis 一抖动
 所有研判停摆**。而这里锁的语义是「防重复执行」，不是「保证正确性」——
 拿不到锁最坏是多跑一次图（有幂等回流兜底），让服务整体不可用则不划算。
-故本模块 Redis 故障时返回 `LOCK_UNAVAILABLE`，由调用方退化为「仅进程内守卫」。
+故本模块 Redis 故障时返回 `LOCK_UNAVAILABLE`，由调用方按自身语义保守处置：
+图执行 / resume 走 fail-closed 主动拒绝（Q-001 裁决，见 complaint_service），
+幂等双跑无害的任务（如维护循环）可继续执行。
 
 与进程内 `_graph_inflight` / `_resume_locks` 的分工：
 - 进程内结构：快速路径，零 Redis 往返，覆盖单副本的全部场景；
@@ -33,7 +35,7 @@ logger = structlog.get_logger()
 # 三态：调用方必须区分「他人持有」与「Redis 不可用」，二者处理方式相反
 LOCK_ACQUIRED = "acquired"        # 本进程拿到锁
 LOCK_HELD = "held"                # 他人持有 → 应跳过
-LOCK_UNAVAILABLE = "unavailable"  # Redis 不可用 → 退化为仅进程内守卫
+LOCK_UNAVAILABLE = "unavailable"  # Redis 不可用 → 调用方保守处置：图执行/resume 拒绝，幂等任务可继续
 
 # 原子「比对 token 再删除」，避免误删他人锁
 _RELEASE_LUA = """
