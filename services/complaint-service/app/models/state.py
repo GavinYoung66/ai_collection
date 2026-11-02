@@ -6,7 +6,7 @@ FATAL-3: case_evidence 使用 Annotated[dict[str, CaseEvidenceBundle], merge_cas
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Any, Optional
 
@@ -245,7 +245,10 @@ class ExceptionInfo(BaseModel):
     error_type: str = Field(default="", description="异常类型")
     message: str = Field(default="", description="异常消息")
     node: str = Field(default="", description="发生节点")
-    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat(), description="时间戳")
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat(),
+        description="时间戳（UTC，含时区偏移）",
+    )
 
     model_config = {"extra": "ignore"}
 
@@ -289,8 +292,8 @@ def _merge_bundle(left: CaseEvidenceBundle, right: CaseEvidenceBundle) -> CaseEv
 
     右侧字段有值（非空）则整字段替换左侧；右侧为空则保留左侧。
     """
-    def _pick(l, r):
-        return r if r else l
+    def _pick(left_value, right_value):
+        return right_value if right_value else left_value
 
     return CaseEvidenceBundle(
         case_id=left.case_id,
