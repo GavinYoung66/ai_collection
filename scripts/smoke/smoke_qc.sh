@@ -11,7 +11,7 @@
 #      QC_RAG_SENSITIVE_BASE=http://rag-service:8000（~50 词 current.dict）。本脚本不强制起 milvus。
 #   4. 路径 replay 需要 data-platform。本脚本主路径用 replay/raw
 #   5. seed 需要能连 PG（psql，或 docker exec 正在跑的 postgres 容器）
-#   6. alerts 签发 JWT 需要能 import common.security.rbac（jose）。pick_python 优先 conda ai_collection；
+#   6. alerts 签发 JWT 需要能 import common.security.rbac（PyJWT）。pick_python 优先 conda ai_collection；
 #        也可 PYTHON=/path/to/ai_collection/bin/python bash scripts/smoke/smoke_qc.sh
 #
 # 轻量冒烟起栈（仓库根，不要起 call-service；非 demo 默认词库）：
@@ -250,9 +250,9 @@ import traceback
 from uuid import uuid4
 
 try:
-    import jose  # noqa: F401
+    import jwt  # noqa: F401
 except ImportError as exc:
-    print(f"missing jose: {exc}", file=sys.stderr)
+    print(f"missing PyJWT: {exc}", file=sys.stderr)
     traceback.print_exc()
     sys.exit(2)
 
@@ -276,8 +276,8 @@ PY
         rm -f "$TOKEN_ERR"
         if [ "$TOKEN_STATUS" -eq 127 ] || echo "$ERR_TXT" | grep -qi "No such file"; then
             fail "could not mint SUPV token: 找不到 python (${PYBIN})"
-        elif [ "$TOKEN_STATUS" -eq 2 ] || echo "$ERR_TXT" | grep -qi "jose"; then
-            fail "could not mint SUPV token: 缺 jose (${PYBIN})"
+        elif [ "$TOKEN_STATUS" -eq 2 ] || echo "$ERR_TXT" | grep -qi "pyjwt"; then
+            fail "could not mint SUPV token: 缺 PyJWT (${PYBIN})"
         elif echo "$ERR_TXT" | grep -qi "JWT_SECRET\|ValidationError\|pydantic"; then
             fail "could not mint SUPV token: create_token 抛错（JWT_SECRET / .env）using ${PYBIN}"
         else

@@ -12,9 +12,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import jwt
 import pytest
 from fastapi.testclient import TestClient
-from jose import jwt
 
 from common.config.settings import settings
 from common.db.models.user import User

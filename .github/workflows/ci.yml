@@ -165,6 +165,43 @@ jobs:
             (cd services/$svc && PYTHONPATH=../.. pytest tests/ -q)
           done
 
+  # T20 依赖漏洞门禁：对单一全局清单 requirements.lock 的钉死条目执行 pip-audit（OSV 源）。
+  # 阻断口径：存在任何已知漏洞即失败；确无修复版本的存量项以 --ignore-vuln 显式登记。
+  #
+  # 已登记例外（vulnerability-management：暴露面 + 缓解 + 复查日期）：
+  #   PYSEC-2026-1845 / CVE-2025-71176（pytest，MODERATE，tmpdir 处理）
+  #   - 暴露面：pytest 仅测试期依赖，不进入生产镜像；CI 在一次性 runner 内执行，无可信边界外输入。
+  #   - 缓解：根 lock 钉 7.4.4 以兼容 pytest-asyncio 0.23 与项目插件；升级 pytest 9 需同步迁移测试栈。
+  #   - 复查：2027-05-01，届时随 pytest-asyncio 一并升级后移除本例外。
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Q-002 裁决方案 A：Dockerfile 直钉条目必须与根 lock 一致（消除双源漂移），
+      # 带 pins-lock-exempt 标记的独立安装模式文件跳过（如 deploy/ocr）。
+      - name: Verify Dockerfile pins match root lock
+        run: python scripts/check_dockerfile_pins.py
+
+      - name: Install pip-audit
+        run: python -m pip install "pip-audit==2.10.1"
+
+      - name: Audit pinned dependencies
+        run: |
+          set -euo pipefail
+          # 仅审计 `name==version` 钉死条目：全量 lock 解析会触发 rocketmq 传递依赖
+          # （grpcio-tools）构建，CI 无编译链路；--no-deps 保证只核对已钉版本本身。
+          grep -E '^[[:alnum:]_.-]+(\[[^]]*\])?==' requirements.lock > /tmp/requirements.audit.txt
+          pip-audit -r /tmp/requirements.audit.txt \
+            --no-deps --disable-pip \
+            --vulnerability-service osv --timeout 60 \
+            --ignore-vuln PYSEC-2026-1845
+
   # T01 密钥扫描门禁：工作树出现明文密钥即失败。
   # 只扫工作树（--no-git）：历史提交中的既有泄漏须先人工轮换再清理历史，
   # 否则历史遗留会让门禁永久红灯、掩盖新增泄漏。

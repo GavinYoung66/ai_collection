@@ -2,7 +2,7 @@
 
 设计要点（对应 change api-gateway-hardening D5 / specs/security/authn）：
 - JWT 验签/过期/iss/aud 全部复用并扩展自 common.security.rbac，
-  本文件不得自行引入 jose 库或重复实现 JWT 解码（单一验签实现）。
+  本文件不得自行引入 JWT 库或重复实现 JWT 解码（单一验签实现）。
 - role 直接取自 JWT payload 的 role 字段，与 require_role.py 语义一致，
   不引入第二套角色模型。
 - API Key 使用 hmac.compare_digest 恒定时间比对，防时序攻击。

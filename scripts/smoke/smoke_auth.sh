@@ -8,7 +8,7 @@
 # 行为约定：
 #   - 服务端验签同读 JWT_SECRET（CI/本地同源注入），自签 token 在认证开启时可用；
 #   - iss/aud 若在 settings 配置则一并写入载荷，避免手动校验不匹配；
-#   - 找不到 python/jose/JWT_SECRET 时输出空串，冒烟以匿名降级
+#   - 找不到 python/PyJWT/JWT_SECRET 时输出空串，冒烟以匿名降级
 #     （本地关闭认证场景零回归；认证开启时对应断言会以 401 显式失败，不静默假通过）。
 
 smoke_pick_python() {
