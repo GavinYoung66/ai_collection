@@ -9,7 +9,9 @@
 """
 from __future__ import annotations
 
+import asyncio
 import contextvars
+import weakref
 from typing import Any, Optional
 
 import httpx
@@ -22,6 +24,30 @@ import httpx
 _llm_last_usage: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "llm_last_usage", default=None
 )
+
+# 共享 HTTP 客户端（T16）：同一事件循环内复用同一个 AsyncClient，保留 keep-alive
+# 连接池，避免每次调用新建 client。按事件循环隔离——测试/重载切换 loop 时新建，
+# 防止跨 loop 复用已绑定的连接池。
+_shared_clients: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, httpx.AsyncClient
+] = weakref.WeakKeyDictionary()
+
+
+def _get_shared_client() -> httpx.AsyncClient:
+    """取得当前事件循环的共享 client；已关闭则重建。"""
+    loop = asyncio.get_running_loop()
+    client = _shared_clients.get(loop)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient()
+        _shared_clients[loop] = client
+    return client
+
+
+async def aclose_shared_client() -> None:
+    """显式关闭当前事件循环的共享 client（服务 shutdown 钩子调用，幂等）。"""
+    client = _shared_clients.pop(asyncio.get_running_loop(), None)
+    if client is not None and not client.is_closed:
+        await client.aclose()
 
 
 async def post_json(
@@ -55,8 +81,7 @@ async def post_json(
 
     if client is not None:
         return await _do(client)
-    async with httpx.AsyncClient() as owned:
-        return await _do(owned)
+    return await _do(_get_shared_client())
 
 
 async def post_chat_completions(
