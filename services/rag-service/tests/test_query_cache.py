@@ -257,7 +257,9 @@ class TestSearchRouteCache:
         self, monkeypatch, fake_redis, cache_enabled
     ):
         req = SearchRequest(query="逾期协商", category="regulation", top_k=5)
-        key = query_cache.make_cache_key(req.query, req.category, req.top_k)
+        key = query_cache.make_cache_key(
+            req.query, req.category, req.top_k, scope="anon"
+        )
         cached = {"code": "0", "message": "success", "data": {"results": []}, "trace_id": "old"}
         fake_redis.store[key] = json.dumps(cached, ensure_ascii=False)
 
@@ -276,7 +278,9 @@ class TestSearchRouteCache:
         assert resp["code"] == "0"
         assert embed.calls == 1
 
-        key = query_cache.make_cache_key(req.query, req.category, req.top_k)
+        key = query_cache.make_cache_key(
+            req.query, req.category, req.top_k, scope="anon"
+        )
         assert key in fake_redis.store
         assert json.loads(fake_redis.store[key]) == resp
         assert fake_redis.ttls[key] == settings.KB_CACHE_TTL
@@ -342,7 +346,9 @@ class TestCacheFallbackAndHitLog:
         assert resp["code"] == "0"
         assert resp["data"]["results"] == []  # 兜底响应
 
-        key = query_cache.make_cache_key(req.query, req.category, req.top_k)
+        key = query_cache.make_cache_key(
+            req.query, req.category, req.top_k, scope="anon"
+        )
         assert key not in fake_redis.store  # 兜底结果未被缓存
         assert fake_redis.calls["setex"] == 0
 
@@ -367,7 +373,9 @@ class TestCacheFallbackAndHitLog:
         assert resp["code"] == "0"
         assert resp["data"]["degraded"] is True
 
-        key = query_cache.make_cache_key(req.query, req.category, req.top_k)
+        key = query_cache.make_cache_key(
+            req.query, req.category, req.top_k, scope="anon"
+        )
         assert key not in fake_redis.store  # 降级结果未被缓存
 
     @pytest.mark.asyncio
@@ -376,7 +384,9 @@ class TestCacheFallbackAndHitLog:
     ):
         """缓存命中落 kb_search_logs（cache_hit='1'）（V1-T20）。"""
         req = SearchRequest(query="逾期协商", category="regulation", top_k=5)
-        key = query_cache.make_cache_key(req.query, req.category, req.top_k)
+        key = query_cache.make_cache_key(
+            req.query, req.category, req.top_k, scope="anon"
+        )
         cached = {
             "code": "0",
             "message": "success",

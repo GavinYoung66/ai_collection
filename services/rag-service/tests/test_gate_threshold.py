@@ -220,7 +220,9 @@ class TestGate2ThresholdNotPollutedByWeighting:
             },
             log_records,
         )
-        result = await svc.hybrid_search("测试", "case", 5)
+        result = await svc.hybrid_search(
+            "测试", "case", 5, jwt_payload={"role": "AGENT", "department": "催收一部"}
+        )
 
         # ① 不误触闸门 2 兜底（旧实现 max=0.34<0.35 → 空 results）
         assert result["results"] != []
@@ -247,7 +249,9 @@ class TestGate2ThresholdNotPollutedByWeighting:
             },
             log_records,
         )
-        result = await svc.hybrid_search("测试", "case", 5)
+        result = await svc.hybrid_search(
+            "测试", "case", 5, jwt_payload={"role": "AGENT", "department": "催收一部"}
+        )
 
         # 全局最大 0.32 < 0.35 → 兜底（不因加权放大误放行）
         assert result["results"] == []

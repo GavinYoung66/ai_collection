@@ -22,7 +22,11 @@ from app.services.llm_service import LLMService
 from app.services.log_service import LogService
 from app.services.query_rewrite_service import RewriteService
 from app.services.routing_service import RoutingService
-from app.services.row_access_service import RowAccessService
+from app.services.row_access_service import (
+    RowAccessService,
+    anonymous_allowed_categories,
+    filter_by_categories,
+)
 from app.services.search_trace import SearchTraceCollector
 from app.services.session_service import SessionService
 from app.services.weighting_service import WeightingService
@@ -495,38 +499,64 @@ class SearchService:
             if reranked:
                 max_rerank_score = max(float(x.get("rerank_score", 0.0)) for x in reranked)
 
-        # --- V2 Step 7: 行级权限过滤（开关，Rerank 后） ---
-        if settings.KB_ROW_LEVEL_ENABLED and self._row_access_svc is not None:
+        # --- V2 Step 7: 行级权限过滤（Rerank 后） ---
+        # T21：匿名（jwt_payload=None）请求必须过滤，不受 KB_ROW_LEVEL_ENABLED 约束；
+        # 否则 payload=None 会放行受限文档（历史 fail-open 漏洞）。
+        anonymous = jwt_payload is None
+        if anonymous or (
+            settings.KB_ROW_LEVEL_ENABLED and self._row_access_svc is not None
+        ):
             try:
-                reranked = self._row_access_svc.filter(
-                    reranked, jwt_payload, category
-                )
+                if self._row_access_svc is not None:
+                    reranked = self._row_access_svc.filter(
+                        reranked, jwt_payload, category
+                    )
+                else:
+                    # 未注入行级服务（单测/裁剪部署）→ 静态匿名白名单 fail-closed
+                    reranked = filter_by_categories(
+                        reranked, anonymous_allowed_categories(), category
+                    )
             except Exception as e:
                 # V3 fail-closed：行级权限过滤异常不得静默放行（消除 fail-open 越权风险）
                 logger.error(
                     "row_access_unexpected_error",
                     error=str(e),
                     trace_id=trace_id,
+                    anonymous=anonymous,
                 )
-                try:
-                    default_matrix = self._row_access_svc.get_default_matrix()
-                    allowed = set(
-                        default_matrix.get(("default", "default"), [])
-                    )
-                    if category is not None:
-                        allowed = allowed & {category}
-                    reranked = [
-                        item for item in reranked
-                        if item.get("category") in allowed
-                    ]
-                except Exception as e2:
-                    # 保底矩阵也不可用 → 置空走下游兜底闸门，绝不返回越权数据
-                    logger.error(
-                        "row_access_fail_closed_failed",
-                        error=str(e2),
-                        trace_id=trace_id,
-                    )
-                    reranked = []
+                if anonymous:
+                    # 匿名异常兜底：仍按静态白名单收紧，绝不回到全量放行
+                    try:
+                        reranked = filter_by_categories(
+                            reranked, anonymous_allowed_categories(), category
+                        )
+                    except Exception as e2:
+                        logger.error(
+                            "row_access_fail_closed_failed",
+                            error=str(e2),
+                            trace_id=trace_id,
+                        )
+                        reranked = []
+                else:
+                    try:
+                        default_matrix = self._row_access_svc.get_default_matrix()
+                        allowed = set(
+                            default_matrix.get(("default", "default"), [])
+                        )
+                        if category is not None:
+                            allowed = allowed & {category}
+                        reranked = [
+                            item for item in reranked
+                            if item.get("category") in allowed
+                        ]
+                    except Exception as e2:
+                        # 保底矩阵也不可用 → 置空走下游兜底闸门，绝不返回越权数据
+                        logger.error(
+                            "row_access_fail_closed_failed",
+                            error=str(e2),
+                            trace_id=trace_id,
+                        )
+                        reranked = []
 
         # 闸门 2（rerank 0.35 兜底）
         threshold = settings.KB_RERANK_THRESHOLD

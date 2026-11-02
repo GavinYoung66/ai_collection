@@ -196,10 +196,11 @@ async def get_llm_service() -> LLMService:
 
 
 def get_jwt_payload(request: Request) -> dict | None:
-    """从 Authorization 头提取 JWT payload；无 token 或校验失败返回 None（V1 兼容）。
+    """从 Authorization 头提取 JWT payload；无 token 或校验失败返回 None（匿名）。
 
-    搜索接口权限 ALL，不因 JWT 缺失/无效而 401；
-    RowAccessService 在 payload=None 时原样放行（V1 行为）。
+    搜索接口权限 ALL，不因 JWT 缺失/无效而 401；但匿名不等于放行全部：
+    RowAccessService 在 payload=None 时只放行 ``KB_ANONYMOUS_CATEGORIES``
+    白名单（默认 regulation），受限文档不进入检索结果（T21）。
     """
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
