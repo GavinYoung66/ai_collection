@@ -166,10 +166,17 @@ class CircuitBreaker:
         return False
 
     async def record_success(self) -> None:
-        """记录成功：连续失败计数清零；half-open 探针成功则闭合。"""
-        # 步骤1：成功一次就把连续失败计数清零（因为是"连续"失败才算数）
+        """记录成功：仅 closed / half-open 态生效。
+
+        open 态的成功上报（如被拒绝请求的迟到回执）不改变状态机：
+        不清零失败计数、不重置 ``opened_at``、不延长重置窗口。
+        """
+        # 分支1：open 态的成功上报忽略，状态迁移只能由阈值/窗口/探针驱动
+        if self._state is BreakerState.OPEN:
+            return
+        # 分支2：closed / half-open → 连续失败计数清零
         self._failures = 0
-        # 步骤2：如果当前是 half-open 探针且成功 → 恢复 closed
+        # 分支3：half-open 探针成功 → 恢复 closed
         if self._state is BreakerState.HALF_OPEN:
             self._state = BreakerState.CLOSED
             self._opened_at = None
