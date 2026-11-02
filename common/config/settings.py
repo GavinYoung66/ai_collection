@@ -89,6 +89,8 @@ class Settings(BaseSettings):
     API_KEY_ROLE: str = "admin"
 
     # 业务参数（外呼 / 质检 / 熔断）
+    # 外呼合规时区：时段判定一律按此 IANA 时区（默认北京时间），与容器 TZ 无关
+    CALL_TIMEZONE: str = "Asia/Shanghai"
     CALL_ALLOWED_HOURS: str = "08:00-21:00"
     CALL_DAILY_LIMIT_PER_USER: int = 3
     CALL_RETRY_INTERVAL_MIN: int = 30
