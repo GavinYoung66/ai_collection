@@ -18,12 +18,12 @@
 - [x] ✅ 2.3 [T07] `create_task` 未持有引用，事件发布可能被 GC 静默丢弃｜位置：`publisher.py:98-100`｜整改：维护 `set[Task]` + `add_done_callback` 移除（参考 `main.py:91`）｜验证：任务完成后强引用集合为空；GC 压测下无事件丢失｜状态：已完成（`_bus_publish_tasks` 强引用 + done_callback(discard)；GC 压测 20 条事件全部送达且集合归零，单测 3 passed）｜估算：S
 - [x] ✅ 2.4 [T08] 质检回写反查时序缺口：事件先于落库即 `skip`，不重试、不入队｜位置：`data-platform/.../subscriber.py:189`｜整改：改延迟重试队列 / 落 pending 表 + 定时补偿｜验证：模拟事件早于落库，补偿后回写成功且重试次数可观测｜状态：已完成（qc_record 不可见时入延迟补偿队列，3s 间隔/10 次上限，`enqueued/succeeded/exhausted/skipped_missing_session` 计数可观测，lifespan 新增补偿循环；新增单测 5 passed，data-platform 22 passed）｜估算：L
 
-## 3. 🟡 消息可靠性与资源泄漏（#CA8A04）｜预期规模：T09=M、T10=M、T11=S、T12=M（粗估）
+## 3. ✅🟡 消息可靠性与资源泄漏（#CA8A04）｜预期规模：T09=M、T10=M、T11=S、T12=M（粗估；2026-11-02 实测校准：T09=L、T12=S~M-，其余相符）｜（2026-11-02 批次评审 + 修复后验收通过；eventbus 全量 57 passed、T10/T06 相关 29 passed、T11 5 passed）
 
-- [ ] 3.1 [T09] DLQ 无人消费；且"DLQ 生产失败仍 ACK"导致消息彻底丢失｜位置：`common/eventbus/rocketmq.py:366`｜整改：补 DLQ 消费/重放入口；DLQ 生产失败不 ACK、靠不可见超时重投｜验证：mock DLQ 写入失败时断言未 ACK；重放入口按 `event_id` 命中
-- [ ] 3.2 [T10] 工单落库幂等非原子（SELECT-then-INSERT）；主键即 case_id，不会重复建单，但并发下后到请求报落库失败｜位置：`complaint_service.py:215-244`｜整改：改 `INSERT ... ON CONFLICT DO NOTHING` 或捕获 `IntegrityError` 降级为幂等成功｜验证：并发两请求均返回成功，数据库中仅一条记录
-- [ ] 3.3 [T11] ASR 音频分段 `[open(p).read()...]` 不关闭，fd 泄漏｜位置：`dashscope_provider.py:117`｜整改：改用 `Path(p).read_bytes()` 或 `with open`｜验证：连续处理 100 段后进程 fd 数不线性增长
-- [ ] 3.4 [T12] RocketMQ receive 异常 `raise` 冲出循环，订阅永久停止、无自动重启｜位置：`common/eventbus/rocketmq.py:194-208`｜整改：异常处 `continue` + 退避 sleep，或加看门狗重启｜验证：注入一条抛异常消息后，后续消息仍被消费
+- [x] ✅ 3.1 [T09] DLQ 无人消费；且"DLQ 生产失败仍 ACK"导致消息彻底丢失｜位置：`common/eventbus/rocketmq.py:366`｜整改：补 DLQ 消费/重放入口；DLQ 生产失败不 ACK、靠不可见超时重投｜验证：mock DLQ 写入失败时断言未 ACK；重放入口按 `event_id` 命中｜状态：已完成（`_send_to_dlq` 返回 bool，失败记 `eventbus_dlq_produce_failed_no_ack` 且不 ACK；新增 `replay_dlq` 支持 `event_id`/`since`/`until`/`dry_run`/`max_messages`，重放失败不 ACK。评审 R-001 更正：运维入口本就存在——主 spec SHALL 项 `scripts/event_replay.py`；已将 CLI 改为委托 `replay_dlq` 单一实现消除双实现漂移，并补 CLI 委托测试 2 用例。S-001 入口形态落实为该 CLI。T09 相关单测 8 passed，eventbus 全量 57 passed）｜估算：M（实测 L）
+- [x] ✅ 3.2 [T10] 工单落库幂等非原子（SELECT-then-INSERT）；主键即 case_id，不会重复建单，但并发下后到请求报落库失败｜位置：`complaint_service.py:215-244`｜整改：改 `INSERT ... ON CONFLICT DO NOTHING` 或捕获 `IntegrityError` 降级为幂等成功｜验证：并发两请求均返回成功，数据库中仅一条记录｜状态：已完成（`pg_insert(...).on_conflict_do_nothing(index_elements=[Complaint.id])` 单语句原子幂等，软删行仍恢复；单测 5 passed。回滚归属：主体实现随批次2 T06 提交入库（576e6ea），同文件残留 lint 清理另见批次3独立提交。Q-002 裁决：真实 PG 并发用例（`COMPLAINT_DB_TESTS=1`+PG）以「待环境复跑」为验收边界放行，本地实测 T10/T06 相关 29 passed）｜估算：M
+- [x] ✅ 3.3 [T11] ASR 音频分段 `[open(p).read()...]` 不关闭，fd 泄漏｜位置：`dashscope_provider.py:117`｜整改：改用 `Path(p).read_bytes()` 或 `with open`｜验证：连续处理 100 段后进程 fd 数不线性增长｜状态：已完成（改为 `Path(p).read_bytes()` 确定性关闭句柄；单测 5 passed（本次评审环境实测复跑通过），含 100 段 fd 水位与裸 `open` 零命中断言）｜估算：S
+- [x] ✅ 3.4 [T12] RocketMQ receive 异常 `raise` 冲出循环，订阅永久停止、无自动重启｜位置：`common/eventbus/rocketmq.py:194-208`｜整改：异常处 `continue` + 退避 sleep，或加看门狗重启｜验证：receive 注入异常后退避续跑，后续消息仍被消费（消息级异常由既有 retry→DLQ + `gather(return_exceptions=True)` 兜底，S-004 口径修正）｜状态：已完成（receive 异常不再抛出：指数退避（1s 起、30s 封顶）+ `continue`，恢复后打 `eventbus_consumer_receive_recovered`；Q-001 裁决纳入边界：consumer 启动失败同属「订阅永久停止」缺陷类，同样退避重试（`eventbus_consumer_start_failed/recovered`）并补回归测试；同步更新既有 `test_rocketmq.py` 契约。单测 4 passed（含启动重试 1 用例），eventbus 全量 57 passed）｜估算：M（实测 S~M-）
 
 ## 4. 🟢 时间、状态与资源生命周期（#16A34A）｜预期规模：以 S 为主（T13/T15/T16/T17/T18 单点修复、T14=M，粗估）
 
