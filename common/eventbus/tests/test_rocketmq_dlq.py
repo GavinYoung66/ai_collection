@@ -74,6 +74,59 @@ async def test_handler_exhaust_sends_dlq_and_hook():
 
 
 @pytest.mark.asyncio
+async def test_dlq_produce_failure_does_not_ack():
+    """T09：DLQ 写入失败时不得 ACK，交由不可见超时重投（不丢语义）。"""
+    bus = RocketMQEventBus(endpoints="127.0.0.1:18081", max_retry_times=0)
+    hooks: list[tuple[str, dict[str, Any]]] = []
+
+    async def capture(name: str, payload: dict[str, Any]) -> None:
+        hooks.append((name, payload))
+
+    async def boom(_: EventEnvelope) -> None:
+        raise RuntimeError("always fail")
+
+    envelope = build_envelope(
+        "etl.task.done",
+        {"session_id": "s1", "case_id": "c1"},
+        event_id="evt_dlq_noack",
+    )
+    msg = MagicMock()
+    msg.body = envelope.model_dump_json().encode("utf-8")
+    consumer = MagicMock()
+    loop = asyncio.get_running_loop()
+
+    def raise_publish_sync(*_args):
+        raise RuntimeError("dlq topic unavailable")
+
+    with (
+        patch("common.eventbus.observability.on_event", new=AsyncMock(side_effect=capture)),
+        patch.object(bus, "_publish_sync", side_effect=raise_publish_sync),
+        patch.object(bus, "_executor", MagicMock()),
+    ):
+
+        async def run_in_executor(executor, fn, *args):
+            if fn is consumer.ack:
+                return None
+            if fn is bus._publish_sync:
+                return bus._publish_sync(*args)
+            return fn(*args) if callable(fn) else None
+
+        with patch.object(loop, "run_in_executor", side_effect=run_in_executor):
+            await bus._handle_message(
+                msg,
+                "etl.task.done",
+                "gid_qc_etl_task_done",
+                boom,
+                consumer,
+                loop,
+            )
+
+    consumer.ack.assert_not_called()
+    names = [n for n, _ in hooks]
+    assert "csmp.eventbus.dlq" in names
+
+
+@pytest.mark.asyncio
 async def test_consume_reject_log_includes_event_id_and_rejected_field():
     """Illegal wire body → eventbus_consume_reject carries identity + rejected_field."""
     bus = RocketMQEventBus(endpoints="127.0.0.1:18081", max_retry_times=0)
