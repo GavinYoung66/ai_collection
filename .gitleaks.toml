@@ -1,0 +1,23 @@
+# 密钥扫描配置（CI: .github/workflows/ci.yml 的 secret-scan job）
+# 只扫工作树（--no-git）：历史提交里的既有泄漏须先人工轮换，再做历史清理，
+# 避免历史遗留让门禁永久红灯、反而掩盖新增泄漏。
+title = "ai_collection secret scan"
+
+[extend]
+useDefault = true
+
+# LangSmith Key 前缀特征（默认规则对 lsv2_pt_ 覆盖不足）
+[[rules]]
+id = "langsmith-api-key"
+description = "LangSmith API key (lsv2_pt_*)"
+regex = '''lsv2_pt_[A-Za-z0-9]{8,}_[A-Za-z0-9]{8,}'''
+tags = ["secret", "langsmith"]
+
+# .env 不豁免：一旦被意外提交必须被扫出（CI 门禁命中即失败），仅豁免模板空值键名
+[allowlist]
+description = "模板中的空值键名不是密钥"
+regexes = [
+  '''^(?:DEEPSEEK|LANGSMITH|DASHSCOPE)_API_KEY$''',
+  # 空值 KEY= 后面一行的非密钥内容会被 generic 规则误判，按已知误报放行
+  '''^LLM_MAX_CONCURRENCY=4$''',
+]

@@ -13,6 +13,10 @@ jobs:
   # 五个有实质测试的服务矩阵；检查名形如 service-test (<service>)
   service-test:
     runs-on: ubuntu-latest
+    # T03：CI checkout 无 .env，显式提供非占位测试密钥，满足启动 fail-fast 校验
+    env:
+      JWT_SECRET: ci_jwt_secret_for_tests_only
+      AES_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     strategy:
       fail-fast: false # 任一条目失败不取消其余条目，暴露全部问题（ci-matrix spec：其余 job 仍执行完毕）
       matrix:
@@ -160,6 +164,18 @@ jobs:
             echo "== $svc health =="
             (cd services/$svc && PYTHONPATH=../.. pytest tests/ -q)
           done
+
+  # T01 密钥扫描门禁：工作树出现明文密钥即失败。
+  # 只扫工作树（--no-git）：历史提交中的既有泄漏须先人工轮换再清理历史，
+  # 否则历史遗留会让门禁永久红灯、掩盖新增泄漏。
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: gitleaks scan (working tree)
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.21.2 \
+            detect --source /repo --no-git --config /repo/.gitleaks.toml --redact --verbose
 
   # 前端门禁（F0 tasks 7.1）：lint / 类型 / 单测 / 分层依赖四道闸，任何一步失败即 job 失败。
   # 硬约束：四个 step 彼此独立，禁止 `|| true`、禁止 `continue-on-error`（覆盖即视为门禁失效）。
