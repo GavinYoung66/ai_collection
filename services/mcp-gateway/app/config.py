@@ -7,6 +7,9 @@
 """
 from __future__ import annotations
 
+import os
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,6 +38,14 @@ class GatewaySettings(BaseSettings):
     # Authorization: Bearer <JWT|API Key>，/health 始终放行（见 app/auth.py）
     ENABLE_AUTH: bool = False
     AUTH_API_KEY: str = ""
+
+    @model_validator(mode="after")
+    def _force_auth_in_production(self):
+        """生产环境强制开启网关鉴权（忽略配置中的 false）。"""
+        env = (os.getenv("MCP_GATEWAY_ENV") or os.getenv("ENV") or self.ENV or "").strip().lower()
+        if env in {"prod", "production"}:
+            self.ENABLE_AUTH = True
+        return self
 
     # ===== Batch 2：下游服务地址（docker network 服务名为默认值）=====
     # rag-service：rag_kb 检索（容器内 8000；宿主机映射 8002）

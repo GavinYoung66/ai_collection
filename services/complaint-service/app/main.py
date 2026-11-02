@@ -14,6 +14,7 @@ from common.config.logging import setup_logging
 from common.errors.handlers import register_exception_handlers
 from common.observability.metrics import mount_metrics
 from common.trace.middleware import TraceMiddleware
+from app.api.auth import register_auth_handlers
 from app.api.health import router as health_router
 from app.api.routes.complaints import router as complaints_router
 from app.api.routes.mode import router as mode_router
@@ -280,6 +281,11 @@ async def lifespan(app: FastAPI):
     - Mock 默认路径：不要求 rag-service
     """
     # ── startup ──
+    # T03：JWT/AES 密钥为默认占位值时立即失败（生产必须由 KMS 注入）
+    from common.config.settings import validate_required_secrets
+
+    validate_required_secrets(settings)
+
     # 链路追踪兜底：统一开关关闭时清除 LangSmith/LangChain SDK 环境变量，
     # 防止 LangGraph 等 SDK 读 os.environ 绕过闸门自动上报（与 rag-service 对齐）。
     from common.trace.langfuse_gate import configure_langfuse_env
@@ -287,6 +293,11 @@ async def lifespan(app: FastAPI):
 
     configure_langsmith_env(settings)
     configure_langfuse_env(settings)
+
+    # T02：认证模式启动日志（生产强制开启；本地关闭时显著告警）
+    from common.security.rbac import log_auth_mode
+
+    log_auth_mode(settings, "complaint-service")
 
     # G7：韧性事件（csmp.{component}.{action}）统一路由到本服务 publisher
     wire_resilience_hooks()
@@ -415,6 +426,7 @@ app.add_middleware(TraceMiddleware)
 # 同时注册无需鉴权的 GET /metrics（原生 exposition，不包统一信封）。
 mount_metrics(app, service_name="complaint-service")
 register_exception_handlers(app)
+register_auth_handlers(app)
 
 # 健康检查：同时提供 /health 与 /api/v1/health
 app.include_router(health_router, prefix="/api/v1")

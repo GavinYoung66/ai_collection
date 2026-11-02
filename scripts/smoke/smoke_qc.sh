@@ -234,37 +234,7 @@ else
     fail "replay/raw code=0 or A2011 with compliance_score"
 fi
 
-echo "--- GET /api/v1/qc/records/{session_id} ---"
-if python3 - "$BASE" "$SESSION_ID" <<'PY'
-import json, sys, urllib.error, urllib.request
-base, session_id = sys.argv[1], sys.argv[2]
-url = f"{base}/api/v1/qc/records/{session_id}"
-try:
-    with urllib.request.urlopen(url, timeout=10) as resp:
-        status = resp.getcode()
-        body = json.loads(resp.read().decode())
-except urllib.error.HTTPError as exc:
-    status = exc.code
-    body = json.loads(exc.read().decode()) if exc.fp else {}
-except Exception as exc:
-    print(f"records request failed: {exc}", file=sys.stderr)
-    sys.exit(1)
-if status != 200 or body.get("code") != "0":
-    print(f"records failed HTTP={status} body={body}", file=sys.stderr)
-    sys.exit(1)
-data = body.get("data") or {}
-if not data.get("qc_record_id"):
-    print("missing qc_record_id", file=sys.stderr)
-    sys.exit(1)
-print(f"qc_record_id={data['qc_record_id']}")
-PY
-then
-    pass "GET records detail has qc_record_id"
-else
-    fail "GET records detail has qc_record_id"
-fi
-
-echo "--- GET /api/v1/qc/alerts (SUPV) ---"
+echo "--- mint SUPV JWT (records / alerts 冒烟凭证；T02 冒烟补凭证) ---"
 PYBIN="$(pick_python || true)"
 TOKEN=""
 if [ -z "$PYBIN" ]; then
@@ -318,6 +288,40 @@ PY
         rm -f "$TOKEN_ERR"
     fi
 fi
+
+echo "--- GET /api/v1/qc/records/{session_id} ---"
+if python3 - "$BASE" "$SESSION_ID" "$TOKEN" <<'PY'
+import json, sys, urllib.error, urllib.request
+base, session_id, token = sys.argv[1], sys.argv[2], sys.argv[3]
+headers = {"Authorization": f"Bearer {token}"} if token else {}
+url = f"{base}/api/v1/qc/records/{session_id}"
+try:
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        status = resp.getcode()
+        body = json.loads(resp.read().decode())
+except urllib.error.HTTPError as exc:
+    status = exc.code
+    body = json.loads(exc.read().decode()) if exc.fp else {}
+except Exception as exc:
+    print(f"records request failed: {exc}", file=sys.stderr)
+    sys.exit(1)
+if status != 200 or body.get("code") != "0":
+    print(f"records failed HTTP={status} body={body}", file=sys.stderr)
+    sys.exit(1)
+data = body.get("data") or {}
+if not data.get("qc_record_id"):
+    print("missing qc_record_id", file=sys.stderr)
+    sys.exit(1)
+print(f"qc_record_id={data['qc_record_id']}")
+PY
+then
+    pass "GET records detail has qc_record_id"
+else
+    fail "GET records detail has qc_record_id"
+fi
+
+echo "--- GET /api/v1/qc/alerts (SUPV) ---"
 
 if [ -n "$TOKEN" ]; then
     if python3 - "$BASE" "$TOKEN" "$SESSION_ID" <<'PY'

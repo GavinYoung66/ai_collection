@@ -11,6 +11,8 @@ class Settings(BaseSettings):
 
     # 环境
     ENV: str = "dev"
+    # 认证总开关：生产恒为开启（见 auth_required）；本地可显式关闭，启动时打印显著告警
+    ENABLE_AUTH: bool = False
 
     # PostgreSQL
     PG_HOST: str = "localhost"
@@ -65,6 +67,13 @@ class Settings(BaseSettings):
     CCC_ACCESS_KEY_ID: str = "change_me"
     CCC_ACCESS_KEY_SECRET: str = "change_me"
 
+    # 种子脚本口令（scripts/seed/seed_users.py；生产禁止执行 seed，仅本地/测试注入）
+    SEED_ADMIN_PASSWORD: str = ""
+    SEED_SUPERVISOR_PASSWORD: str = ""
+    SEED_AGENT_PASSWORD: str = ""
+    SEED_QC_REVIEWER_PASSWORD: str = ""
+    SEED_AI_TRAINER_PASSWORD: str = ""
+
     # AES / JWT
     AES_KEY: str = "change_me"
     JWT_SECRET: str = "change_me"
@@ -88,6 +97,15 @@ class Settings(BaseSettings):
     MAX_DIALOG_TURNS: int = 15
     LLM_CIRCUIT_BREAKER_THRESHOLD: int = 3
     LLM_CIRCUIT_BREAKER_RECOVERY: int = 60
+
+    @property
+    def is_production(self) -> bool:
+        return self.ENV.strip().lower() in {"prod", "production"}
+
+    @property
+    def auth_required(self) -> bool:
+        """认证是否强制：生产环境恒为 true（忽略 ENABLE_AUTH=false），本地可关闭调试。"""
+        return self.is_production or self.ENABLE_AUTH
 
     @property
     def pg_dsn(self) -> str:
@@ -120,6 +138,25 @@ class Settings(BaseSettings):
         import os
 
         return os.environ.get("DeepSeek_API_KEY", "")
+
+
+_PLACEHOLDER_SECRETS = {"", "change_me", "<change_me>", "changeme", "change-me", "none", "null"}
+
+
+def validate_required_secrets(cfg) -> None:
+    """启动 fail-fast：JWT / AES 密钥不得为默认占位值。
+
+    仅校验“是否仍为占位/空值”，不打印密钥内容；生产由 KMS / 密钥系统注入。
+    """
+    invalid = [
+        name
+        for name in ("JWT_SECRET", "AES_KEY")
+        if str(getattr(cfg, name, "") or "").strip().lower() in _PLACEHOLDER_SECRETS
+    ]
+    if invalid:
+        raise RuntimeError(
+            "启动失败：以下密钥仍为默认占位值，必须由 KMS/密钥系统注入：" + ", ".join(invalid)
+        )
 
 
 settings = Settings()

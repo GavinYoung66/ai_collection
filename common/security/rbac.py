@@ -1,10 +1,34 @@
 """JWT 签发与校验。"""
 from datetime import datetime, timedelta, timezone
 
+import structlog
 from jose import JWTError, jwt
 from jose.exceptions import ExpiredSignatureError
 
 from common.config.settings import settings
+
+logger = structlog.get_logger()
+
+
+def log_auth_mode(cfg, service: str) -> None:
+    """启动时输出认证模式：生产强制开启；本地关闭时打印显著告警。"""
+    if getattr(cfg, "auth_required", False):
+        if getattr(cfg, "is_production", False) and not getattr(cfg, "ENABLE_AUTH", False):
+            logger.warning(
+                "auth_forced_by_env",
+                service=service,
+                env=cfg.ENV,
+                message="ENV=prod 强制开启认证（配置 ENABLE_AUTH=false 被忽略）",
+            )
+        else:
+            logger.info("auth_required", service=service, env=cfg.ENV)
+    else:
+        logger.warning(
+            "auth_disabled",
+            service=service,
+            env=cfg.ENV,
+            message="⚠ 认证已关闭：complaints / qc records 等含 PII 接口匿名可访问，仅限本地调试；生产自动强制开启",
+        )
 
 
 def create_token(data: dict, expires_hours: int | None = None) -> str:

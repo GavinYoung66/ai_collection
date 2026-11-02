@@ -11,6 +11,13 @@ PASS=0
 FAIL=0
 FAILURES=()
 
+# ── T02 冒烟凭证：认证开启时自动携带自签 JWT（admin）；取不到则匿名降级（本地关闭认证零回归）──
+SMOKE_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=smoke_auth.sh
+source "$SMOKE_ROOT/scripts/smoke/smoke_auth.sh"
+SMOKE_AUTH_HEADER="$(smoke_auth_header || true)"
+curl() { command curl ${SMOKE_AUTH_HEADER:+-H "$SMOKE_AUTH_HEADER"} "$@"; }
+
 check() {
     local name=$1
     local cmd=$2
