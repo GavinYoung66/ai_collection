@@ -20,6 +20,7 @@ vi.mock('@/shared/request', () => ({
   setRateLimitHandler: (h: ((s: number, trace?: string) => void) | null) => {
     captured.rateLimit = h
   },
+  setRefreshHandler: vi.fn(),
   TIMEOUT: { normal: 12_000, judge: 110_000 },
 }))
 

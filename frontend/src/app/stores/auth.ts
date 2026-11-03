@@ -5,6 +5,7 @@ import http, {
   setAuthToken,
   setUnauthorizedHandler,
   setRateLimitHandler,
+  setRefreshHandler,
 } from '@/shared/request'
 import { STORAGE_KEYS } from '@/shared/utils/constants'
 import { stripBasePath } from '@/shared/utils/path'
@@ -179,4 +180,7 @@ export function setupAuthHandlers(router: Router): void {
       : '系统繁忙，稍后重试'
     ElMessage.warning(`${tip}（trace: ${formatTrace(trace)}）`)
   })
+
+  // 401 / B0002：Refresh Token 换新 access_token（拦截器重放原请求）
+  setRefreshHandler(() => useAuthStore().refreshAccessToken())
 }

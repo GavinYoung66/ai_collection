@@ -5,7 +5,7 @@ import 'element-plus/dist/index.css'
 import App from './App.vue'
 import { router } from './router'
 import { useAuthStore, setupAuthHandlers } from './stores/auth'
-import { http, registerErrorReporter } from '../shared/request'
+import http, { registerErrorReporter } from '../shared/request'
 import './styles/index.css'
 
 // ── backend-security-completion REQ-5a：全局错误 → 审计端点 fire-and-forget ──

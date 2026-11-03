@@ -7,6 +7,10 @@
 import 'axios'
 
 declare module 'axios' {
+  interface AxiosRequestConfig {
+    _skipAuthInterceptor?: boolean
+  }
+
   interface InternalAxiosRequestConfig {
     _skipAuthInterceptor?: boolean
   }

@@ -15,13 +15,21 @@ import { getErrorMessage, formatTrace } from './utils/error-map'
 export interface RequestError extends Error {
   code?: string
   trace?: string
+  /** 触发该错误的请求配置（用于前端错误上报回填 url 等上下文） */
+  config?: InternalAxiosRequestConfig
 }
 
 /** 构造带 code / trace 的 Error，保持原有 message 不变 */
-function makeError(message: string, code?: string | number, trace?: string): RequestError {
+function makeError(
+  message: string,
+  code?: string | number,
+  trace?: string,
+  config?: InternalAxiosRequestConfig,
+): RequestError {
   const err = new Error(message) as RequestError
   if (code !== undefined) err.code = String(code)
   if (trace) err.trace = trace
+  if (config) err.config = config
   return err
 }
 
@@ -69,6 +77,16 @@ export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): voi
 /** 注册限流处理回调（auth store 或 composable 调用）；传 null 可注销 */
 export function setRateLimitHandler(handler: RateLimitHandler | null): void {
   rateLimitHandler = handler
+}
+
+/** Refresh Token 刷新回调：由 app 层 auth store 注册（shared 不得反向依赖 app） */
+export type RefreshHandler = () => Promise<string | null>
+
+let refreshHandler: RefreshHandler | null = null
+
+/** 注册 Refresh Token 刷新回调；传 null 可注销 */
+export function setRefreshHandler(handler: RefreshHandler | null): void {
+  refreshHandler = handler
 }
 
 // 模块级 trace 上下文（spec R13：MUST 预留读写函数供 F1 使用）。
@@ -136,7 +154,7 @@ http.interceptors.response.use(
 
     if (!isEnvelope) {
       const trace = (headers['x-trace-id'] as string | undefined) || undefined
-      return Promise.reject(makeError(`响应格式异常（trace: ${formatTrace(trace)}）`, undefined, trace))
+      return Promise.reject(makeError(`响应格式异常（trace: ${formatTrace(trace)}）`, undefined, trace, config))
     }
 
     const { code, message, trace_id } = body
@@ -154,10 +172,9 @@ http.interceptors.response.use(
       if (!isLoginSelf) {
         try {
           // ── backend-security-completion REQ-5c：Refresh Token 自动刷新 ──
-          // 懒加载 auth store（shared → app 单向，模块顶层不能 import）
-          const { useAuthStore } = await import('../app/stores/auth')
-          const auth = useAuthStore()
-          const newToken = await auth.refreshAccessToken()
+          // 刷新动作由 auth store 通过 setRefreshHandler 注册，
+          // shared → app 单向依赖（模块顶层不能 import app 层）
+          const newToken = await refreshHandler?.()
           if (newToken) {
             return http.request(config)
           }
@@ -167,7 +184,7 @@ http.interceptors.response.use(
         const redirectPath = window.location.pathname + window.location.search
         unauthorizedHandler?.(redirectPath)
       }
-      return Promise.reject(makeError(message, code, trace))
+      return Promise.reject(makeError(message, code, trace, config))
     }
 
     // 429 或 B0006：读 Retry-After 提示退避，拦截器不自动重试
@@ -176,19 +193,19 @@ http.interceptors.response.use(
       rateLimitHandler?.(retryAfter, trace)
       const displayMessage = getErrorMessage(code, message)
       return Promise.reject(
-        makeError(`${displayMessage}（trace: ${formatTrace(trace)}）`, code, trace),
+        makeError(`${displayMessage}（trace: ${formatTrace(trace)}）`, code, trace, config),
       )
     }
 
     // 其他非成功 code：走 error-map 白名单，提示附 trace 后 8 位
     const displayMessage = getErrorMessage(code, message)
-    const finalError = makeError(`${displayMessage}（trace: ${formatTrace(trace)}）`, code, trace)
+    const finalError = makeError(`${displayMessage}（trace: ${formatTrace(trace)}）`, code, trace, config)
     // fire-and-forget：调度到 errorReporters（后端 audit/frontend-error 端点）
     _dispatchError(finalError)
     return Promise.reject(finalError)
   },
   (_error: AxiosError) => {
-    return Promise.reject(makeError('网络异常，请稍后重试（trace: 无）'))
+    return Promise.reject(makeError('网络异常，请稍后重试（trace: 无）', undefined, undefined, _error.config))
   },
 )
 
