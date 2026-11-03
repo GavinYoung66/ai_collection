@@ -40,8 +40,16 @@ _bus_publish_tasks: set[asyncio.Task[None]] = set()
 
 
 def pending_bus_publish_tasks() -> int:
-    """在途业务事件投递任务数（供单测/运维观测）。"""
-    return len(_bus_publish_tasks)
+    """在途业务事件投递任务数（供单测/运维观测）。
+
+    只统计当前运行事件循环内的任务：pytest 用例级 loop 相互独立，历史 loop 遗留的
+    未完成任务不该污染当前用例的计数（生产为单一常驻 loop，语义不变）。
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return len(_bus_publish_tasks)
+    return sum(1 for task in _bus_publish_tasks if task.get_loop() is loop)
 
 
 @dataclass

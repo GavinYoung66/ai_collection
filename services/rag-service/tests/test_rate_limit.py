@@ -54,7 +54,9 @@ def client():
     async def test_route(rate: None = Depends(rate_limit.rate_limiter("test_bucket", 2))):
         return {"ok": True}
 
-    return TestClient(app)
+    # 显式注入 X-Real-IP：TestClient 不提供 ASGI client 地址（request.client is None），
+    # 网关真实部署也以 X-Real-IP 为准，避免用例依赖 TestClient 内部实现。
+    return TestClient(app, headers={"X-Real-IP": "10.0.0.1"})
 
 
 class TestRateLimiter:
@@ -64,7 +66,7 @@ class TestRateLimiter:
             resp = client.get("/test")
             assert resp.status_code == 200
             assert resp.json() == {"ok": True}
-        assert fake_redis.store["rag:ratelimit:test_bucket:testclient"] == 2
+        assert fake_redis.store["rag:ratelimit:test_bucket:10.0.0.1"] == 2
 
     def test_over_limit_emits_hit_with_trace_id(self, client, fake_redis):
         """超限发 rag.rate_limit.hit，payload 含请求 trace_id。"""
@@ -80,7 +82,7 @@ class TestRateLimiter:
             hits = [payload for name, payload in emitted if name == "rag.rate_limit.hit"]
             assert hits
             assert hits[0]["trace_id"] == "trace-rag-rl"
-            assert hits[0]["key"] == "rag:ratelimit:test_bucket:testclient"
+            assert hits[0]["key"] == "rag:ratelimit:test_bucket:10.0.0.1"
             assert hits[0]["reason"] == "rate_limited"
         finally:
             hooks.set_publisher(None)

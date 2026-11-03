@@ -76,7 +76,7 @@ prometheus-client==0.23.1   # 统一 /metrics 暴露（满足 mcp-gateway 声明
 
 # === 安全 ===
 cryptography==50.0.2        # T20：修复多项 OpenSSL 相关 CVE
-pyahocorasick==2.0.0
+pyahocorasick==2.1.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 PyJWT==2.15.1               # T20：替换 python-jose（3.5.0 的算法混淆 CRITICAL 公告无修复版本）

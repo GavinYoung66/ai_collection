@@ -20,4 +20,9 @@ regexes = [
   '''^(?:DEEPSEEK|LANGSMITH|DASHSCOPE)_API_KEY$''',
   # 空值 KEY= 后面一行的非密钥内容会被 generic 规则误判，按已知误报放行
   '''^LLM_MAX_CONCURRENCY=4$''',
+  # CI 与服务测试用的固定假密钥（非真实凭据，仅用于 fail-fast 校验与签名用例）
+  # ci.yml 测试 AES_KEY：64 位十六进制常量
+  '''0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef''',
+  # common/tests、common/security/tests、test_t20_dependency_security 的 JWT 测试密钥
+  '''test_jwt_secret_key_0123456789abcdef''',
 ]

@@ -74,7 +74,7 @@ rocketmq-python-client==5.1.1
 
 # === 安全 ===
 cryptography==50.0.2
-pyahocorasick==2.0.0
+pyahocorasick==2.1.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 PyJWT==2.15.1               # T20：替换 python-jose（算法混淆 CRITICAL 公告无修复版本）
