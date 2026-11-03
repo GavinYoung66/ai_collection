@@ -5,6 +5,8 @@ import pytest
 from redis.exceptions import RedisError
 
 from common.llm import reliability as reliability_mod
+from common.llm.reliability import orchestrator as llm_orchestrator
+from common.llm.reliability import rate_limit as llm_rate_limit
 from common.llm.reliability import (
     RedisDegradeTracker,
     call_with_retry,
@@ -142,7 +144,7 @@ def _isolate():
 
 @pytest.mark.asyncio
 async def test_invoke_llm_primary_fail_fallback_succeeds(monkeypatch, _isolate):
-    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
 
     async def transport(model, messages, timeout_seconds):
         if model == "deepseek-chat":
@@ -190,7 +192,7 @@ async def test_invoke_llm_timeout_not_retried(_isolate):
 
 @pytest.mark.asyncio
 async def test_invoke_llm_all_fail_degrade_flag_set(monkeypatch, _isolate):
-    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
     calls: list[str] = []
 
     async def transport(model, messages, timeout_seconds):
@@ -213,7 +215,7 @@ async def test_invoke_llm_all_fail_degrade_flag_set(monkeypatch, _isolate):
 
 @pytest.mark.asyncio
 async def test_invoke_llm_business_error_bounded_retry(monkeypatch, _isolate):
-    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
     n = {"i": 0}
 
     async def transport(model, messages, timeout_seconds):
@@ -238,7 +240,7 @@ async def test_invoke_llm_business_error_bounded_retry(monkeypatch, _isolate):
 
 @pytest.mark.asyncio
 async def test_invoke_llm_rate_limit_rejected(monkeypatch, _isolate):
-    monkeypatch.setattr(reliability_mod, "_LLM_RATE_LIMIT", 0)
+    monkeypatch.setattr(llm_rate_limit, "_LLM_RATE_LIMIT", 0)
 
     async def transport(model, messages, timeout_seconds):
         return "x"
@@ -374,7 +376,7 @@ async def test_invoke_llm_orchestration_flag_reset_on_transport_error(
 ):
     # D-1 契约：transport 抛异常走降级返回后，标志仍必须复位（finally reset），
     # 不污染调用方后续对 transport 的直调计数判断。
-    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
 
     async def transport(model, messages, timeout_seconds):
         raise RuntimeError("boom")

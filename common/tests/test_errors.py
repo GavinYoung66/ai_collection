@@ -1,6 +1,6 @@
 """common.errors 模块单元测试。"""
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from common.errors.codes import ERROR_MESSAGES, ErrorCode
@@ -11,9 +11,9 @@ from common.trace.middleware import TraceMiddleware
 
 class TestErrorCodes:
     def test_error_code_count(self):
-        """错误码总数：A1(13)+A2(11)+A3(6)+A4(15)+A5(17)+A6(15)+A7(6)+B(10)=93。"""
+        """错误码总数：A1(13)+A2(11)+A3(6)+A4(15)+A5(17)+A6(15)+A7(6)+B(11)=94。"""
         codes = [c for c in ErrorCode]
-        assert len(codes) == 93
+        assert len(codes) == 94
 
     def test_all_codes_have_messages(self):
         """每个错误码都有对应的消息。"""
@@ -30,7 +30,7 @@ class TestErrorCodes:
         assert len(a1_codes) == 13
         assert len(a2_codes) == 11
         assert len(a4_codes) == 15
-        assert len(b_codes) == 10
+        assert len(b_codes) == 11
 
 
 class TestExceptions:

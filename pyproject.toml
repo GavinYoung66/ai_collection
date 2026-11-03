@@ -1,0 +1,43 @@
+[project]
+name = "ai-collection"
+version = "0.1.0"
+description = "CSMP 智能服务集群（common 平台件 + 服务矩阵）"
+requires-python = ">=3.11"
+
+# ── T32 静态检查门禁：ruff 配置 ─────────────────────────────────────────────
+# 规则集即 CI 门禁口径（scripts/check_lint_baseline.py 与本地 `ruff check .` 同源）。
+# 存量告警冻结于 lint-baseline.json（按 文件×规则 计数），基线外新增即阻断；
+# 基线只降不升：清理存量后必须同步下调基线（见 lint-baseline.json 头部说明）。
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [
+    "frontend",
+    "node_modules",
+    "deploy",
+]
+
+[tool.ruff.lint]
+# 与 ruff 默认规则集一致（E4/E7/E9 语法与运行时错误 + F pyflakes）；
+# 扩选规则属于"新增告警"，须经评审并连同基线调整一并提交。
+select = ["E4", "E7", "E9", "F"]
+
+# ── T32 静态检查门禁：mypy 配置 ─────────────────────────────────────────────
+# 默认档位起步（非 strict）；存量 227 条错误冻结于基线文件，新增即阻断。
+# explicit-package-bases：各服务 app 包同名（data-platform/call/... 各自独立
+# ``app`` 顶层包），CI 按目录分次调用 mypy（见 check_lint_baseline.py MYPY_SCOPES）。
+[tool.mypy]
+# 类型检查基线用 3.12 语法（numpy 2.x stub 使用 3.12 `type` 语句，3.11 档位会
+# 以 [syntax] 阻断解析）；CI static-analysis job 亦使用 Python 3.12 保持一致。
+python_version = "3.12"
+explicit_package_bases = true
+ignore_missing_imports = true
+# 已安装但未带类型标注的第三方包（pyyaml/structlog 等）不算错误：
+# 环境有无该包会影响 [import] vs [import-untyped] 的归类，关闭该错误码保证
+# CI（装 lock）与本地基线口径一致。
+disable_error_code = ["import-untyped"]
+exclude = [
+    "^frontend/",
+    "^node_modules/",
+    "^deploy/",
+]

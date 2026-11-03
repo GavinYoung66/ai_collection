@@ -121,14 +121,6 @@ jobs:
           echo "- [ ] Error codes follow common.errors.codes" >> $GITHUB_STEP_SUMMARY
           echo "- [ ] 未新建 app/service/event_publisher.py" >> $GITHUB_STEP_SUMMARY
 
-      # 1.7 D4：ruff 仅 complaint、mcp-gateway 两条目运行；咨询性输出，continue-on-error 不阻塞 job
-      - name: Ruff lint (advisory, non-blocking)
-        if: matrix.service == 'complaint-service' || matrix.service == 'mcp-gateway'
-        continue-on-error: true
-        run: |
-          pip install ruff
-          ruff check app tests
-
   # 公共 job：common 三个测试目录 + call/case/review 三个脚手架服务 health（1.6 落地）
   common:
     runs-on: ubuntu-latest
@@ -213,6 +205,34 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.21.2 \
             detect --source /repo --no-git --config /repo/.gitleaks.toml --redact --verbose
+
+  # T32 静态检查门禁：ruff + mypy 存量基线冻结，基线外新增告警即阻断。
+  # 口径与本地完全一致：ruff/mypy 版本钉死（requirements.lock），依赖同 D2 配方安装；
+  # 基线文件 lint-baseline.json 只降不升（清理存量后 --update 重新生成，评审把关）。
+  # 硬约束：本 job 不允许 continue-on-error / || true（lint 按需启用 spec）。
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # python_version=3.12：numpy 2.x stub 使用 3.12 `type` 语句（见 pyproject.toml [tool.mypy] 注释）
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # ruff / mypy 版本由 requirements.lock 钉定（ruff==0.1.11 / mypy==1.8.0），
+          # 先装 lock 保证工具版本与基线生成时一致，不受最新版规则变更影响
+          grep -vE '^rocketmq-python-client' requirements.lock > /tmp/requirements.base.lock
+          pip install -r /tmp/requirements.base.lock
+          pip install 'rocketmq-python-client==5.1.1' 'opentelemetry-exporter-otlp>=1.33.1'
+
+      - name: Lint baseline gate (ruff + mypy)
+        run: python scripts/check_lint_baseline.py
 
   # 前端门禁（F0 tasks 7.1）：lint / 类型 / 单测 / 分层依赖四道闸，任何一步失败即 job 失败。
   # 硬约束：四个 step 彼此独立，禁止 `|| true`、禁止 `continue-on-error`（覆盖即视为门禁失效）。

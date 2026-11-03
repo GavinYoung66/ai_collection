@@ -21,6 +21,7 @@ from app.llm.provider import (
     get_llm_fallback_chain,
 )
 from common.llm import reliability as llm_reliability
+from common.llm.reliability import orchestrator as llm_orchestrator
 from common.resilience.timeout import Timeout
 
 
@@ -37,7 +38,7 @@ _BACKUP = "backup-test-model"
 def _chain_env(monkeypatch):
     """固定两模型链 + 缩短重试退避 + 隔离全局熔断注册表。"""
     monkeypatch.setattr(settings, "LLM_FALLBACK_CHAIN", f"{_PRIMARY},{_BACKUP}")
-    monkeypatch.setattr(llm_reliability, "_LLM_RETRY_DELAY", 0.01)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0.01)
     llm_reliability._llm_breakers.clear()
     yield
     llm_reliability._llm_breakers.clear()

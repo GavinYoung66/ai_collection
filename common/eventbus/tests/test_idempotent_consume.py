@@ -1,7 +1,6 @@
 """Spec: at-least-once delivery — subscribers SHALL be idempotent via ``event_id``."""
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import pytest

@@ -25,6 +25,7 @@ from app.models.state import (
     VerdictType,
 )
 from common.llm import reliability as llm_reliability
+from common.llm.reliability import orchestrator as llm_orchestrator
 from common.resilience.timeout import Timeout
 
 _RULE_PREFIX = "[规则兜底]"
@@ -183,7 +184,7 @@ async def test_real_provider_timeout_0_1s_degrades(monkeypatch, _degrade_env):
     """真实 provider + 睡眠 transport + Timeout(total=0.1)：
     整链耗尽 → LLMCallError → 节点兜底 [规则兜底] + pending_review。"""
     monkeypatch.setattr(settings, "LLM_FALLBACK_CHAIN", "mock-slow-model")
-    monkeypatch.setattr(llm_reliability, "_LLM_RETRY_DELAY", 0.01)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0.01)
 
     class _SleepyTransport:
         async def invoke(self, prompt, schema=None, *, model=None, **_):

@@ -16,6 +16,8 @@ from structlog.testing import capture_logs
 
 from common.llm import reliability as reliability_mod
 from common.llm import transport as transport_mod
+from common.llm.reliability import orchestrator as llm_orchestrator
+from common.llm.reliability import rate_limit as llm_rate_limit
 from common.llm.reliability import (
     LLMRateLimitError,
     invoke_llm,
@@ -116,7 +118,7 @@ async def test_contextvar_isolation_second_call_missing(monkeypatch):
     走真实 post_chat_completions（仅 mock 出口 post_json），端到端验证
     usage 能穿过 asyncio.wait_for 边界被本次调用读到。
     """
-    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
     responses = [
         _usage_body("one", prompt=5, completion=3),
         {"choices": [{"message": {"content": "two"}}]},  # 第二次无 usage
@@ -159,7 +161,7 @@ async def test_contextvar_isolation_second_call_missing(monkeypatch):
 
 async def test_contextvar_cleared_after_transport_exception(monkeypatch):
     """② 第一次调用 transport 抛异常（写后失败）→ 第二次调用不残留。"""
-    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
 
     async def transport_fail(model, messages, timeout_seconds):
         # 先写 usage 再抛异常：验证异常路径不把它残留给下一次调用
@@ -192,7 +194,7 @@ async def test_contextvar_cleared_after_transport_exception(monkeypatch):
 
 async def test_fallback_candidates_usage_isolated(monkeypatch):
     """③ fallback 两候选各自 usage 独立不串。"""
-    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
 
     async def transport(model, messages, timeout_seconds):
         if model == "iso-primary":
@@ -229,7 +231,7 @@ async def test_fallback_candidates_usage_isolated(monkeypatch):
 # 4.3 三埋点：五种 status 日志各一条且字段齐全
 # ---------------------------------------------------------------------------
 async def test_all_five_status_logs_have_complete_fields(monkeypatch):
-    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
 
     async def transport_ok(model, messages, timeout_seconds):
         transport_mod._llm_last_usage.set(
@@ -270,7 +272,7 @@ async def test_all_five_status_logs_have_complete_fields(monkeypatch):
         await invoke_llm("m-open", [])
 
     # ⑤ rate_limited
-    monkeypatch.setattr(reliability_mod, "_LLM_RATE_LIMIT", 0)
+    monkeypatch.setattr(llm_rate_limit, "_LLM_RATE_LIMIT", 0)
     set_llm_transport(transport_ok)
     with capture_logs() as cap_rl, pytest.raises(LLMRateLimitError):
         await invoke_llm("m-rl", [])
@@ -314,7 +316,7 @@ async def test_all_five_status_logs_have_complete_fields(monkeypatch):
 # 4.4 六指标打点
 # ---------------------------------------------------------------------------
 async def test_ok_call_increments_calls_latency_tokens(monkeypatch):
-    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
 
     async def transport(model, messages, timeout_seconds):
         transport_mod._llm_last_usage.set(
@@ -342,7 +344,7 @@ async def test_ok_call_increments_calls_latency_tokens(monkeypatch):
 
 
 async def test_fallback_counter(monkeypatch):
-    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
 
     async def transport(model, messages, timeout_seconds):
         if model == "fb-primary":
@@ -367,8 +369,8 @@ async def test_fallback_counter(monkeypatch):
 
 
 async def test_rate_limited_counter_excludes_calls(monkeypatch):
-    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
-    monkeypatch.setattr(reliability_mod, "_LLM_RATE_LIMIT", 0)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
+    monkeypatch.setattr(llm_rate_limit, "_LLM_RATE_LIMIT", 0)
 
     async def transport(model, messages, timeout_seconds):
         return "ok"
@@ -387,7 +389,7 @@ async def test_rate_limited_counter_excludes_calls(monkeypatch):
 
 
 async def test_breaker_open_counter_excludes_calls(monkeypatch):
-    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
 
     async def transport(model, messages, timeout_seconds):
         return "ok"
@@ -423,7 +425,7 @@ async def test_retry_success_does_not_inherit_residual_usage(monkeypatch):
     校验抛错）：第一次 transport 先写 ContextVar 再抛错；第二次直接成功且
     不写 usage。修复前第二次会读到旧 usage（token 串扰），修复后 missing。
     """
-    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
     calls: list[str] = []
 
     async def write_then_fail_then_silent(model, messages, timeout_seconds):

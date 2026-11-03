@@ -704,7 +704,8 @@ class TestA2011Envelope:
         configure_redis(redis)
         set_default_service("qc")
         reliability_mod._llm_breakers.clear()
-        monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+        from common.llm.reliability import orchestrator as llm_orchestrator
+        monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
         dp = FakeDp({"sess_ok": QCSession.model_validate(_ready())})
 
         async def _boom(model, messages, timeout_seconds):

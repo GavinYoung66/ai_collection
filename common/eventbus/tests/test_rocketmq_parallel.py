@@ -172,6 +172,13 @@ async def test_single_failure_isolated_and_loop_continues(parallelism):
         task = await _run_loop(bus)
         await asyncio.wait_for(batch_done.wait(), timeout=5)
 
+        # 消费 task 在 batch_done 置位后仍需走完 gather 结果的异常分支才发 warn；
+        # 主协程唤醒顺序与之存在竞态，此处有界等待保证断言确定性。
+        for _ in range(50):
+            if warnings:
+                break
+            await asyncio.sleep(0.02)
+
         # 失败条（seq=1）未 ack；成功条各 ack 一次
         acked_seqs = sorted(m.seq for m in consumer.acked)
         assert acked_seqs == [0, 2, 3]
