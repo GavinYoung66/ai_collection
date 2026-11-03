@@ -152,9 +152,12 @@ _PLACEHOLDER_SECRETS = {"", "change_me", "<change_me>", "changeme", "change-me",
 
 
 def validate_required_secrets(cfg) -> None:
-    """启动 fail-fast：JWT / AES 密钥不得为默认占位值。
+    """启动 fail-fast：JWT / AES 密钥不得为默认占位值；AES 密钥还须格式合法（T41）。
 
-    仅校验“是否仍为占位/空值”，不打印密钥内容；生产由 KMS / 密钥系统注入。
+    - 占位/空值：立即失败，不打印密钥内容；生产由 KMS / 密钥系统注入。
+    - AES_KEY 格式（T41）：必须为合法 hex 且恰为 AES-256 的 32 字节（64 位 hex）。
+      校验委托 `common.security.crypto.aes_key_bytes` 单一事实源，避免非法值
+      延迟到首次加解密才抛错（原缺陷：默认 `change_me` 非法 hex 运行时才报错）。
     """
     invalid = [
         name
@@ -165,6 +168,15 @@ def validate_required_secrets(cfg) -> None:
         raise RuntimeError(
             "启动失败：以下密钥仍为默认占位值，必须由 KMS/密钥系统注入：" + ", ".join(invalid)
         )
+
+    # T41：非占位值仍可能格式非法（如 "not-hex" / 长度不符），启动即失败。
+    # 延迟导入：crypto 模块级依赖本文件，运行期导入不成环。
+    from common.security.crypto import aes_key_bytes
+
+    try:
+        aes_key_bytes(str(getattr(cfg, "AES_KEY", "") or ""))
+    except ValueError as exc:
+        raise RuntimeError(f"启动失败：{exc}") from exc
 
 
 settings = Settings()
