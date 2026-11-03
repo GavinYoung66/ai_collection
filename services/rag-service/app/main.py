@@ -2,6 +2,8 @@
 import asyncio
 import signal
 import structlog
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from common.config.logging import setup_logging
@@ -232,7 +234,20 @@ async def _resume_backfill_pending() -> None:
             )
 
 
-app = FastAPI(title="RAG Service", version="1.0.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """生命周期入口（T37：迁移自已弃用的 @app.on_event）。
+
+    startup 先注入韧性接线并初始化 Milvus/ES 等依赖，yield 后按序幂等关闭。
+    startup/shutdown 保持独立函数形态，便于单测直接调用（TestClient 会撞
+    signal.signal 主线程限制，见 tests/test_main.py）。
+    """
+    await startup()
+    yield
+    await shutdown()
+
+
+app = FastAPI(title="RAG Service", version="1.0.0", lifespan=lifespan)
 app.add_middleware(TraceMiddleware)
 # 统一 Prometheus 指标：必须在所有 add_middleware 之后调用，
 # 确保 MetricsMiddleware 处于最外层（Metrics→Trace→路由）；
@@ -272,7 +287,6 @@ def wire_resilience_redis() -> None:
     _ensure_common_client()
 
 
-@app.on_event("startup")
 async def startup():
     """启动时注入韧性接线，再初始化 Milvus collection + ES index。"""
     from common.llm.reliability import set_default_service
@@ -339,7 +353,6 @@ async def _sweep_stale_ingest_jobs() -> None:
             logger.warning("ingest_stale_processing_swept", count=count)
 
 
-@app.on_event("shutdown")
 async def shutdown():
     """幂等关闭全局客户端（embed/rerank/milvus/es/redis）。
 

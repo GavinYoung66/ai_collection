@@ -66,10 +66,10 @@
 
 ## 9. 🔶 生命周期、测试与可观测性（#0891B2）｜预期规模：以 S 为主、T38=M（真实依赖集成测试，粗估）
 
-- [ ] 9.1 [T37] `rag-service` 用已弃用 `@app.on_event`，生命周期风格漂移｜位置：`rag-service/app/main.py:275/342`｜整改：迁移到 `lifespan`｜验证：rag-service 内 `on_event` 零命中，启动/关闭钩子经 lifespan 生效
-- [ ] 9.2 [T38] 缺少真实依赖的集成测试（`test_db.py` 仅做表结构契约断言、`test_speech.py` 仅测默认 mock provider，二者不是形式化测试，不应删除）｜位置：`common/tests/`｜整改：保留契约断言，另补真实数据库 / 真实 ASR 的集成测试｜验证：真实 DB 与真实 ASR 各有 1 条可执行集成测试，开关关闭时跳过
-- [ ] 9.3 [T39] 时区处理不一致：`time_guard.py` naive 且 `import timezone` 未用｜位置：`common/utils/time_guard.py:2`｜整改：统一 UTC + 注入时钟｜验证：无未使用 import，全部时间判定时区感知
-- [ ] 9.4 [T40] 部分 `except Exception: pass` 无日志（reconcile/stats_service）｜位置：`reconcile.py:32`、`stats_service.py:80`｜整改：统一加 `logger.warning(exc_info=True)`｜验证：`except Exception: pass` 零命中
+- [x] 9.1 [T37] `rag-service` 用已弃用 `@app.on_event`，生命周期风格漂移｜位置：`rag-service/app/main.py:275/342`｜整改：迁移到 `lifespan`｜验证：rag-service 内 `on_event` 零命中，启动/关闭钩子经 lifespan 生效｜状态：✅ 已完成（2026-11-03）`main.py` 增加 `@asynccontextmanager lifespan` 并传入 `FastAPI(lifespan=...)`，移除两处 `@app.on_event`；`test_main.py` 重构公共 fixture 并新增 3 个 lifespan 用例（进出顺序/退出关客户端/`router.lifespan_context` 绑定 + 应用目录 `on_event` 源码零命中守护），7 passed
+- [x] 9.2 [T38] 缺少真实依赖的集成测试（`test_db.py` 仅做表结构契约断言、`test_speech.py` 仅测默认 mock provider，二者不是形式化测试，不应删除）｜位置：`common/tests/`｜整改：保留契约断言，另补真实数据库 / 真实 ASR 的集成测试｜验证：真实 DB 与真实 ASR 各有 1 条可执行集成测试，开关关闭时跳过｜状态：✅ 已完成（2026-11-03）契约断言原样保留；新增 `test_db_integration.py`（`COMMON_DB_TESTS=1`，真实引擎路径：create_all→写入→读回→更新→删除，timestamptz 时区感知断言）与 `test_speech_integration.py`（`COMMON_ASR_TESTS=1` + 非占位凭证双重门槛，真实 NLS WS 上行/下行全链路，合成正弦 PCM 免真实录音）；`test_t38_integration_gates.py` 5 passed 验证契约保留、真实路径存在、开关关闭时集成用例 skip 且退出码 0。降级说明：本机 Docker/PG 不可用，`COMMON_DB_TESTS=1` 真实执行留待 CI/带环境复跑｜Q-001 裁决（2026-11-03，批次 9 修复）：按方案 A 认定「集成测试开关具备 CI 启用能力即满足验收」，S-001 已在 ci-matrix delta 补 Scenario 钉死该口径；真实依赖实跑（PG/ASR）随 T36 生产基线与 CI 演进补齐，登记为遗留项
+- [x] 9.3 [T39] 时区处理不一致：`time_guard.py` naive 且 `import timezone` 未用｜位置：`common/utils/time_guard.py:2`｜整改：统一 UTC + 注入时钟｜验证：无未使用 import，全部时间判定时区感知｜状态：✅ 已完成（2026-11-03）命名缺陷已随 T13 重构消除（仅 `from datetime import datetime`，默认 `datetime.now(ZoneInfo)` 时区感知 + 注入时钟），ruff 零告警；新增 `test_t39_time_guard_hygiene.py` 4 个守护用例固化验证判据（AST 全 `datetime.now` 带时区参数、禁用 utc 系 naive API、活时钟产出 ZoneInfo、import 卫生），与 T13 套件合计 12 passed
+- [x] 9.4 [T40] 部分 `except Exception: pass` 无日志（reconcile/stats_service）｜位置：`reconcile.py:32`、`stats_service.py:80`｜整改：统一加 `logger.warning(exc_info=True)`｜验证：`except Exception: pass` 零命中｜状态：✅ 已完成（2026-11-03）命名两处补 `logger.warning(..., exc_info=True)`（补偿失败/缓存损坏均留栈）；同族静默吞异常一并治理共 14 处（callback 重试、mode 回滚、LLM 埋点/占位、解析器可忽略路径、qc/dp 关停、脚本），按可忽略性分级 warning/debug 并注明理由；全仓 `except Exception: pass` 零命中并以 `test_t40_silent_exception_logging.py` 源码扫描守护防回潮，8 passed
 
 ## 10. ⬜ 余项优化与一致性收尾（#6B7280）｜预期规模：S 为主（粗估）
 

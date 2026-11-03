@@ -8,8 +8,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
+
 from app.service.callback_service import CallbackService
 from app.service.session_service import SessionService
+
+logger = structlog.get_logger()
 
 
 def daily_reconcile(
@@ -30,7 +34,11 @@ def daily_reconcile(
             callback_service.send(sid, version=1, payload={"reason": "reconcile_retry"})
             compensated.append(sid)
         except Exception:
-            pass
+            # T40：补偿失败 MUST NOT 静默丢弃——留 warning + 异常栈供对账追查，
+            # 该 session 留在 stale 清单中待下一轮对账重试。
+            logger.warning(
+                "reconcile_callback_compensate_failed", session_id=sid, exc_info=True
+            )
 
     return {
         "timed_out": timed_out,

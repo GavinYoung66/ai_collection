@@ -10,9 +10,13 @@ from __future__ import annotations
 import zlib
 from typing import Any, Optional
 
+import structlog
+
 from app.events.publisher import publisher
 from app.utils.redis_keys import MODE_ACTIVE_KEY, mode_gray_sessions_key
 from common.errors.codes import ErrorCode
+
+logger = structlog.get_logger()
 
 KEY_ACTIVE = MODE_ACTIVE_KEY
 KEY_GRAY = "csmp:mode:gray_percent"
@@ -121,7 +125,9 @@ class ModeService:
                 self._redis.set(KEY_ACTIVE, old_mode)
                 self._redis.set(KEY_GRAY, old_gray)
             except Exception:
-                pass
+                # T40：切换失败后的回滚再失败 MUST NOT 静默丢弃——留 warning + 异常栈，
+                # 此时 Redis 内模式状态可能不一致，需人工介入核对。
+                logger.warning("mode_switch_rollback_failed", exc_info=True)
             return False, ErrorCode.A5014
 
     def full_switch_if_consistent(self, target_mode: str = "multi_agent") -> bool:

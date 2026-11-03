@@ -188,7 +188,13 @@ class AssetExtractor:
                             if rows:
                                 assets.append(self._build_table_asset(page.page_number, rows))
             except Exception:
-                pass  # 表格抽取失败不影响图片与正文
+                # T40：表格抽取失败不影响图片与正文（允许忽略），但不静默——
+                # 留 debug + 异常栈便于定位解析器兼容性问题。
+                logger.debug(
+                    "asset_table_extract_failed",
+                    source=str(file_path),
+                    exc_info=True,
+                )
         return assets
 
     def _extract_docx(self, file_path: Path) -> list[dict]:
@@ -256,7 +262,10 @@ class AssetExtractor:
                 if slide.shapes.title and slide.shapes.title.text:
                     slide_title = slide.shapes.title.text.strip()
             except Exception:
-                pass
+                # T40：标题占位符解析失败仅影响表格资产定位列，不静默。
+                logger.debug(
+                    "pptx_slide_title_extract_failed", page=i, exc_info=True
+                )
             for shape in slide.shapes:
                 try:
                     if extract_images and shape.shape_type == MSO_SHAPE_TYPE.PICTURE:

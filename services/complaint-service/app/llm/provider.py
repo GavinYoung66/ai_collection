@@ -307,13 +307,14 @@ class ComplaintLLMProvider:
     def _fill_cot_encrypted(result: BaseModel) -> None:
         """若 schema 含 cot_encrypted 字段，填充 AES-256-GCM 占位加密串。"""
         if hasattr(result, "cot_encrypted") and not getattr(result, "cot_encrypted", None):
-            key = getattr(settings, "LLM_COT_KEY", "")
             # dev stub：用 base64(非空串) 占位，prod 由 KMS 密钥真实加密
             placeholder = base64.b64encode(f"cot-stub-{os.urandom(8).hex()}".encode()).decode()
             try:
                 result.cot_encrypted = placeholder
             except Exception:
-                pass
+                # T40：frozen/pydantic 校验失败的 dev stub 占位不阻断推理主流程，
+                # 但不静默——留 debug + 异常栈便于发现 schema 配置错误。
+                logger.debug("llm_cot_placeholder_fill_failed", exc_info=True)
 
     def _record_audit(
         self,
@@ -360,4 +361,6 @@ class ComplaintLLMProvider:
 
             emit_call_log("llm", entry)
         except Exception:
-            pass
+            # T40：审计埋点失败 MUST NOT 静默丢弃——留 warning + 异常栈；
+            # 不向上抛，避免埋点故障影响推理主流程（内存 _call_log 已留底）。
+            logger.warning("llm_call_log_emit_failed", trace_id=trace_id, exc_info=True)
