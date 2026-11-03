@@ -1,8 +1,8 @@
 # 原生 arm64 OCR 镜像（避免 amd64 paddle 在 Apple Silicon 上 SIGILL）
 # 基础镜像优先走 DaoCloud 镜像加速
 # pins-lock-exempt：paddle 系为 OCR 服务独立安装依赖（不在根 requirements.lock 管辖）；
-# 已探测债务：fastapi/pillow/python-multipart 与 T20 升级后根 lock 存在版本漂移，
-# 待部署基线批次（T36）随 python:3.10 升级一并收敛，届时移除本标记。
+# T36 已把 fastapi / pillow / python-multipart 对齐根 lock（T20 升级后版本），
+# 保留豁免仅因 paddleocr / paddlepaddle / pdf2image 不在 lock 管辖范围。
 FROM docker.m.daocloud.io/library/python:3.10-slim
 
 WORKDIR /app
@@ -23,12 +23,12 @@ RUN pip install --no-cache-dir \
     -i https://mirrors.aliyun.com/pypi/simple/ \
     --trusted-host mirrors.aliyun.com \
     "numpy<2" \
-    fastapi==0.104.1 \
+    fastapi==0.109.1 \
     uvicorn==0.24.0 \
-    python-multipart==0.0.9 \
+    python-multipart==0.0.33 \
     paddleocr==2.7.0.3 \
     pdf2image==1.17.0 \
-    pillow==10.2.0
+    pillow==13.0.0
 
 COPY app.py /app/app.py
 COPY requirements.txt /app/requirements.txt

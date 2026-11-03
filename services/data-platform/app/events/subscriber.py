@@ -485,7 +485,7 @@ class QcCheckSubscriber:
             await self.handle_envelope(envelope)
 
         await bus.subscribe(CHANNEL_QC_CHECK_COMPLETED, "dp", _qc_handler)
-        # 消费组短名 dp → gid_dp_complaint_result_ready
+        # 消费组短名 dp → gid_dp（服务级共享消费组，tag 过滤区分事件）
         await bus.subscribe(CHANNEL_COMPLAINT_RESULT_READY, "dp", _result_ready_handler)
         try:
             while True:

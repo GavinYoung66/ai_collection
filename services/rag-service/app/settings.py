@@ -13,7 +13,8 @@ from __future__ import annotations
 from common.config.settings import settings as platform_settings
 from app.rag_settings import RagSettings, rag_settings
 
-_RAG_FIELDS = frozenset(RagSettings.model_fields.keys())
+# 仅本服务声明的业务字段（继承自平台 Settings 的字段仍走 platform_settings）
+_RAG_FIELDS = frozenset(RagSettings.__annotations__)
 
 
 class _SettingsProxy:

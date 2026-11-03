@@ -1,11 +1,15 @@
-"""RAG 产品配置：KB_* 与检索/入库开关归属 rag-service，不再堆在 common 平台 Settings。"""
+"""RAG 产品配置：KB_* 与检索/入库开关归属 rag-service。
+
+平台级参数（PG/Redis/Milvus/ES/LLM Key/公共超时）统一继承
+``common.config.settings.Settings``，本模块只声明 RAG 领域业务开关。
+"""
 from __future__ import annotations
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from common.config.settings import Settings
 
 
-class RagSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+class RagSettings(Settings):
+    """RAG 业务配置；平台参数继承自 common Settings。"""
 
     # RAG 核心检索 / 入库
     KB_CHUNK_SIZE: int = 500

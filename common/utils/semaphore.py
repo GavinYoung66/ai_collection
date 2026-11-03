@@ -1,16 +1,14 @@
-"""并发限流信号量。"""
+"""并发限流信号量（并发上限由调用方注入，common 不承载业务配置）。"""
 import asyncio
-from collections.abc import AsyncGenerator
-
-from common.config.settings import settings
 
 
 class CallSemaphore:
     """asyncio.Semaphore 封装，用于外呼并发限流。"""
 
-    def __init__(self, max_concurrency: int | None = None) -> None:
-        limit = max_concurrency or settings.CALL_MAX_CONCURRENCY
-        self._semaphore = asyncio.Semaphore(limit)
+    def __init__(self, max_concurrency: int) -> None:
+        if max_concurrency < 1:
+            raise ValueError(f"max_concurrency must be >= 1, got {max_concurrency}")
+        self._semaphore = asyncio.Semaphore(max_concurrency)
 
     async def __aenter__(self) -> None:
         await self._semaphore.acquire()
@@ -28,8 +26,8 @@ class CallSemaphore:
 _call_semaphore: CallSemaphore | None = None
 
 
-def get_call_semaphore() -> CallSemaphore:
+def get_call_semaphore(max_concurrency: int) -> CallSemaphore:
     global _call_semaphore
     if _call_semaphore is None:
-        _call_semaphore = CallSemaphore()
+        _call_semaphore = CallSemaphore(max_concurrency)
     return _call_semaphore

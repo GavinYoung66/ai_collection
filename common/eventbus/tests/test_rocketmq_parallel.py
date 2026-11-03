@@ -22,7 +22,7 @@ from common.eventbus.factory import get_event_bus, reset_event_bus
 from common.eventbus.rocketmq import RocketMQEventBus
 
 EVENT = "complaint.created"
-GROUP = "gid_cs_complaint_created"
+GROUP = "gid_cs"
 
 
 class _ScriptedConsumer:
@@ -50,7 +50,7 @@ def _msgs(n: int) -> list[MagicMock]:
 
 async def _run_loop(bus: RocketMQEventBus) -> asyncio.Task:
     """启动 consume loop（_start_consumer/_handle_message 由调用方 patch 覆盖）。"""
-    return asyncio.create_task(bus._consume_loop(EVENT, GROUP, MagicMock()))
+    return asyncio.create_task(bus._consume_group(GROUP, {EVENT: MagicMock()}))
 
 
 async def _stop(task: asyncio.Task) -> None:
@@ -268,7 +268,7 @@ async def test_real_handler_failure_retries_without_blocking_siblings():
 
 async def _run_loop_with_handler(bus: RocketMQEventBus, handler: Any) -> asyncio.Task:
     """以真实 handler 启动 consume loop（仅 _start_consumer 被脚本化）。"""
-    return asyncio.create_task(bus._consume_loop(EVENT, GROUP, handler))
+    return asyncio.create_task(bus._consume_group(GROUP, {EVENT: handler}))
 
 
 @pytest.fixture(autouse=False)

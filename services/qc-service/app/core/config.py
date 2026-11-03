@@ -1,16 +1,19 @@
-"""qc-service 产品开关：DD-02 §12 全部 QC_*。平台 PG/Redis host 仍读 common Settings。"""
+"""qc-service 产品开关：DD-02 §12 全部 QC_*。
+
+平台级参数（PG/Redis/密钥/公共超时）统一继承 ``common.config.settings.Settings``，
+本模块只声明质检领域业务开关。
+"""
 from __future__ import annotations
 
 from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from common.config.settings import Settings
 
 _HOST_FIELDS = ("QC_RAG_SENSITIVE_BASE", "QC_DP_BASE")
 
 
-class QcSettings(BaseSettings):
-    """质检产品配置。不继承平台 Settings；平台 Settings 已无 QC_RESPONSE_TIMEOUT。"""
-
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+class QcSettings(Settings):
+    """质检产品配置；平台参数继承自 common Settings。"""
 
     QC_RAG_SENSITIVE_BASE: str = "http://rag-service:8002"
     QC_RAG_INITIAL_TIMEOUT: int = 3

@@ -22,7 +22,9 @@ from typing import Any
 import structlog
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import Tool
 
+from common.mcp.contract import typed_result
 from common.mcp.reliability import MCPCircuitOpenError
 from common.trace.middleware import get_trace_id
 
@@ -115,7 +117,26 @@ async def dispatch(
         start=start,
         error=fallback_error,
     )
+    # T35：工具出口由 _dispatch_typed 写入形状元数据；dispatch 本身保持原始载荷，
+    # 供审计/可靠性测试与内部路由复用。
     return result
+
+
+async def _dispatch_typed(
+    server: str,
+    tool: str,
+    params: dict[str, Any],
+    *,
+    trace_id: str = "",
+    session_id: str = "",
+) -> dict[str, Any]:
+    """工具函数出口：原始载荷 + 形状元数据（shape/payload，common.mcp.contract）。
+
+    客户端据此还原 list/dict，不再维护「哪些工具返回 list」的静态镜像（T35）。
+    """
+    return typed_result(
+        await dispatch(server, tool, params, trace_id=trace_id, session_id=session_id)
+    )
 
 
 def _trace_id_from_ctx(ctx: Context | None) -> str:
@@ -149,7 +170,7 @@ class GatewayFastMCP(FastMCP):
     两段信息与原始返回值，工具函数层是唯一同时具备三者的位置）。
     """
 
-    async def list_tools(self) -> list:
+    async def list_tools(self) -> list[Tool]:
         # 与 tools/call 一致：trace_id 优先取调用方 _meta，缺省回退 HTTP X-Trace-Id
         ctx = self.get_context()
         trace_id = _trace_id_from_ctx(ctx) or get_trace_id()
@@ -207,37 +228,37 @@ def _register_tools() -> None:
         return str(specs[(server, tool)]["description"])
 
     # ---- rag_kb ----
-    async def rag_kb_search_regulations(query: str, top_k: int = 5, ctx: Context = None) -> list:
-        return await dispatch(
+    async def rag_kb_search_regulations(query: str, top_k: int = 5, ctx: Context = None) -> dict[str, Any]:
+        return await _dispatch_typed(
             "rag_kb", "search_regulations",
             {"query": query, "top_k": top_k}, trace_id=_trace_id_from_ctx(ctx),
             session_id=_session_id_from_ctx(ctx),
         )
 
-    async def rag_kb_search_response_templates(query: str, top_k: int = 5, ctx: Context = None) -> list:
-        return await dispatch(
+    async def rag_kb_search_response_templates(query: str, top_k: int = 5, ctx: Context = None) -> dict[str, Any]:
+        return await _dispatch_typed(
             "rag_kb", "search_response_templates",
             {"query": query, "top_k": top_k}, trace_id=_trace_id_from_ctx(ctx),
             session_id=_session_id_from_ctx(ctx),
         )
 
     # ---- business_ticket ----
-    async def business_ticket_query_case_info(case_id: str, ctx: Context = None) -> dict:
-        return await dispatch(
+    async def business_ticket_query_case_info(case_id: str, ctx: Context = None) -> dict[str, Any]:
+        return await _dispatch_typed(
             "business_ticket", "query_case_info",
             {"case_id": case_id}, trace_id=_trace_id_from_ctx(ctx),
             session_id=_session_id_from_ctx(ctx),
         )
 
-    async def business_ticket_query_history_tickets(case_id: str, ctx: Context = None) -> list:
-        return await dispatch(
+    async def business_ticket_query_history_tickets(case_id: str, ctx: Context = None) -> dict[str, Any]:
+        return await _dispatch_typed(
             "business_ticket", "query_history_tickets",
             {"case_id": case_id}, trace_id=_trace_id_from_ctx(ctx),
             session_id=_session_id_from_ctx(ctx),
         )
 
-    async def business_ticket_query_history_complaints(case_id: str, ctx: Context = None) -> list:
-        return await dispatch(
+    async def business_ticket_query_history_complaints(case_id: str, ctx: Context = None) -> dict[str, Any]:
+        return await _dispatch_typed(
             "business_ticket", "query_history_complaints",
             {"case_id": case_id}, trace_id=_trace_id_from_ctx(ctx),
             session_id=_session_id_from_ctx(ctx),
@@ -251,8 +272,8 @@ def _register_tools() -> None:
         case_id: str = "",
         complaint_id: str = "",
         ctx: Context = None,
-    ) -> dict:
-        return await dispatch(
+    ) -> dict[str, Any]:
+        return await _dispatch_typed(
             "data_platform", "write_session",
             {
                 "session_id": session_id,
@@ -272,8 +293,8 @@ def _register_tools() -> None:
         case_id: str = "",
         complaint_id: str = "",
         ctx: Context = None,
-    ) -> dict:
-        return await dispatch(
+    ) -> dict[str, Any]:
+        return await _dispatch_typed(
             "data_platform", "write_human_review_truth",
             {
                 "session_id": session_id,
@@ -287,22 +308,22 @@ def _register_tools() -> None:
         )
 
     # ---- call_qc（混合实现）----
-    async def call_qc_query_call_asr(case_id: str, ctx: Context = None) -> list:
-        return await dispatch(
+    async def call_qc_query_call_asr(case_id: str, ctx: Context = None) -> dict[str, Any]:
+        return await _dispatch_typed(
             "call_qc", "query_call_asr",
             {"case_id": case_id}, trace_id=_trace_id_from_ctx(ctx),
             session_id=_session_id_from_ctx(ctx),
         )
 
-    async def call_qc_query_qc_violations(case_id: str, session_id: str = "", ctx: Context = None) -> list:
-        return await dispatch(
+    async def call_qc_query_qc_violations(case_id: str, session_id: str = "", ctx: Context = None) -> dict[str, Any]:
+        return await _dispatch_typed(
             "call_qc", "query_qc_violations",
             {"case_id": case_id, "session_id": session_id}, trace_id=_trace_id_from_ctx(ctx),
             session_id=_session_id_from_ctx(ctx),
         )
 
-    async def call_qc_query_qc_alerts(case_id: str, session_id: str = "", ctx: Context = None) -> list:
-        return await dispatch(
+    async def call_qc_query_qc_alerts(case_id: str, session_id: str = "", ctx: Context = None) -> dict[str, Any]:
+        return await _dispatch_typed(
             "call_qc", "query_qc_alerts",
             {"case_id": case_id, "session_id": session_id}, trace_id=_trace_id_from_ctx(ctx),
             session_id=_session_id_from_ctx(ctx),

@@ -1,31 +1,43 @@
-"""Event envelope contract — single source of truth for bus payloads."""
+"""Event envelope contract — single source of truth for bus payloads.
+
+白名单（事件类型 / data 字段）由平台配置提供（``EVENT_ALLOWED_TYPES`` /
+``EVENT_DATA_WHITELIST``），新增事件只改配置、重启后生效，不在代码内硬编码清单。
+"""
 from __future__ import annotations
 
 import json
 import uuid
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any
 
 import structlog
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
+from common.config.settings import settings
+
 logger = structlog.get_logger(__name__)
 
-DATA_WHITELIST: frozenset[str] = frozenset(
-    {
-        "case_id",
-        "session_id",
-        "qc_record_id",
-        "complaint_no",
-        "backfill_date",
-    }
-)
+
+@lru_cache(maxsize=8)
+def _parse_csv(raw: str) -> frozenset[str]:
+    return frozenset(item.strip() for item in raw.split(",") if item.strip())
+
+
+def data_whitelist() -> frozenset[str]:
+    """当前生效的 envelope.data 字段白名单（来自配置，非代码常量）。"""
+    return _parse_csv(settings.EVENT_DATA_WHITELIST)
+
+
+def allowed_event_types() -> frozenset[str]:
+    """当前生效的事件类型登记表（来自配置，非代码常量）。"""
+    return _parse_csv(settings.EVENT_ALLOWED_TYPES)
 
 
 def _rejected_fields(data: Any) -> list[str]:
     if not isinstance(data, dict):
         return []
-    return sorted(set(data.keys()) - DATA_WHITELIST)
+    return sorted(set(data.keys()) - data_whitelist())
 
 
 def _log_reject(
@@ -48,7 +60,7 @@ def _log_reject(
 
 
 class EventEnvelope(BaseModel):
-    """Unified event envelope; ``data`` only allows ID whitelist fields."""
+    """Unified event envelope; ``data`` only allows the configured ID fields."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -57,6 +69,17 @@ class EventEnvelope(BaseModel):
     occurred_at: datetime
     trace_id: str
     data: dict[str, Any]
+
+    @field_validator("event_name")
+    @classmethod
+    def validate_event_type(cls, value: str) -> str:
+        registered = allowed_event_types()
+        if value not in registered:
+            raise ValueError(
+                f"event type not registered in EVENT_ALLOWED_TYPES: {value!r}; "
+                f"registered={sorted(registered)}"
+            )
+        return value
 
     @field_validator("data")
     @classmethod
@@ -69,7 +92,7 @@ class EventEnvelope(BaseModel):
             # parse_envelope wrappers (validator has no sibling-field access).
             raise ValueError(
                 f"data contains non-whitelist fields: {rejected}; "
-                f"allowed={sorted(DATA_WHITELIST)}"
+                f"allowed={sorted(data_whitelist())}"
             )
         return value
 

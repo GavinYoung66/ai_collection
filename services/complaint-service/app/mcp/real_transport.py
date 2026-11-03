@@ -18,7 +18,6 @@ Batch 5（mcp-gateway-standalone）：
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import httpx
@@ -29,25 +28,15 @@ from mcp.client.streamable_http import streamable_http_client
 from app.config import settings
 from app.mcp.errors import MCPError, MCPPermissionDeniedError, MCPTimeoutError
 from common.llm.reliability import is_placeholder_secret
+from common.mcp.contract import has_shape_metadata, unwrap_typed_result
 
 logger = structlog.get_logger()
 
 # 网关聚合的 4 个后端 server（与 app.mcp.gateway.ALLOWED_SERVERS 一致）
 KNOWN_SERVERS = frozenset({"business_ticket", "call_qc", "rag_kb", "data_platform"})
 
-# 网关静态注册工具中返回 list 形状的 (server, tool)；其余已注册工具返回 dict。
-# 事实源：services/mcp-gateway/app/mcp_server.py 注册的 10 个工具 + 各桥 fixture 形状。
-# 必须静态声明的原因：mcp 1.30 FastMCP 对 list 返回值按「每元素一个 TextContent
-# block」编码，单元素 list 与 dict 在线上形态不可区分，只能靠静态 schema 还原。
-_LIST_SHAPE_TOOLS = frozenset({
-    ("rag_kb", "search_regulations"),
-    ("rag_kb", "search_response_templates"),
-    ("business_ticket", "query_history_tickets"),
-    ("business_ticket", "query_history_complaints"),
-    ("call_qc", "query_call_asr"),
-    ("call_qc", "query_qc_violations"),
-    ("call_qc", "query_qc_alerts"),
-})
+# 返回形状由网关响应的 structuredContent.shape 元数据声明（common.mcp.contract），
+# 客户端不维护「哪些工具返回 list」的静态镜像（T35）。
 
 # MCP 级健康探活超时（initialize + list_tools）
 _PROBE_TIMEOUT = 5.0
@@ -243,36 +232,26 @@ def _error_text(result: Any) -> str:
 
 
 def _extract_payload(result: Any, server: str = "", tool: str = "") -> Any:
-    """CallToolResult → 工具原始返回值（dict/list，形状对齐现有 fixture）。
+    """CallToolResult → 工具原始返回值（dict/list）。
 
-    mcp 1.30 FastMCP 实测：
-    - dict 返回 → 1 个 TextContent block，内容为完整 dict 的 JSON
-    - list 返回 → 每元素 1 个 TextContent block（空列表 0 block）
-    - structuredContent 均为 None
-    故按 (server, tool) 静态基数还原（见 _LIST_SHAPE_TOOLS）：
-    list 型工具聚合全部 block；dict 型工具取首个 block。
-    保留 structuredContent 分支兼容其它 SDK 版本：FastMCP 对非 dict 返回值
-    包装为 ``{"result": [...]}``，dict 返回原样透传。
+    形状由网关响应的 ``structuredContent`` 携带（``{"shape","payload"}``，
+    common.mcp.contract）；客户端按元数据还原，不再静态镜像工具名单。
+    缺少元数据即契约违约：明确报错，不猜测形状（避免 list/dict 误解析）。
+    仅保留对 FastMCP SDK 自身 ``{"result": ...}`` 包装的读取。
     """
-    want_list = (server, tool) in _LIST_SHAPE_TOOLS
-
     structured = getattr(result, "structuredContent", None)
-    if isinstance(structured, dict):
-        if set(structured.keys()) == {"result"}:
-            payload = structured["result"]
-            return payload if isinstance(payload, list) or not want_list else [payload]
-        return structured
-
-    items: list[Any] = []
-    for block in getattr(result, "content", None) or []:
-        text = getattr(block, "text", None)
-        if not text:
-            continue
+    if has_shape_metadata(structured):
         try:
-            items.append(json.loads(text))
-        except ValueError:
-            items.append(text)
+            return unwrap_typed_result(structured)
+        except ValueError as exc:
+            raise MCPError(server, tool, f"invalid gateway response shape: {exc}") from exc
 
-    if want_list:
-        return items
-    return items[0] if items else None
+    if isinstance(structured, dict) and set(structured.keys()) == {"result"}:
+        # SDK 级包装：value 即原始返回值，形状无需推断
+        return structured["result"]
+
+    raise MCPError(
+        server,
+        tool,
+        "gateway response missing shape metadata (common.mcp.contract)",
+    )

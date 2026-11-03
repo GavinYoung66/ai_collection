@@ -39,7 +39,6 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = "change_me"
     LLM_MODEL: str = "qwen-plus"
     LLM_TIMEOUT: int = 10
-    LLM_CONFIDENCE_THRESHOLD: float = 0.7
     DEEPSEEK_API_KEY: str = ""
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
     DASHSCOPE_API_KEY: str = ""
@@ -88,17 +87,24 @@ class Settings(BaseSettings):
     # API Key 对应的身份角色默认值（API Key 本身不带 role，统一赋予此角色）。
     API_KEY_ROLE: str = "admin"
 
-    # 业务参数（外呼 / 质检 / 熔断）
-    # 外呼合规时区：时段判定一律按此 IANA 时区（默认北京时间），与容器 TZ 无关
-    CALL_TIMEZONE: str = "Asia/Shanghai"
-    CALL_ALLOWED_HOURS: str = "08:00-21:00"
-    CALL_DAILY_LIMIT_PER_USER: int = 3
-    CALL_RETRY_INTERVAL_MIN: int = 30
-    CALL_MAX_RETRY: int = 3
-    CALL_MAX_CONCURRENCY: int = 50
-    MAX_DIALOG_TURNS: int = 15
+    # LLM 可靠性（平台级：common/llm 跨服务共享的熔断阈值，业务参数不放这里）
     LLM_CIRCUIT_BREAKER_THRESHOLD: int = 3
     LLM_CIRCUIT_BREAKER_RECOVERY: int = 60
+
+    # 事件总线契约（平台级，逗号分隔；新增事件类型只改配置，重启后生效，无需改代码）
+    # 未登记的 event_name 一律拒收（fail-closed）。
+    EVENT_ALLOWED_TYPES: str = (
+        "complaint.created,complaint.result.ready,complaint.judged,complaint.closed,"
+        "complaint.insight.weekly,complaint.mode.switched,complaint.degraded,"
+        "case.risk.upgraded,callback.requested,qc.violation.reported,"
+        "call.session.ended,etl.task.done,kb.sensitive_updated,strategy.updated,"
+        "qc.check.completed,qc.complaint.suspected,qc.alert.raised,"
+        "qc.stop_call.detected,qc.review.done,system.alert.raised"
+    )
+    # envelope.data 允许字段白名单（逗号分隔；仅 ID 类字段，禁止业务内容入总线）
+    EVENT_DATA_WHITELIST: str = (
+        "case_id,session_id,qc_record_id,complaint_no,backfill_date"
+    )
 
     @property
     def is_production(self) -> bool:

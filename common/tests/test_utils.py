@@ -6,7 +6,6 @@ import pytest
 from common.utils.retry import retry
 from common.utils.time_guard import check_call_time
 from common.utils.semaphore import CallSemaphore
-from common.config.settings import settings
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
 
@@ -72,6 +71,8 @@ class TestRetry:
 
 
 class TestTimeGuard:
+    CONFIG = {"timezone_name": "Asia/Shanghai", "allowed_hours": "08:00-21:00"}
+
     def test_check_call_time_within_hours(self, monkeypatch):
         from datetime import datetime
         fake_time = datetime(2026, 1, 15, 10, 30, 0)
@@ -80,7 +81,7 @@ class TestTimeGuard:
             def now(cls, tz=None):
                 return fake_time
         monkeypatch.setattr("common.utils.time_guard.datetime", FakeDateTime)
-        check_call_time()
+        check_call_time(**self.CONFIG)
 
     def test_check_call_time_outside_hours(self, monkeypatch):
         from datetime import datetime
@@ -91,7 +92,7 @@ class TestTimeGuard:
                 return fake_time
         monkeypatch.setattr("common.utils.time_guard.datetime", FakeDateTime)
         with pytest.raises(BizException) as exc_info:
-            check_call_time()
+            check_call_time(**self.CONFIG)
         assert exc_info.value.code == ErrorCode.A1001
 
     def test_check_call_time_boundary_start(self, monkeypatch):
@@ -102,7 +103,7 @@ class TestTimeGuard:
             def now(cls, tz=None):
                 return fake_time
         monkeypatch.setattr("common.utils.time_guard.datetime", FakeDateTime)
-        check_call_time()
+        check_call_time(**self.CONFIG)
 
     def test_check_call_time_boundary_end(self, monkeypatch):
         from datetime import datetime
@@ -113,7 +114,7 @@ class TestTimeGuard:
                 return fake_time
         monkeypatch.setattr("common.utils.time_guard.datetime", FakeDateTime)
         with pytest.raises(BizException) as exc_info:
-            check_call_time()
+            check_call_time(**self.CONFIG)
         assert exc_info.value.code == ErrorCode.A1001
 
 
@@ -144,6 +145,10 @@ class TestSemaphore:
         assert max_active <= 2
 
     @pytest.mark.asyncio()
-    async def test_max_concurrency_50_default(self):
-        sem = CallSemaphore()
-        assert sem._semaphore._value == settings.CALL_MAX_CONCURRENCY
+    async def test_max_concurrency_from_caller(self):
+        sem = CallSemaphore(max_concurrency=50)
+        assert sem._semaphore._value == 50
+
+    def test_invalid_max_concurrency_rejected(self):
+        with pytest.raises(ValueError):
+            CallSemaphore(max_concurrency=0)

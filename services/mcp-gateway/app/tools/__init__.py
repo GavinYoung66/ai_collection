@@ -45,10 +45,8 @@ _CASE_ID_SCHEMA = {
 }
 
 # 静态工具 schema（与源桥 TOOL 定义一致；inputSchema 按调用方实参收敛）。
-# 注意：mcp 1.30 FastMCP 对 list 返回值按「每元素一个 TextContent」编码，客户端无法
-# 区分 list/dict，须靠静态 schema 还原——complaint-service real_transport.py 的
-# `_LIST_SHAPE_TOOLS` 静态镜像了「返回 list 的工具」集合。凡新增返回 list 的工具，
-# 必须同步更新该集合，否则客户端会把 list 误解析为 dict/空。
+# 返回形状由 dispatch 统一写入 structuredContent 的 shape 元数据（common.mcp.contract），
+# 客户端按元数据还原 list/dict，不再依赖「哪些工具返回 list」的静态镜像（T35）。
 TOOL_SPECS: tuple[dict[str, Any], ...] = (
     {
         "server": "rag_kb",

@@ -16,7 +16,7 @@ logger = structlog.get_logger()
 
 CHANNEL_COMPLAINT_CREATED = "complaint.created"
 SUBSCRIBE_CHANNELS: tuple[str, ...] = (CHANNEL_COMPLAINT_CREATED,)
-_GROUP_SHORT = "cs"  # → gid_cs_complaint_created
+_GROUP_SHORT = "cs"  # → gid_cs（服务级共享消费组，事件用 tag 过滤区分）
 
 # 进程内 event_id 去重（单测 / mock）；生产另有 Redis SET NX
 _seen_event_ids: set[str] = set()
