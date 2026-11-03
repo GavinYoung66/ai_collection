@@ -34,11 +34,17 @@ from common.eventbus.observability import (
     emit_publish,
     emit_retry,
 )
+from common.resilience.retry import (
+    EVENTBUS_RETRY,
+    SUBSCRIBE_RETRY,
+    retry_async,
+    retry_delay,
+)
 
 logger = structlog.get_logger(__name__)
 
 # Spec: maxRetryTimes=3 → original + 3 retries = 4 deliveries.
-MAX_RETRY_TIMES = 3
+MAX_RETRY_TIMES = EVENTBUS_RETRY.max_attempts - 1
 _DEFAULT_PROXY = "rocketmq-proxy:8081"
 # SimpleConsumer.receive 的不可见时长（秒）：handler 在此窗口内 ACK，超时则消息
 # 重新可见并被重投，ACK 会报 INVALID_RECEIPT_HANDLE。真 LLM 研判 handler 需 ~37s，
@@ -96,7 +102,7 @@ def _decode_dlq_body(raw: bytes | bytearray | str) -> dict[str, Any]:
 
 def _receive_backoff_seconds(failures: int) -> float:
     """指数退避（1s 起，30s 封顶），供订阅循环在 receive 连续失败时使用。"""
-    return min(float(2 ** (failures - 1)), 30.0)
+    return retry_delay(failures, SUBSCRIBE_RETRY)
 
 
 def _proxy_endpoints() -> str:
@@ -403,43 +409,48 @@ class RocketMQEventBus:
             await loop.run_in_executor(self._executor, consumer.ack, msg)
             return
 
-        attempt = 0
         last_error: Exception | None = None
         # Application-visible retry budget aligned with maxRetryTimes=3 (4 deliveries).
-        while attempt <= self._max_retry_times:
-            try:
-                await handler(envelope)
-                await emit_consume(
-                    event_id=envelope.event_id,
-                    event_name=envelope.event_name,
-                    trace_id=envelope.trace_id,
-                )
-                await loop.run_in_executor(self._executor, consumer.ack, msg)
-                return
-            except Exception as exc:
-                last_error = exc
-                attempt += 1
-                await emit_retry(
-                    event_id=envelope.event_id,
-                    event_name=envelope.event_name,
-                    trace_id=envelope.trace_id,
-                    attempt=attempt,
-                    max_attempt=self._max_retry_times + 1,
-                    error_type=type(exc).__name__,
-                )
-                logger.warning(
-                    "eventbus_handler_retry",
-                    transport="rocketmq",
-                    event_id=envelope.event_id,
-                    event_name=envelope.event_name,
-                    consumer_group=consumer_group,
-                    attempt=attempt,
-                    max_attempt=self._max_retry_times + 1,
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                )
-                if attempt <= self._max_retry_times:
-                    await asyncio.sleep(min(2 ** (attempt - 1), 8))
+        policy = EVENTBUS_RETRY.with_overrides(
+            max_attempts=self._max_retry_times + 1
+        )
+
+        async def _on_retry(attempt: int, exc: BaseException, delay: float) -> None:
+            await emit_retry(
+                event_id=envelope.event_id,
+                event_name=envelope.event_name,
+                trace_id=envelope.trace_id,
+                attempt=attempt,
+                max_attempt=self._max_retry_times + 1,
+                error_type=type(exc).__name__,
+            )
+            logger.warning(
+                "eventbus_handler_retry",
+                transport="rocketmq",
+                event_id=envelope.event_id,
+                event_name=envelope.event_name,
+                consumer_group=consumer_group,
+                attempt=attempt,
+                max_attempt=self._max_retry_times + 1,
+                delay=delay,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+
+        try:
+            await retry_async(
+                lambda: handler(envelope), policy=policy, on_retry=_on_retry
+            )
+        except Exception as exc:
+            last_error = exc
+        else:
+            await emit_consume(
+                event_id=envelope.event_id,
+                event_name=envelope.event_name,
+                trace_id=envelope.trace_id,
+            )
+            await loop.run_in_executor(self._executor, consumer.ack, msg)
+            return
 
         dlq_ts = datetime.now(timezone.utc).isoformat()
         last_error_text = str(last_error) if last_error else "unknown"

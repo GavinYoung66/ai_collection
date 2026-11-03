@@ -1,4 +1,3 @@
-from common.llm.circuit_breaker import llm_breaker
 from common.llm.provider import chat, chat_json
 from common.llm.reliability import (
     RedisDegradeTracker,
@@ -16,7 +15,6 @@ from common.llm.transport import (
 __all__ = [
     "chat",
     "chat_json",
-    "llm_breaker",
     "RuleBasedScriptEngine",
     "rule_engine",
     "post_chat_completions",

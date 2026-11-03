@@ -73,7 +73,7 @@ flowchart TB
     subgraph L1["① 接入层 · 三网关"]
         GW1["API 网关<br/>Nginx :8080<br/>转发/限流/舱壁/灰度"]
         GW2["MCP 网关<br/>mcp-gateway :9000<br/>Agent 工具调用统一入口"]
-        GW3["大模型网关<br/>invoke_llm 编排器<br/>选Key→限流→熔断→重试→fallback→降级"]
+        GW3["LLM 编排器（进程内）<br/>invoke_llm<br/>选Key→限流→熔断→重试→fallback→降级<br/>随调用方服务运行，非独立进程"]
     end
     subgraph L2["② 微服务层 · 7 服务独立容器/schema"]
         SVC["data-platform · rag · qc · complaint<br/>call · case · review"]
@@ -89,6 +89,8 @@ flowchart TB
     L2 -->|"Agent 取证只走 MCP 标准协议"| GW2
     L2 --> L4
 ```
+
+> 注：图中 L1 的 `LLM 编排器（进程内）` 是 `common.llm` 的 `invoke_llm` 调用链，随调用方服务进程运行，不是独立服务进程或独立网关。
 
 **两条铁律：**
 - 跨服务只走事件总线（通知式，事件只带 ID 与 trace_id，订阅方回查明细，禁止 HTTP 直推业务事件）

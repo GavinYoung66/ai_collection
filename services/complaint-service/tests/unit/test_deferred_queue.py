@@ -20,7 +20,8 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.config import settings
 from app.events.publisher import publisher
-from app.main import _deferred_consumer_loop, _queue_consumer_loop, app
+from app.main import app
+from app.worker import deferred_consumer_loop, queue_consumer_loop
 from app.service.complaint_service import complaint_service
 from app.service.rate_limiter import (
     OUTCOME_DUPLICATE,
@@ -313,16 +314,16 @@ async def test_route_enabled_redis_down_falls_back_b0006(monkeypatch):
 
 def _patch_loop_timing(monkeypatch) -> None:
     """压缩循环空转/退避间隔，避免单测真实 sleep 拖慢。"""
-    monkeypatch.setattr("app.main._DEFERRED_IDLE_INTERVAL", 0.01)
-    monkeypatch.setattr("app.main._DEFERRED_BACKOFF_BASE", 0.01)
-    monkeypatch.setattr("app.main._DEFERRED_BACKOFF_MAX", 0.04)
+    monkeypatch.setattr("app.worker._DEFERRED_IDLE_INTERVAL", 0.01)
+    monkeypatch.setattr("app.worker._DEFERRED_BACKOFF_BASE", 0.01)
+    monkeypatch.setattr("app.worker._DEFERRED_BACKOFF_MAX", 0.04)
 
 
 async def _run_loop_briefly(monkeypatch, pops: list, outcomes: dict) -> _FakeLoopLimiter:
     """注入 fake 限流器，启动补偿循环处理给定 pop 序列后取消，返回 fake 供断言。"""
     fake = _FakeLoopLimiter(pops=pops, outcomes=outcomes)
     monkeypatch.setattr("app.service.rate_limiter.rate_limiter", fake)
-    task = asyncio.create_task(_deferred_consumer_loop())
+    task = asyncio.create_task(deferred_consumer_loop())
     await asyncio.sleep(0.08)  # 处理 pop 序列 + 空转一轮
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
@@ -439,7 +440,7 @@ async def test_loop_cancel_requeues_inflight_cid(monkeypatch):
 
     monkeypatch.setattr(complaint_service, "judge_async", hanging_judge)
 
-    task = asyncio.create_task(_deferred_consumer_loop())
+    task = asyncio.create_task(deferred_consumer_loop())
     await asyncio.wait_for(entered.wait(), timeout=1.0)
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
@@ -466,7 +467,7 @@ async def test_loop_requeue_survives_second_cancel(monkeypatch):
 
     monkeypatch.setattr(complaint_service, "judge_async", hanging_judge)
 
-    task = asyncio.create_task(_deferred_consumer_loop())
+    task = asyncio.create_task(deferred_consumer_loop())
     await asyncio.wait_for(entered.wait(), timeout=1.0)
     task.cancel()  # 第一次 cancel：打断 judge → 进入 CancelledError 分支 → await 重塞
     await asyncio.sleep(0.05)  # 等重塞协程进入挂起
@@ -510,10 +511,10 @@ async def test_e2e_overflow_backfills_and_executes_once(monkeypatch):
     monkeypatch.setattr(settings, "COMPLAINT_DEFERRED_QUEUE_ENABLED", True)
     fake = _ListFakeRedis()
     rl = _reset_limiter(max_active=2, queue_max=3, fake=fake, deferred_max=10)
-    monkeypatch.setattr("app.main._QUEUE_CONSUME_INTERVAL", 0.02)
-    monkeypatch.setattr("app.main._DEFERRED_IDLE_INTERVAL", 0.02)
-    monkeypatch.setattr("app.main._DEFERRED_BACKOFF_BASE", 0.02)
-    monkeypatch.setattr("app.main._DEFERRED_BACKOFF_MAX", 0.08)
+    monkeypatch.setattr("app.worker._QUEUE_CONSUME_INTERVAL", 0.02)
+    monkeypatch.setattr("app.worker._DEFERRED_IDLE_INTERVAL", 0.02)
+    monkeypatch.setattr("app.worker._DEFERRED_BACKOFF_BASE", 0.02)
+    monkeypatch.setattr("app.worker._DEFERRED_BACKOFF_MAX", 0.08)
 
     counts: dict[str, int] = {}
 
@@ -540,8 +541,8 @@ async def test_e2e_overflow_backfills_and_executes_once(monkeypatch):
             assert r.json()["data"]["message"] == "judge queued in deferred backlog"
 
     # 资源释放后由补偿循环 + 内存队列消费循环补位执行
-    deferred_t = asyncio.create_task(_deferred_consumer_loop())
-    consumer_t = asyncio.create_task(_queue_consumer_loop())
+    deferred_t = asyncio.create_task(deferred_consumer_loop())
+    consumer_t = asyncio.create_task(queue_consumer_loop())
     try:
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:

@@ -73,7 +73,7 @@ flowchart TB
     subgraph L1["① Access layer · three gateways"]
         GW1["API gateway<br/>Nginx :8080<br/>routing / rate-limit / bulkhead / canary"]
         GW2["MCP gateway<br/>mcp-gateway :9000<br/>single entry for agent tool calls"]
-        GW3["LLM gateway<br/>invoke_llm orchestrator<br/>pick-key → limit → breaker → retry → fallback → degrade"]
+        GW3["LLM orchestrator (in-process)<br/>invoke_llm<br/>pick-key → limit → breaker → retry → fallback → degrade<br/>runs inside caller service, not a separate process"]
     end
     subgraph L2["② Services · 7 isolated containers/schemas"]
         SVC["data-platform · rag · qc · complaint<br/>call · case · review"]
@@ -89,6 +89,8 @@ flowchart TB
     L2 -->|"agent evidence via MCP only"| GW2
     L2 --> L4
 ```
+
+> Note: the L1 `LLM orchestrator (in-process)` is the `invoke_llm` call chain in `common.llm`; it runs inside the caller service, not as a separate process or gateway.
 
 **Two invariants:**
 - Inter-service communication goes only through the event bus (notification-style; events carry just ID + trace_id; subscribers fetch detail; no HTTP fan-out for business events).

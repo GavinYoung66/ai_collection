@@ -287,6 +287,63 @@ services:
       - default
       - ai-shared-net
 
+  # T25：后台常驻循环（排队消费/周期维护/溢出补偿）与 EventBus 订阅独立进程，
+  # HTTP 实例仅处理请求。worker 复用同一镜像与配置。
+  complaint-worker:
+    build:
+      context: .
+      dockerfile: services/complaint-service/Dockerfile
+    command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
+    env_file: services/complaint-service/config/prod.env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB: "6"
+      PROMPT_TEMPLATES_DIR: /app/app/prompt/templates
+      MCP_GATEWAY_MODE: standalone
+      MCP_GATEWAY_URL: http://mcp-gateway:9000
+      RAG_SERVICE_URL: http://rag-service:8000
+      DATA_PLATFORM_URL: ${DATA_PLATFORM_URL:-http://data-platform:8000}
+      QC_SERVICE_URL: ${QC_SERVICE_URL:-http://qc-service:8000}
+      USE_MOCK_MCP: "false"
+      EVENT_BUS: ${EVENT_BUS:-rocketmq}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
+      EVENT_BUS_SVC: ${EVENT_BUS_SVC:-cs}
+      LANGSMITH_ENABLED: ${LANGSMITH_ENABLED:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-ai_collection}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_TRACE_URL_TEMPLATE: ${LANGSMITH_TRACE_URL_TEMPLATE:-}
+      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL_DOCKER:-http://host.docker.internal:3000}
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8g
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rag-service: { condition: service_started }
+      mcp-gateway-a: { condition: service_started }
+      mcp-gateway-b: { condition: service_started }
+    healthcheck:
+      # 无 HTTP 端点：以模块可导入且进程存活作为健康信号。
+      test: ["CMD-SHELL", "python -c 'import app.worker'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - default
+      - ai-shared-net
+
 volumes:
   complaint_pg_data:
   complaint_redis_data:

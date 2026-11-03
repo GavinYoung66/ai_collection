@@ -1,6 +1,6 @@
 """tests/unit 目录共享 fixture。
 
-`_drain_running_queued`：每个用例结束后，把 `app.main._running_queued` 中
+`_drain_running_queued`：每个用例结束后，把 `app.worker._running_queued` 中
 残留的排队研判任务等到终结（超时取消兜底），从机制上杜绝跨用例泄漏。
 
 背景（PR #4 master 侧 run_3 三连失败根因）：
@@ -19,7 +19,7 @@ import pytest
 @pytest.fixture(autouse=True)
 async def _drain_running_queued():
     yield
-    from app.main import _running_queued
+    from app.worker import _running_queued
 
     pending = [t for t in list(_running_queued) if not t.done()]
     if not pending:

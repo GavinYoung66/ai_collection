@@ -8,6 +8,7 @@
 - ``breaker``      熔断器状态机（closed→open→half-open→closed/open）
 - ``hooks``        统一可观测事件钩子（默认 structlog，不依赖 publisher）
 - ``timeout``      三级超时配置（connect/read/total）
+- ``retry``        统一重试原语与策略（次数/退避唯一配置源）
 
 超时层级约定：MCP ``total=30s`` < LLM ``total=120s`` < 投诉全局 ``30min``，
 保证下游超时先于上游调用方触发。
@@ -21,6 +22,7 @@ from common.resilience import (
     idempotency,
     queue,
     rate_limit,
+    retry,
     timeout,
 )
 from common.resilience.breaker import (
@@ -31,6 +33,16 @@ from common.resilience.breaker import (
 )
 from common.resilience.concurrency import Semaphore
 from common.resilience.queue import BoundedQueue
+from common.resilience.retry import (
+    DEFAULT_RETRY,
+    EVENTBUS_RETRY,
+    LLM_RETRY,
+    MCP_RETRY,
+    RetryPolicy,
+    retry as retry_decorator,
+    retry_async,
+    retry_delay,
+)
 from common.resilience.timeout import Timeout
 
 __all__ = [
@@ -41,6 +53,15 @@ __all__ = [
     "breaker",
     "hooks",
     "timeout",
+    "retry",
+    "RetryPolicy",
+    "DEFAULT_RETRY",
+    "LLM_RETRY",
+    "MCP_RETRY",
+    "EVENTBUS_RETRY",
+    "retry_decorator",
+    "retry_async",
+    "retry_delay",
     "CircuitBreaker",
     "BreakerRegistry",
     "Semaphore",

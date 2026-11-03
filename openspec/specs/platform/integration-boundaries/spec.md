@@ -107,7 +107,7 @@ All first-party services that call external LLM HTTP APIs MUST execute those HTT
 #### Scenario: Reliability stays above transport
 
 - **WHEN** a provider needs API key resolution, retries, or circuit breaking around an LLM call
-- **THEN** it MAY compose those concerns above `common.llm.transport` (including `common.llm.circuit_breaker` / service Redis degrade flags); transport itself is not required to implement key vaults or breakers
+- **THEN** it MAY compose those concerns above `common.llm.transport` (including `common.resilience.breaker` / service Redis degrade flags); transport itself is not required to implement key vaults or breakers
 
 #### Scenario: Agent structured output stays service-local
 
