@@ -8,7 +8,6 @@
 """
 from __future__ import annotations
 
-import threading
 import time
 import uuid
 from collections import deque
@@ -103,12 +102,21 @@ class _InMemoryRedis:
 
 
 class SessionService:
+    """会话内存态服务。
+
+    并发前提（T14）：``_store`` / ``_by_complaint`` 的所有同步读写都发生在
+    **同一个 FastAPI 事件循环线程**上——路由与后台维护循环均为 ``async def``，
+    全仓无 ``to_thread`` / ``run_in_executor`` 触达本类。因此不再保留
+    「只给 create_session 加锁」的半锁：锁既不能保护裸读写，又会在事件循环里
+    无谓阻塞。若未来把本类下沉到线程池，必须改为全字段统一加锁。
+    """
+
     def __init__(self, redis_client: Any = None, clock: Any = None) -> None:
         self._redis = redis_client or _InMemoryRedis()
         self._clock = clock or time.time
+        # 单线程前提见类 docstring：仅事件循环线程读写，故无锁
         self._store: dict[str, dict] = {}
         self._by_complaint: dict[str, str] = {}  # complaint_id → session_id 持久映射
-        self._lock = threading.Lock()
         # PG 写穿是否已降级（fail-open：写失败只告警，不回滚内存流转）
         self._persist_degraded = False
 
@@ -141,24 +149,23 @@ class SessionService:
         else:
             self._redis.expire(lock_key, TTL_COMPLAINT_LOCK)
 
-        with self._lock:
-            # 双重检查
-            existing = self._find_by_complaint(complaint_id)
-            if existing is not None:
-                return existing
-            sid = session_id or str(uuid.uuid4())
-            now = datetime.now(timezone.utc)
-            self._store[sid] = {
-                "session_id": sid,
-                "complaint_id": complaint_id,
-                "complaint_text": complaint_text,
-                "task_status": TaskStatus.pending,
-                "created_at": now,
-                "updated_at": now,
-                "status_changed_at": now,
-            }
-            self._by_complaint[complaint_id] = sid
-            return sid
+        # 双重检查：单线程内自 create_session 入口至此无 await，检查与登记不可分割
+        existing = self._find_by_complaint(complaint_id)
+        if existing is not None:
+            return existing
+        sid = session_id or str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        self._store[sid] = {
+            "session_id": sid,
+            "complaint_id": complaint_id,
+            "complaint_text": complaint_text,
+            "task_status": TaskStatus.pending,
+            "created_at": now,
+            "updated_at": now,
+            "status_changed_at": now,
+        }
+        self._by_complaint[complaint_id] = sid
+        return sid
 
     # ── 状态流转 ──
 
@@ -388,9 +395,8 @@ class SessionService:
                 return None
 
             rec = self._row_to_record(row)
-            with self._lock:
-                self._store[session_id] = rec
-                self._by_complaint[str(row.complaint_id)] = session_id
+            self._store[session_id] = rec
+            self._by_complaint[str(row.complaint_id)] = session_id
             return rec
         except Exception as e:  # noqa: BLE001
             logger.warning("session_load_failed", session_id=session_id, error=str(e))

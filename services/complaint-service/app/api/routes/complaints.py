@@ -7,9 +7,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Body, Query, Request
+from fastapi import APIRouter, Body, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
+from app.api.auth import require_roles
 from app.api.response import fail, success
 from app.api.schemas.complaint import (
     AgentLogsResponse,
@@ -45,8 +46,14 @@ from app.service.complaint_service import (
 from app.service.guardrails_postcheck import postcheck
 from app.service.session_service import session_service
 from common.errors.codes import ErrorCode
+from common.utils.ip import get_client_ip
 
-router = APIRouter(prefix="/complaints", tags=["complaints"])
+# 含 PII：生产 / 显式开启认证时，全部 complaints 接口要求 JWT 且角色受限
+router = APIRouter(
+    prefix="/complaints",
+    tags=["complaints"],
+    dependencies=[Depends(require_roles("admin", "supervisor", "agent"))],
+)
 
 
 async def _flush_session(rec: dict) -> None:
@@ -200,7 +207,7 @@ async def judge_complaint(complaint_id: str, request: Request, req: JudgeRequest
     except ComplaintNotFound:
         return fail(ErrorCode.A5001, f"投诉工单不存在: {complaint_id}", request=request)
     # 用户维接入限流（X-User-Id 优先回退 IP，Redis 挂零件层静默放行）
-    client_host = request.client.host if request.client else None
+    client_host = get_client_ip(request)
     user_key = rate_limiter.resolve_user_key(request.headers, client_host)
     user_allowed = await rate_limiter.acquire_user(
         user_key, trace_id=request.headers.get("x-trace-id", "")

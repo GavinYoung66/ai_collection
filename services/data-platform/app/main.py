@@ -15,6 +15,12 @@ from app.api.snapshot import router as snapshot_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """生命周期：启动 qc.check.completed 订阅 + 超时看门狗；关停时取消。"""
+    # T03：JWT/AES 密钥为默认占位值时立即失败（生产必须由 KMS 注入）
+    from common.config.settings import settings as common_settings
+    from common.config.settings import validate_required_secrets
+
+    validate_required_secrets(common_settings)
+
     from app.events.subscriber import start_background_tasks
 
     tasks = await start_background_tasks()

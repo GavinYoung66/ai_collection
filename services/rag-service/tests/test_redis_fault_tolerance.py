@@ -71,7 +71,9 @@ class TestRerankIsDegradedFaultTolerance:
             log_service=MockLogService(),
             doc_repo=None,
         )
-        result = await svc.hybrid_search("测试", None, 5)
+        result = await svc.hybrid_search(
+            "测试", None, 5, jwt_payload={"role": "AGENT", "department": "催收一部"}
+        )
         assert len(result["results"]) == 2
 
     @pytest.mark.asyncio
@@ -148,5 +150,11 @@ class TestSessionRecordFaultTolerance:
             doc_repo=None,
             session_service=FailingRecordSession(),
         )
-        result = await svc.hybrid_search("测试", None, 5, session_id="sess-1")
+        result = await svc.hybrid_search(
+            "测试",
+            None,
+            5,
+            session_id="sess-1",
+            jwt_payload={"role": "AGENT", "department": "催收一部"},
+        )
         assert len(result["results"]) == 2

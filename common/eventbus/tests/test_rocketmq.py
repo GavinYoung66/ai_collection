@@ -1,6 +1,7 @@
 """RocketMQ adapter unit tests (task 2.4, go path)."""
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -90,21 +91,44 @@ async def test_subscribe_uses_gid_and_filter_expression():
 
 
 @pytest.mark.asyncio
-async def test_receive_failure_emits_warning_and_raises():
-    """receive 异常要有显式 warning 日志，并继续向上抛给外层重试循环。"""
+async def test_receive_failure_emits_warning_and_continues():
+    """T12：receive 异常记 warning 并退避续跑，不得冲出订阅循环。"""
     bus = RocketMQEventBus(endpoints="127.0.0.1:18081")
+    done = asyncio.Event()
 
-    class _FailingConsumer:
+    class _FlakyConsumer:
+        def __init__(self):
+            self.calls = 0
+
         def receive(self, *_a, **_k):
-            raise RuntimeError("proxy unavailable")
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("proxy unavailable")
+            if self.calls == 2:
+                return [MagicMock(seq=1)]
+            return []
+
+        def ack(self, *_a, **_k):
+            return None
 
         def shutdown(self):
             return None
 
-    with patch.object(bus, "_start_consumer", return_value=_FailingConsumer()), \
+    async def _fake_handle(msg, event_name, consumer_group, handler, consumer, loop):
+        done.set()
+
+    with patch.object(bus, "_start_consumer", return_value=_FlakyConsumer()), \
+         patch.object(bus, "_handle_message", new=_fake_handle), \
+         patch("common.eventbus.rocketmq._receive_backoff_seconds", return_value=0.0), \
          patch("common.eventbus.rocketmq.logger") as mock_logger:
-        with pytest.raises(RuntimeError, match="proxy unavailable"):
-            await bus._consume_loop("call.session.ended", "gid_qc_call_session_ended", MagicMock())
+        task = asyncio.create_task(
+            bus._consume_loop("call.session.ended", "gid_qc_call_session_ended", MagicMock())
+        )
+        await asyncio.wait_for(done.wait(), timeout=5)
+        assert not task.done(), "receive 异常后订阅循环不得退出"
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    await bus.aclose()
 
     warning_calls = [
         c for c in mock_logger.warning.call_args_list

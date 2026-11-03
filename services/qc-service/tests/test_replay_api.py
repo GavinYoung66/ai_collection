@@ -606,7 +606,13 @@ class TestReplayRaw:
         for i in range(11):
             resp = client.post(
                 "/api/v1/qc/replay/raw",
-                headers={"X-Idempotency-Key": f"k-ip-{i}", "X-Trace-Id": "trace-ip"},
+                headers={
+                    "X-Idempotency-Key": f"k-ip-{i}",
+                    "X-Trace-Id": "trace-ip",
+                    # 显式注入 X-Real-IP：TestClient 不提供 ASGI client 地址，
+                    # 无 X-User-Id 时应以网关透传的真实 IP 作为限流维度
+                    "X-Real-IP": "10.0.0.1",
+                },
                 json=_ready(),
             )
         _assert_envelope(resp.json(), code="B0006")
@@ -614,7 +620,7 @@ class TestReplayRaw:
         assert hits
         key = hits[0]["key"]
         assert key.startswith("qc:ratelimit:raw:")
-        assert key != "qc:ratelimit:raw:anon"
+        assert key == "qc:ratelimit:raw:10.0.0.1"
         assert "u-rate" not in key
         assert hits[0]["reason"] == "rate_limited"
         assert hits[0]["trace_id"] == "trace-ip"
@@ -704,7 +710,8 @@ class TestA2011Envelope:
         configure_redis(redis)
         set_default_service("qc")
         reliability_mod._llm_breakers.clear()
-        monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+        from common.llm.reliability import orchestrator as llm_orchestrator
+        monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
         dp = FakeDp({"sess_ok": QCSession.model_validate(_ready())})
 
         async def _boom(model, messages, timeout_seconds):

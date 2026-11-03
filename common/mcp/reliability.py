@@ -16,10 +16,11 @@ from typing import Any
 
 from common.llm.reliability import mark_degraded_flag, resolve_service_name
 from common.resilience.breaker import BreakerRegistry, make_mcp_breaker_key
+from common.resilience.retry import MCP_RETRY, retry_async
 from common.resilience.timeout import Timeout
 
-_MCP_MAX_ATTEMPTS = 3
-_MCP_RETRY_DELAY = 0.5
+_MCP_MAX_ATTEMPTS = MCP_RETRY.max_attempts
+_MCP_RETRY_DELAY = MCP_RETRY.base_delay
 
 _mcp_breakers = BreakerRegistry(fail_max=5, reset_timeout=30)
 
@@ -51,16 +52,17 @@ async def _graded_call(
     server: str, tool: str, payload: dict[str, Any], timeout_seconds: float
 ) -> dict[str, Any]:
     """错误分级执行：业务可重试错重试 3 次；超时/权限拒绝向上抛（不重试）。"""
-    for attempt in range(_MCP_MAX_ATTEMPTS):
-        try:
-            return await _mcp_transport(server, tool, payload, timeout_seconds)
-        except (asyncio.TimeoutError, PermissionError):
-            raise
-        except Exception as e:
-            if attempt >= _MCP_MAX_ATTEMPTS - 1:
-                raise
-            await asyncio.sleep(_MCP_RETRY_DELAY * (2**attempt))
-    raise RuntimeError("unreachable")  # pragma: no cover
+    assert _mcp_transport is not None  # bootstrap 未注册属于编程错误
+    policy = MCP_RETRY.with_overrides(
+        max_attempts=_MCP_MAX_ATTEMPTS, base_delay=_MCP_RETRY_DELAY
+    )
+    return await retry_async(
+        lambda: _mcp_transport(server, tool, payload, timeout_seconds),
+        policy=policy,
+        should_retry=lambda exc: not isinstance(
+            exc, (asyncio.TimeoutError, PermissionError)
+        ),
+    )
 
 
 async def call_tool(

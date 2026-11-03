@@ -19,8 +19,8 @@ from datetime import timezone as dt_tz
 from types import SimpleNamespace
 
 import httpx
+import jwt as pyjwt
 import pytest
-from jose import jwt as jose_jwt
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -524,7 +524,7 @@ async def test_6_1_enabled_valid_jwt_passes(isolate, monkeypatch):
     monkeypatch.setattr(gw_settings, "ENABLE_AUTH", True)
     monkeypatch.setattr(common_settings, "API_KEYS", "")
     # HS256 JWT：用 common settings 同一密钥签名（iss/aud 未配置 → 跳过校验）
-    token = jose_jwt.encode(
+    token = pyjwt.encode(
         {
             "sub": "user-batch4",
             "role": "admin",

@@ -481,7 +481,8 @@ class TestAssertions1to14:
 
         reliability_mod._llm_breakers.clear()
         set_default_service("qc")
-        monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+        from common.llm.reliability import orchestrator as llm_orchestrator
+        monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
 
         async def _boom(model, messages, timeout_seconds):
             raise TimeoutError("timeout")

@@ -22,6 +22,7 @@ from app.services.llm_service import LLMService, mask_sensitive
 from app.settings import settings
 from common.config.settings import Settings
 from common.llm import reliability as reliability_mod
+from common.llm.reliability import orchestrator as llm_orchestrator
 from common.llm.reliability import set_default_service
 from common.resilience._redis import configure_redis, reset_redis
 from common.resilience.breaker import make_llm_breaker_key
@@ -121,7 +122,7 @@ def llm_isolate(monkeypatch):
     configure_redis(fake)
     set_default_service("rag")
     reliability_mod._llm_breakers.clear()
-    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
     yield fake
     reliability_mod._llm_breakers.clear()
     set_default_service(None)
@@ -315,7 +316,7 @@ class TestDegrade:
         async def _deny(*_a, **_k):
             return False
 
-        monkeypatch.setattr(reliability_mod, "rate_limit_allow", _deny)
+        monkeypatch.setattr(llm_orchestrator, "rate_limit_allow", _deny)
         transport = FakeTransport(result="不该被调用")
         svc = _svc(transport)
         r = await svc.generate_answer("问题", [{"content": "正文", "doc_id": "d1"}], True)

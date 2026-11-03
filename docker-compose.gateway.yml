@@ -18,7 +18,7 @@ services:
       - ./deploy/gateway/docker-entrypoint.sh:/docker-entrypoint.sh:ro
       # TLS 证书目录（gen-self-signed.sh 生成）；false 时空目录挂载无害。
       - ./deploy/gateway/tls:/etc/nginx/tls:ro
-    restart: unless-stopped
+    restart: "no"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/gateway/health"]
       interval: 10s
@@ -39,16 +39,35 @@ services:
     container_name: ai-api-auth
     env_file:
       - .env
-    # .env 的 PG_HOST=localhost 是宿主机调试口径；容器内必须走 postgres 服务名。
+    # .env 的 PG_HOST=localhost / REDIS_HOST=localhost 是宿主机调试口径；
+    # 容器内必须走 compose 服务名。
     environment:
       PG_HOST: postgres
+      REDIS_HOST: redis
     volumes:
       - ./common:/app/common:ro
-    restart: unless-stopped
+    restart: "no"
     networks:
       # default：与主 compose 的 postgres 同网络（F0 登录需查 users 表）；
       # ai-shared-net：供网关 proxy_pass http://auth 解析。
       - default
+      - ai-shared-net
+
+  # 前端管理台（F4）：多阶段构建（node build → nginx 托管），仅接 ai-shared-net
+  # 内网，MUST NOT publish 端口——经网关 /admin/ 统一入口对外，保证同源。
+  frontend:
+    build:
+      context: ./frontend
+    image: ai-collection-frontend:latest
+    container_name: ai-collection-frontend
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/admin/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
       - ai-shared-net
 
   # 指标 exporter（api-gateway-hardening D10 / tasks 8.1）：抓取网关
@@ -58,7 +77,7 @@ services:
     image: nginx/nginx-prometheus-exporter:1.4.2
     container_name: ai-api-gateway-metrics
     command: ["-nginx.scrape-uri=http://ai-api-gateway:8080/stub_status"]
-    restart: unless-stopped
+    restart: "no"
     networks:
       - ai-shared-net
 

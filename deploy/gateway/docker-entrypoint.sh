@@ -20,12 +20,13 @@ set -eu
 : "${UPSTREAM_QC:?missing UPSTREAM_QC (set it in .env)}"
 : "${UPSTREAM_RAG:?missing UPSTREAM_RAG (set it in .env)}"
 : "${CORS_ALLOWED_ORIGINS:=http://localhost:8080,http://127.0.0.1:8080}"
+: "${CSP_CONNECT_SRC:='self' http://localhost:8080}"
 : "${ENABLE_AUTH:=false}"
 : "${TLS_ENABLED:=false}"
 : "${CANARY_WEIGHT:=0}"
 : "${LOG_JSON:=false}"
 export UPSTREAM_COMPLAINT UPSTREAM_QC UPSTREAM_RAG
-export CORS_ALLOWED_ORIGINS ENABLE_AUTH TLS_ENABLED CANARY_WEIGHT LOG_JSON
+export CORS_ALLOWED_ORIGINS CSP_CONNECT_SRC ENABLE_AUTH TLS_ENABLED CANARY_WEIGHT LOG_JSON
 
 # 1.5) CANARY_WEIGHT 合法性（D11 / tasks 10.1）：0-100 整数，非法即 fail fast，
 #      避免生成语法错误的分流配置。
@@ -44,7 +45,7 @@ COMMON_OUTPUT=/etc/nginx/server_common.conf
 
 # 2) 白名单渲染：仅下列 ${VAR} 被替换，nginx 内置 $变量一律原样保留。
 #    server_common.conf 同白名单渲染（8080 与 8443 共用，唯一事实源）。
-VARS='${UPSTREAM_COMPLAINT} ${UPSTREAM_QC} ${UPSTREAM_RAG} ${CORS_ALLOWED_ORIGINS} ${ENABLE_AUTH} ${TLS_ENABLED} ${CANARY_WEIGHT} ${LOG_JSON}'
+VARS='${UPSTREAM_COMPLAINT} ${UPSTREAM_QC} ${UPSTREAM_RAG} ${CORS_ALLOWED_ORIGINS} ${CSP_CONNECT_SRC} ${ENABLE_AUTH} ${TLS_ENABLED} ${CANARY_WEIGHT} ${LOG_JSON}'
 envsubst "$VARS" < "$TEMPLATE" > "$OUTPUT"
 envsubst "$VARS" < "$COMMON_TEMPLATE" > "$COMMON_OUTPUT"
 

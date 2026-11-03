@@ -7,6 +7,9 @@
 """
 from __future__ import annotations
 
+import os
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,6 +39,14 @@ class GatewaySettings(BaseSettings):
     ENABLE_AUTH: bool = False
     AUTH_API_KEY: str = ""
 
+    @model_validator(mode="after")
+    def _force_auth_in_production(self):
+        """生产环境强制开启网关鉴权（忽略配置中的 false）。"""
+        env = (os.getenv("MCP_GATEWAY_ENV") or os.getenv("ENV") or self.ENV or "").strip().lower()
+        if env in {"prod", "production"}:
+            self.ENABLE_AUTH = True
+        return self
+
     # ===== Batch 2：下游服务地址（docker network 服务名为默认值）=====
     # rag-service：rag_kb 检索（容器内 8000；宿主机映射 8002）
     RAG_SERVICE_URL: str = "http://rag-service:8000"
@@ -44,6 +55,13 @@ class GatewaySettings(BaseSettings):
     DATA_PLATFORM_URL: str = "http://data-platform:8000"
     # qc-service：call_qc MCP server endpoint /mcp（容器内 8000；宿主机映射 8003）
     QC_SERVICE_URL: str = "http://qc-service:8000"
+
+    # ===== T22：出站 URL 白名单（SSRF 防护）=====
+    # 协议白名单（逗号分隔）；白名单外的协议一律拒绝
+    BRIDGE_ALLOWED_SCHEMES: str = "http,https"
+    # 主机白名单（逗号分隔）：默认仅 docker network 服务名。
+    # 注意：回环/内网/链路本地/云元数据 IP 即使加入白名单也会被拒绝（见 bridge_http）。
+    BRIDGE_ALLOWED_HOSTS: str = "rag-service,data-platform,qc-service"
 
     # 桥 HTTP 超时（秒）：快照/回写等内部快接口
     BRIDGE_HTTP_TIMEOUT: float = 5.0

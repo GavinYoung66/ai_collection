@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from app.core.config import dp_settings
@@ -35,6 +36,27 @@ CHANNEL_QC_COMPLAINT_SUSPECTED = "qc.complaint.suspected"  # 不订阅此频道�
 CHANNEL_COMPLAINT_RESULT_READY = "complaint.result.ready"
 
 _WATCHDOG_INTERVAL_SECONDS = 30.0
+
+# 事件先于落库：qc_record 暂不可见时不得静默 skip，进入延迟补偿队列。
+# 计数供日志/单测观测（跳过、入队、补偿成功、耗尽）。
+_RETRY_STATS: dict[str, int] = {
+    "skipped_missing_session": 0,
+    "enqueued": 0,
+    "succeeded": 0,
+    "exhausted": 0,
+}
+
+
+@dataclass
+class _PendingRetry:
+    """一条待补偿的回写事件（仅进程内，间隔为秒级窗口）。"""
+
+    payload: dict[str, Any]
+    attempts: int = 0
+    next_at: float = 0.0
+
+
+_pending_retries: dict[str, _PendingRetry] = {}
 
 
 def parse_event_payload(raw: Any) -> dict[str, Any]:
@@ -162,6 +184,97 @@ async def _confirm_qc_record(session_id: str) -> bool:
         return False
 
 
+def get_compensation_stats() -> dict[str, int]:
+    """补偿可观测计数：跳过/入队/成功/耗尽 + 当前积压条数。"""
+    return {**_RETRY_STATS, "pending": len(_pending_retries)}
+
+
+def _enqueue_pending_retry(payload: dict[str, Any]) -> _PendingRetry:
+    """qc_record 暂不可见时登记延迟补偿；同 session 重复事件刷新 payload。"""
+    key = str(payload.get("session_id") or f"case:{payload.get('case_id') or ''}")
+    entry = _pending_retries.get(key)
+    if entry is None:
+        entry = _PendingRetry(
+            payload=dict(payload),
+            next_at=time.time() + dp_settings.QC_RECOVERY_INTERVAL_SECONDS,
+        )
+        _pending_retries[key] = entry
+        _RETRY_STATS["enqueued"] += 1
+        logger.warning(
+            "qc_record_pending_retry_enqueued",
+            extra={
+                "case_id": payload.get("case_id"),
+                "session_id": payload.get("session_id"),
+                "pending": len(_pending_retries),
+                "stats": get_compensation_stats(),
+            },
+        )
+    else:
+        entry.payload = dict(payload)
+    return entry
+
+
+async def compensate_pending_retries(now: float | None = None) -> dict[str, int]:
+    """补偿到期事件：qc_record 可见则回写快照，否则按次数上限重试。
+
+    返回最新计数；耗尽的事件记 error 日志后出队（保留可观测证据，不静默丢弃）。
+    """
+    now = time.time() if now is None else now
+    due_keys = [k for k, e in _pending_retries.items() if e.next_at <= now]
+
+    for key in due_keys:
+        entry = _pending_retries.get(key)
+        if entry is None:
+            continue
+        payload = entry.payload
+        session_id = str(payload.get("session_id") or "")
+        case_id = str(payload.get("case_id") or "")
+
+        record_visible = await _confirm_qc_record(session_id)
+        if record_visible and await _update_snapshot_qc_cols(case_id, payload):
+            _pending_retries.pop(key, None)
+            _RETRY_STATS["succeeded"] += 1
+            logger.info(
+                "qc_pending_retry_succeeded",
+                extra={
+                    "case_id": case_id,
+                    "session_id": session_id,
+                    "attempts": entry.attempts + 1,
+                    "stats": get_compensation_stats(),
+                },
+            )
+            continue
+
+        entry.attempts += 1
+        if entry.attempts >= dp_settings.QC_RECOVERY_MAX_ATTEMPTS:
+            _pending_retries.pop(key, None)
+            _RETRY_STATS["exhausted"] += 1
+            logger.error(
+                "qc_pending_retry_exhausted",
+                extra={
+                    "case_id": case_id,
+                    "session_id": session_id,
+                    "attempts": entry.attempts,
+                    "record_visible": record_visible,
+                    "stats": get_compensation_stats(),
+                },
+            )
+        else:
+            entry.next_at = now + dp_settings.QC_RECOVERY_INTERVAL_SECONDS
+            logger.warning(
+                "qc_pending_retry_failed",
+                extra={
+                    "case_id": case_id,
+                    "session_id": session_id,
+                    "attempts": entry.attempts,
+                    "record_visible": record_visible,
+                    "pending": len(_pending_retries),
+                },
+            )
+
+    return get_compensation_stats()
+
+
 async def handle_qc_check_completed(payload: dict[str, Any]) -> dict[str, Any]:
     """收到 qc.check.completed：确认落库 → HTTP 反拉详情 → 仅回流快照质检列。
 
@@ -187,11 +300,24 @@ async def handle_qc_check_completed(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
     if not await _confirm_qc_record(session_id):
-        logger.error(
-            "qc_record_not_found_skip_snapshot",
-            extra={"case_id": case_id, "session_id": session_id},
-        )
-        return {"status": "skipped", "reason": "qc_record_not_found", "case_id": case_id}
+        if not session_id:
+            # 无定位字段无法补偿：显式跳过并计数，避免无意义重试
+            _RETRY_STATS["skipped_missing_session"] += 1
+            logger.error(
+                "qc_record_not_found_skip_snapshot",
+                extra={"case_id": case_id, "session_id": session_id},
+            )
+            return {"status": "skipped", "reason": "qc_record_not_found", "case_id": case_id}
+
+        # 事件先于落库：进入延迟补偿队列，不静默丢弃
+        entry = _enqueue_pending_retry(payload)
+        return {
+            "status": "pending_retry",
+            "reason": "qc_record_not_found",
+            "case_id": case_id,
+            "attempt": entry.attempts,
+            "pending": len(_pending_retries),
+        }
 
     updated = await _update_snapshot_qc_cols(case_id, payload)
     return {
@@ -392,6 +518,17 @@ class QcCheckSubscriber:
             except Exception:
                 logger.exception("timeout watchdog loop failed; continue")
 
+    async def compensation_loop(self) -> None:
+        """定时补偿「事件先于落库」的待回写事件（有限次数 + 间隔退避）。"""
+        while True:
+            try:
+                await asyncio.sleep(self._settings.QC_RECOVERY_INTERVAL_SECONDS)
+                await compensate_pending_retries()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("qc pending compensation loop failed; continue")
+
 
 _subscriber_instance: "QcCheckSubscriber | None" = None
 
@@ -431,6 +568,11 @@ async def start_background_tasks() -> list[asyncio.Task[Any]]:
         tasks.append(asyncio.create_task(_listen(), name="dp-qc-subscribe"))
         tasks.append(
             asyncio.create_task(subscriber.watchdog_loop(), name="dp-qc-timeout-watchdog")
+        )
+        tasks.append(
+            asyncio.create_task(
+                subscriber.compensation_loop(), name="dp-qc-pending-compensation"
+            )
         )
     except Exception:
         logger.exception("dp background start failed")

@@ -1,8 +1,8 @@
 """Prompt 统一加载器（平台公共入口）。
 
 load_prompt(prompt_id@version, service, **context_vars) -> str：
-- dev：按 service 解析到该服务模板目录加载 YAML
-- prod：Nacos 加载（本批 stub，接口预留）
+- 按服务解析到该服务模板目录加载 YAML（dev/prod 当前均读本地文件；
+  Nacos 对接为后续独立任务，接口不再预留 stub）
 - 支持 prompt_id@version 语义化版本引用
 - 可选 session_id=：无 @version 时先经 A/B 选版本再加载
 - Jinja2 逐段变量替换渲染
@@ -154,8 +154,8 @@ def _parse_prompt_id(prompt_id: str) -> tuple[str, Optional[str]]:
 
 
 def _load_yaml(prompt_id: str, version: Optional[str], templates_dir: Path) -> dict:
-    """加载 YAML。dev 读本地文件；prod Nacos stub。"""
-    # TODO(prod): 接入 Nacos；本批走本地文件
+    """加载 YAML（当前 dev/prod 均读本地模板目录；Nacos 对接为后续任务）。"""
+    # TODO(prod): 接入 Nacos 后在此分发远程/本地加载
     return _load_from_local(prompt_id, version, templates_dir)
 
 
@@ -227,8 +227,3 @@ def _render(data: dict, context_vars: dict) -> str:
         else:
             rendered_parts.append(f"## {name}\n{value}")
     return "\n\n".join(rendered_parts)
-
-
-def _load_from_nacos(prompt_id: str, version: Optional[str]) -> dict:
-    """prod Nacos 加载（本批 stub，未对接真实 Nacos）。"""
-    raise NotImplementedError(f"Nacos loading not implemented yet for {prompt_id}")

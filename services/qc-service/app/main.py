@@ -67,8 +67,17 @@ async def lifespan(_app: FastAPI):
     from common.trace.langfuse_gate import configure_langfuse_env
     from common.trace.langsmith_gate import configure_langsmith_env
 
+    # T03：JWT/AES 密钥为默认占位值时立即失败（生产必须由 KMS 注入）
+    from common.config.settings import validate_required_secrets
+
+    validate_required_secrets(platform_settings)
+
     configure_langsmith_env(platform_settings)
     configure_langfuse_env(platform_settings)
+    # T02：认证模式启动日志（生产强制开启；本地关闭时显著告警）
+    from common.security.rbac import log_auth_mode
+
+    log_auth_mode(platform_settings, "qc-service")
     set_default_service("qc")
     wire_resilience_hooks()
     await wire_resilience_redis()

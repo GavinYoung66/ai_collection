@@ -20,16 +20,45 @@ proxy_hide_header Access-Control-Allow-Credentials;
 proxy_hide_header Access-Control-Allow-Methods;
 proxy_hide_header Access-Control-Allow-Headers;
 
-# 安全响应头（D7 / tasks 6.1）：server 级 always。
+# 安全响应头（D7 / tasks 6.1 + frontend-security-hardening REQ-1）：server 级 always。
 # 注意 nginx add_header 继承规则：子 location 一旦有自己的 add_header，
 # server 级全部不继承——故 @rate_limited/@auth_required 内需重复本组。
+# CSP 头：default-src 'self' 阻止同源外资源加载；script-src 'self' 防内联脚本
+# 注入（Vue 编译后无内联 script）；style-src 'unsafe-inline' 为 Element Plus
+# 内联样式放行；img-src data: 放行 data URL 头像；connect-src 由 $CSP_CONNECT_SRC
+# envsubst 变量控制（默认 dev 含 'self' + http://localhost:8080，生产部署设为
+# 仅 'self'）——envsubst 白名单见 docker-entrypoint.sh L48。
 add_header X-Frame-Options "DENY" always;
 add_header X-Content-Type-Options "nosniff" always;
 add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src $CSP_CONNECT_SRC" always;
 
 # OPTIONS 预检由网关直接响应，不透传后端（spec「CORS 与预检处理」）。
 if ($request_method = OPTIONS) {
     return 204;
+}
+
+# 前端管理台静态托管（F4）：反代到 frontend 容器（nginx 承载 vite 产物），
+# SPA try_files 兜底在前端容器 nginx 内。MUST NOT include auth_request.conf——
+# 登录页与静态资源必须匿名可达，API 鉴权由 /api/* 各 location 承担（401 信封 + 前端跳登录）。
+# MUST NOT 加 limit_req：首屏并发加载数十个静态资源，20r/s 限流会误伤 429。
+location /admin/ {
+    proxy_pass http://frontend;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Trace-Id $trace_id;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 15s;
+}
+
+# 裸路径引导到管理台（F4 后网关为全栈唯一入口）
+location = /admin {
+    return 301 /admin/;
+}
+
+location = / {
+    return 302 /admin/;
 }
 
 location = /gateway/health {
@@ -122,31 +151,33 @@ location ~ ^/api/v1/qc/check/batch$ {
     limit_req zone=gateway burst=40 nodelay;
 }
 
+# --- backend-security-completion REQ-5a 前端错误审计（auth-sidecar 扩展） ---
+location /api/v1/audit {
+    include /etc/nginx/auth_request.conf;
+    proxy_pass http://auth;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Trace-Id $trace_id;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 15s;
+    limit_req zone=gateway burst=40 nodelay;
+}
+
+# --- backend-security-completion REQ-4 admin users（auth-sidecar 扩展） ---
+location /api/v1/admin {
+    include /etc/nginx/auth_request.conf;
+    proxy_pass http://auth;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Trace-Id $trace_id;
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 15s;
+    limit_req zone=gateway burst=40 nodelay;
+}
+
 location /api/v1/complaints {
-    include /etc/nginx/proxy_pass/complaint.conf;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Trace-Id $trace_id;
-    include /etc/nginx/auth_request.conf;
-    proxy_connect_timeout 3s;
-    proxy_read_timeout 15s;
-    limit_req zone=gateway burst=40 nodelay;
-}
-
-location /api/v1/stats {
-    include /etc/nginx/proxy_pass/complaint.conf;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Trace-Id $trace_id;
-    include /etc/nginx/auth_request.conf;
-    proxy_connect_timeout 3s;
-    proxy_read_timeout 15s;
-    limit_req zone=gateway burst=40 nodelay;
-}
-
-location /api/v1/mode {
     include /etc/nginx/proxy_pass/complaint.conf;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
@@ -248,6 +279,7 @@ location @auth_required {
     add_header X-Frame-Options "DENY" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src $CSP_CONNECT_SRC" always;
     return 401 '{"code":"B0002","message":"请先登录","data":null,"trace_id":"$trace_id"}';
 }
 
@@ -263,6 +295,7 @@ location @rate_limited {
     add_header X-Frame-Options "DENY" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src $CSP_CONNECT_SRC" always;
     return 429 '{"code":"B0006","message":"请求过于频繁","data":null,"trace_id":"$trace_id"}';
 }
 

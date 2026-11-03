@@ -22,6 +22,7 @@ from app.settings import settings
 from common.resilience.rate_limit import allow as _rate_limit_allow
 from common.resilience._redis import configure_redis as _configure_common_redis
 from common.trace.middleware import get_trace_id
+from common.utils.ip import get_client_ip
 
 logger = structlog.get_logger()
 
@@ -70,7 +71,7 @@ def _user_key(request: Request) -> str:
     """按用户维度：X-User-Id 优先，缺失回退客户端 IP。"""
     user = request.headers.get("X-User-Id")
     if not user:
-        user = request.client.host if request.client else "anonymous"
+        user = get_client_ip(request) or "anonymous"
     return user
 
 

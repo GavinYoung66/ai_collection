@@ -5,6 +5,6 @@ RUN sed -i 's|deb.debian.org/debian-security|mirrors.aliyun.com/debian-security|
     && apt-get update \
     && apt-get install -y --no-install-recommends curl redis-tools \
     && rm -rf /var/lib/apt/lists/*
-# token 生成依赖（common.security.rbac → jose + pydantic-settings，仅拉纯 python 包）
-RUN pip install --no-cache-dir "python-jose[cryptography]==3.3.0" "pydantic-settings==2.2.1"
+# token 生成依赖（common.security.rbac → PyJWT + pydantic-settings，仅拉纯 python 包）
+RUN pip install --no-cache-dir "PyJWT==2.15.1" "pydantic-settings==2.1.0"
 CMD ["bash", "scripts/smoke/smoke_rag_v4.sh"]

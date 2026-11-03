@@ -4,7 +4,7 @@
 - 合规部 COMPLIANCE_OFFICER 只看 regulation
 - AGENT 角色全放行 4 类
 - 矩阵未知组合走 (default, default) 保底
-- JWT 缺失（None）原样返回（V1 兼容）
+- JWT 缺失（None）仅放行匿名白名单（T21）
 """
 import pytest
 
@@ -53,15 +53,18 @@ class TestRowAccessFilter:
         result = svc.filter(items, jwt)
         assert len(result) == 2
 
-    def test_jwt_none_passthrough_v1_compat(self, svc):
-        """JWT 缺失 → 原样返回全部 items（V1 兼容）。"""
+    def test_jwt_none_only_anonymous_whitelist(self, svc, monkeypatch):
+        """T21：JWT 缺失 → 仅放行 KB_ANONYMOUS_CATEGORIES（默认 regulation）。"""
+        from app.settings import settings
+        monkeypatch.setattr(settings, "KB_ANONYMOUS_CATEGORIES", "regulation")
         items = [
             {"chunk_id": "c1", "doc_id": "d1", "category": "regulation"},
             {"chunk_id": "c2", "doc_id": "d2", "category": "script"},
+            {"chunk_id": "c3", "doc_id": "d3", "category": "case"},
+            {"chunk_id": "c4", "doc_id": "d4", "category": "other"},
         ]
         result = svc.filter(items, jwt_payload=None)
-        assert len(result) == 2
-        assert result == items
+        assert result == [items[0]]
 
     def test_department_unknown_uses_role_default(self, svc):
         """department='UNKNOWN' → 走 (role, default) 分支。"""

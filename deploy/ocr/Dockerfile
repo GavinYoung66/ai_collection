@@ -1,5 +1,8 @@
 # 原生 arm64 OCR 镜像（避免 amd64 paddle 在 Apple Silicon 上 SIGILL）
 # 基础镜像优先走 DaoCloud 镜像加速
+# pins-lock-exempt：paddle 系为 OCR 服务独立安装依赖（不在根 requirements.lock 管辖）；
+# 已探测债务：fastapi/pillow/python-multipart 与 T20 升级后根 lock 存在版本漂移，
+# 待部署基线批次（T36）随 python:3.10 升级一并收敛，届时移除本标记。
 FROM docker.m.daocloud.io/library/python:3.10-slim
 
 WORKDIR /app

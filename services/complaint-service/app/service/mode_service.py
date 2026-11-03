@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import zlib
 from typing import Any, Optional
 
 from app.events.publisher import publisher
@@ -36,6 +37,15 @@ class _InMemoryRedis:
 
     def delete(self, k):
         return self._d.pop(k, None) is not None
+
+
+def gray_bucket(session_id: str) -> int:
+    """灰度分片 0–99：crc32 跨进程/重启稳定，不受 PYTHONHASHSEED 影响。
+
+    原实现用内置 ``hash()``，字符串哈希随机化会让同一工单在不同进程落入
+    不同分片，灰度比例与分流结果在重启后漂移。
+    """
+    return zlib.crc32(session_id.encode("utf-8")) % 100
 
 
 class ModeService:
@@ -70,7 +80,7 @@ class ModeService:
             return True
         if percent <= 0:
             return False
-        return (hash(session_id) % 100) < percent
+        return gray_bucket(session_id) < percent
 
     def check_consistency_ready(self) -> bool:
         if self._consistency is None:

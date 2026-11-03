@@ -4,12 +4,15 @@
 - 404 → ``BridgeNotFound``（查无数据语义，调用方据此返空列表/走 fallback）
 - 超时默认 5s（``MCP_GATEWAY_BRIDGE_HTTP_TIMEOUT``）；传输/HTTP 错映射为 MCP 异常
 - 支持注入 httpx.AsyncClient，便于单测用 MockTransport
+- T22：出站前校验协议/主机白名单，拒绝回环、内网、链路本地与云元数据地址并告警
 
 平移差异：超时默认值改读网关自身 config（源读 complaint-service settings.BRIDGE_HTTP_TIMEOUT）。
 """
 from __future__ import annotations
 
+import ipaddress
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 import httpx
 import structlog
@@ -18,6 +21,124 @@ from app.config import settings
 from app.mcp_errors import MCPError, MCPTimeoutError
 
 logger = structlog.get_logger()
+
+# T22：协议硬白名单（配置值只在其子集中生效，空配置 = 全拒）
+_ALLOWED_SCHEMES = frozenset({"http", "https"})
+# T22：主机默认白名单（与 config.BRIDGE_ALLOWED_HOSTS 默认值保持一致）
+_DEFAULT_ALLOWED_HOSTS = ("rag-service", "data-platform", "qc-service")
+# 云厂商元数据专用主机名：即使加入白名单也必须拒绝
+_METADATA_HOSTNAMES = frozenset({
+    "metadata",
+    "metadata.google.internal",
+    "metadata.google.com",
+    "instance-data",
+    "metadata.tencentyun.com",
+    "metadata.aws.internal",
+})
+# 云厂商元数据 IP：部分不属于 RFC1918，需显式拒绝
+_METADATA_IPS = frozenset({
+    "169.254.169.254",
+    "100.100.100.200",
+    "100.100.100.201",
+    "fd00:ec2::254",
+})
+
+
+def _split_csv(raw: Any) -> list[str]:
+    """解析逗号分隔配置（兼容 list/tuple/set 注入）。"""
+    if isinstance(raw, (list, tuple, set)):
+        return [str(v).strip() for v in raw if str(v).strip()]
+    return [v.strip() for v in str(raw or "").split(",") if v.strip()]
+
+
+def allowed_schemes() -> set[str]:
+    """出站协议白名单（小写）；配置为空或全部非法 → 空集合（全拒）。"""
+    configured = {v.lower() for v in _split_csv(
+        getattr(settings, "BRIDGE_ALLOWED_SCHEMES", "http,https")
+    )}
+    return configured & _ALLOWED_SCHEMES
+
+
+def allowed_hosts() -> set[str]:
+    """出站主机白名单（小写）；配置为空 → 空集合（全拒）。"""
+    raw = getattr(settings, "BRIDGE_ALLOWED_HOSTS", ",".join(_DEFAULT_ALLOWED_HOSTS))
+    return {v.lower() for v in _split_csv(raw)}
+
+
+def _blocked_ip_reason(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
+    """返回 IP 被拒绝的原因；公网地址返回 None。"""
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        # IPv4-mapped IPv6（::ffff:169.254.169.254）按映射后的 IPv4 判定
+        ip = ip.ipv4_mapped
+    if str(ip) in _METADATA_IPS:
+        return "cloud metadata address"
+    if ip.is_loopback:
+        return "loopback address"
+    if ip.is_link_local:
+        return "link-local address"
+    if ip.is_unspecified:
+        return "unspecified address"
+    if ip.is_multicast:
+        return "multicast address"
+    if ip.is_reserved:
+        return "reserved address"
+    if ip.is_private:
+        return "private network address"
+    return None
+
+
+def validate_outbound_url(url: str, path: str) -> None:
+    """出站前校验目标 URL（T22 SSRF 防护）。
+
+    - 协议 MUST 命中 ``BRIDGE_ALLOWED_SCHEMES``（默认 http/https）；
+    - 主机 MUST 命中 ``BRIDGE_ALLOWED_HOSTS``（默认 docker network 服务名）；
+    - IP 字面量形式的回环/内网/链路本地/保留/云元数据地址一律拒绝，
+      即使被显式加入主机白名单；
+    - 拒绝时记录 ``bridge_url_rejected`` 告警并不发起连接。
+    """
+    try:
+        parsed = urlsplit(url)
+        parsed.port  # 触发非法端口校验
+    except ValueError as e:
+        _reject(url, path, f"invalid url: {e}")
+        return
+
+    scheme = parsed.scheme.lower()
+    if scheme not in allowed_schemes():
+        _reject(url, path, f"scheme not allowed: {scheme or '<empty>'}")
+        return
+
+    if parsed.username or parsed.password:
+        _reject(url, path, "userinfo not allowed")
+        return
+
+    host = (parsed.hostname or "").lower()
+    if not host:
+        _reject(url, path, "missing host")
+        return
+
+    if host in _METADATA_HOSTNAMES:
+        _reject(url, path, "cloud metadata hostname")
+        return
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        reason = _blocked_ip_reason(ip)
+        if reason is not None:
+            _reject(url, path, reason)
+            return
+
+    if host not in allowed_hosts():
+        _reject(url, path, f"host not in allowlist: {host}")
+
+
+def _reject(url: str, path: str, reason: str) -> None:
+    """记录告警并抛出 MCPError（出站前拒绝，不发起连接）。"""
+    logger.warning("bridge_url_rejected", url=url, path=path, reason=reason)
+    raise MCPError("_bridge", path, f"bridge url rejected: {reason}")
 
 
 class BridgeNotFound(Exception):
@@ -75,6 +196,8 @@ class BridgeHttpClient:
         if not self._base_url:
             raise MCPError("_bridge", path, "bridge base url not configured")
         url = f"{self._base_url}{path}"
+        # T22：SSRF 防护——出站前校验协议/主机/网段，拒绝即告警，不发起连接
+        validate_outbound_url(url, path)
         headers = {"X-Trace-Id": trace_id} if trace_id else {}
         try:
             client = await self._ensure_client()

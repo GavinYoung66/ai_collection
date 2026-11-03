@@ -23,6 +23,23 @@ const sorted = computed(() =>
   ),
 )
 
+/**
+ * 外链协议白名单（frontend-security-hardening REQ-3）。
+ * 后端 langsmith_url 应为 https；防御：若后端数据被污染（如 javascript:、//evil.com），
+ * 此处拦截后 v-if 判定为 null，外链不渲染。
+ * TODO 注释：URL 构造函数在非法字符串上抛 TypeError，catch 兜底返回 null。
+ */
+const safeLangsmithUrl = computed<string | null>(() => {
+  if (!props.langsmithUrl) return null
+  try {
+    const u = new URL(props.langsmithUrl)
+    if (u.protocol === 'http:' || u.protocol === 'https:') return props.langsmithUrl
+    return null
+  } catch {
+    return null
+  }
+})
+
 /** status → 展示样式（后端状态词表不固定，前端只做颜色映射不改词） */
 function statusClass(status: string): string {
   if (status === 'ok' || status === 'success') return 'qc-trace-status--ok'
@@ -60,11 +77,11 @@ function statusClass(status: string): string {
         <pre class="qc-trace-summary">{{ evt.summary }}</pre>
       </li>
     </ol>
-    <!-- LangSmith 外链：仅响应含 langsmith_url 时渲染 -->
+    <!-- LangSmith 外链：仅响应含 langsmith_url 且协议为 http/https 时渲染 -->
     <a
-      v-if="langsmithUrl"
+      v-if="safeLangsmithUrl"
       class="qc-langsmith-link"
-      :href="langsmithUrl"
+      :href="safeLangsmithUrl"
       target="_blank"
       rel="noopener noreferrer"
     >在 LangSmith 打开</a>

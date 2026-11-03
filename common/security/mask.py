@@ -1,9 +1,13 @@
 """数据脱敏工具。"""
 import re
 
-_PHONE_RE = re.compile(r"1[3-9]\d{9}")
-_ID_CARD_RE = re.compile(r"\d{18}")
-_BANK_CARD_RE = re.compile(r"\d{16,19}")
+# 数字边界（T19）：避免手机号正则命中更长数字串的内部片段，
+# 例如 18 位身份证中的「19900101123」曾被误判为手机号。
+_PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+# 身份证：18 位，末位可为 X（校验位）
+_ID_CARD_RE = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
+# 银行卡：16–19 位连续数字（18 位已被身份证规则优先处理）
+_BANK_CARD_RE = re.compile(r"(?<!\d)\d{16,19}(?!\d)")
 
 
 def mask_phone(phone: str) -> str:

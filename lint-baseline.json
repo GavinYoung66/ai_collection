@@ -1,0 +1,356 @@
+{
+  "_readme": "T32 静态检查基线：按 文件×规则 冻结 ruff/mypy 存量告警计数；基线只降不升——清理存量后用 scripts/check_lint_baseline.py --update 重新生成；totals 为自洽校验值，手改条目必须保持 sum(条目计数) == totals",
+  "mypy": {
+    "common/eventbus/rocketmq.py": {
+      "union-attr": 10
+    },
+    "common/mcp/reliability.py": {
+      "misc": 3
+    },
+    "common/security/authn.py": {
+      "union-attr": 4
+    },
+    "common/security/rbac.py": {
+      "arg-type": 5
+    },
+    "common/speech/asr_provider.py": {
+      "call-overload": 1
+    },
+    "common/tests/test_resilience_idempotency.py": {
+      "var-annotated": 1
+    },
+    "common/tests/test_resilience_rate_limit.py": {
+      "arg-type": 1
+    },
+    "common/tests/test_t13_time_guard_timezone.py": {
+      "func-returns-value": 1
+    },
+    "common/utils/retry.py": {
+      "misc": 1
+    },
+    "services/complaint-service/app/api/routes/complaints.py": {
+      "arg-type": 3,
+      "union-attr": 1
+    },
+    "services/complaint-service/app/graph/checkpointer.py": {
+      "arg-type": 1,
+      "attr-defined": 2
+    },
+    "services/complaint-service/app/graph/nodes/evidence_call_qc.py": {
+      "has-type": 6
+    },
+    "services/complaint-service/app/graph/nodes/evidence_case.py": {
+      "has-type": 9
+    },
+    "services/complaint-service/app/graph/nodes/reflection.py": {
+      "attr-defined": 2
+    },
+    "services/complaint-service/app/llm/real_transport.py": {
+      "assignment": 1
+    },
+    "services/complaint-service/app/models/state.py": {
+      "arg-type": 2
+    },
+    "services/complaint-service/app/service/complaint_service.py": {
+      "assignment": 3,
+      "attr-defined": 1,
+      "misc": 1,
+      "union-attr": 3,
+      "valid-type": 1
+    },
+    "services/complaint-service/app/service/degrade_llm.py": {
+      "arg-type": 3,
+      "attr-defined": 1,
+      "var-annotated": 1
+    },
+    "services/complaint-service/app/service/graph_lock.py": {
+      "arg-type": 6,
+      "misc": 2
+    },
+    "services/complaint-service/app/service/maintenance.py": {
+      "arg-type": 1
+    },
+    "services/complaint-service/app/service/metrics_service.py": {
+      "operator": 1
+    },
+    "services/complaint-service/app/service/rate_limiter.py": {
+      "arg-type": 4,
+      "misc": 3
+    },
+    "services/complaint-service/app/service/review_service.py": {
+      "union-attr": 1
+    },
+    "services/data-platform/app/events/subscriber.py": {
+      "attr-defined": 1
+    },
+    "services/data-platform/app/services/snapshot.py": {
+      "attr-defined": 2
+    },
+    "services/mcp-gateway/app/auth.py": {
+      "union-attr": 2
+    },
+    "services/mcp-gateway/app/call_log_sink.py": {
+      "assignment": 1
+    },
+    "services/mcp-gateway/app/main.py": {
+      "type-arg": 1
+    },
+    "services/mcp-gateway/app/mcp_server.py": {
+      "arg-type": 1,
+      "assignment": 10
+    },
+    "services/mcp-gateway/app/rate_limit.py": {
+      "assignment": 1,
+      "dict-item": 1
+    },
+    "services/mcp-gateway/app/tools/data_platform.py": {
+      "misc": 1
+    },
+    "services/qc-service/app/events/subscriber.py": {
+      "attr-defined": 1
+    },
+    "services/qc-service/app/mcp/http.py": {
+      "attr-defined": 1
+    },
+    "services/qc-service/app/models/qc.py": {
+      "return-value": 1
+    },
+    "services/qc-service/app/repositories/alert_repo.py": {
+      "assignment": 4
+    },
+    "services/qc-service/app/repositories/demo_store.py": {
+      "misc": 2
+    },
+    "services/qc-service/app/repositories/quality_repo.py": {
+      "assignment": 1,
+      "call-overload": 3
+    },
+    "services/qc-service/app/repositories/review_repo.py": {
+      "assignment": 1
+    },
+    "services/qc-service/app/repositories/rule_repo.py": {
+      "assignment": 4,
+      "return-value": 2,
+      "union-attr": 1
+    },
+    "services/qc-service/app/routers/records.py": {
+      "arg-type": 3
+    },
+    "services/qc-service/app/services/llm_reviewer.py": {
+      "name-defined": 1
+    },
+    "services/qc-service/app/services/replay_service.py": {
+      "arg-type": 8,
+      "assignment": 9
+    },
+    "services/qc-service/app/services/review_service.py": {
+      "arg-type": 3,
+      "assignment": 5
+    },
+    "services/qc-service/app/services/rule_engine.py": {
+      "assignment": 1
+    },
+    "services/rag-service/app/parsers/xlsx_parser.py": {
+      "assignment": 1
+    },
+    "services/rag-service/app/repositories/doc_repo.py": {
+      "return-value": 1
+    },
+    "services/rag-service/app/services/asset_service.py": {
+      "assignment": 1
+    },
+    "services/rag-service/app/services/llm_service.py": {
+      "arg-type": 1
+    },
+    "services/rag-service/app/services/query_cache.py": {
+      "misc": 2
+    },
+    "services/rag-service/app/services/row_access_service.py": {
+      "assignment": 3
+    },
+    "services/rag-service/app/services/search_service.py": {
+      "assignment": 4,
+      "union-attr": 2,
+      "var-annotated": 1
+    },
+    "services/rag-service/app/services/search_trace.py": {
+      "assignment": 1,
+      "attr-defined": 1
+    },
+    "services/rag-service/app/services/session_service.py": {
+      "misc": 1
+    },
+    "services/rag-service/app/vectorstore/es_client.py": {
+      "call-arg": 6,
+      "dict-item": 4
+    }
+  },
+  "ruff": {
+    "common/db/base.py": {
+      "F401": 1
+    },
+    "common/db/models/llm_log.py": {
+      "F401": 1
+    },
+    "common/db/models/strategy.py": {
+      "F401": 2
+    },
+    "common/db/models/user.py": {
+      "F401": 5
+    },
+    "common/llm/circuit_breaker.py": {
+      "F401": 2
+    },
+    "common/mcp/reliability.py": {
+      "F841": 1
+    },
+    "common/tests/test_config.py": {
+      "F401": 3
+    },
+    "common/tests/test_errors.py": {
+      "F401": 1
+    },
+    "common/utils/ip.py": {
+      "F401": 1
+    },
+    "common/utils/semaphore.py": {
+      "F401": 1
+    },
+    "migrations/env.py": {
+      "F401": 4
+    },
+    "openspec/changes/archive/2026-09-27-rocketmq-local-bus/spike-evidence/accept_7_4_envelope.py": {
+      "F401": 1
+    },
+    "scripts/rag/rebuild_milvus_v2.py": {
+      "E402": 9,
+      "F401": 1
+    },
+    "scripts/rag/reindex_es_v2.py": {
+      "E402": 3
+    },
+    "scripts/rag/reindex_es_v4.py": {
+      "E402": 3
+    },
+    "scripts/seed/seed_all.py": {
+      "E402": 4
+    },
+    "scripts/seed/seed_qc_rules.py": {
+      "F401": 1
+    },
+    "scripts/seed/seed_sensitive_words.py": {
+      "F401": 4
+    },
+    "scripts/seed/seed_strategies.py": {
+      "F401": 1
+    },
+    "scripts/seed/seed_users.py": {
+      "F401": 1
+    },
+    "services/complaint-service/app/llm/provider.py": {
+      "F841": 1
+    },
+    "services/complaint-service/app/models/complaint_agent_log.py": {
+      "F401": 1
+    },
+    "services/complaint-service/app/models/complaint_session.py": {
+      "F401": 1
+    },
+    "services/complaint-service/app/service/callback_service.py": {
+      "F401": 1
+    },
+    "services/complaint-service/app/service/degrade_mcp.py": {
+      "F401": 1
+    },
+    "services/complaint-service/app/service/review_sla_service.py": {
+      "F401": 1
+    },
+    "services/complaint-service/tests/integration/test_graph_flow.py": {
+      "F401": 1
+    },
+    "services/complaint-service/tests/integration/test_maintenance.py": {
+      "F401": 2
+    },
+    "services/complaint-service/tests/mock/data/seed_complaints.py": {
+      "F401": 1
+    },
+    "services/complaint-service/tests/mock/mcp/mock_client.py": {
+      "F401": 2,
+      "F541": 1
+    },
+    "services/complaint-service/tests/regression/test_prompt_regression.py": {
+      "F401": 1
+    },
+    "services/complaint-service/tests/test_mock_batch0.py": {
+      "F401": 1
+    },
+    "services/complaint-service/tests/unit/test_batch10_coverage.py": {
+      "F401": 2,
+      "F841": 1
+    },
+    "services/complaint-service/tests/unit/test_batch8_services.py": {
+      "F841": 1
+    },
+    "services/complaint-service/tests/unit/test_edges.py": {
+      "F401": 1
+    },
+    "services/complaint-service/tests/unit/test_graph_compile.py": {
+      "F401": 1
+    },
+    "services/complaint-service/tests/unit/test_graph_nodes.py": {
+      "F401": 1
+    },
+    "services/complaint-service/tests/unit/test_nodes_batch6.py": {
+      "F401": 2
+    },
+    "services/complaint-service/tests/unit/test_rate_limiter_p0.py": {
+      "F401": 1
+    },
+    "services/data-platform/scripts/gen_calls_batch.py": {
+      "E702": 47
+    },
+    "services/data-platform/scripts/run_batch_flow.py": {
+      "F401": 1
+    },
+    "services/data-platform/tests/test_complaint_created_and_result_ready.py": {
+      "F401": 1
+    },
+    "services/qc-service/app/models/__init__.py": {
+      "E402": 1
+    },
+    "services/qc-service/app/routers/check.py": {
+      "F401": 1
+    },
+    "services/qc-service/app/routers/rules.py": {
+      "F401": 1
+    },
+    "services/qc-service/app/services/demo_seed_service.py": {
+      "F401": 1
+    },
+    "services/qc-service/app/services/llm_reviewer.py": {
+      "F821": 1
+    },
+    "services/qc-service/tests/test_assertions.py": {
+      "F401": 1
+    },
+    "services/qc-service/tests/test_assertions_15_28.py": {
+      "F401": 1
+    },
+    "services/qc-service/tests/test_rules.py": {
+      "F401": 1
+    },
+    "services/qc-service/tests/test_subscriber.py": {
+      "F401": 1
+    },
+    "services/rag-service/app/api/documents.py": {
+      "F401": 1
+    },
+    "services/rag-service/tests/test_search_dedup_docid.py": {
+      "F401": 1
+    }
+  },
+  "totals": {
+    "mypy": 187,
+    "ruff": 135
+  }
+}

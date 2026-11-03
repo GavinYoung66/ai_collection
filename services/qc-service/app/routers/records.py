@@ -8,6 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 
+from app.auth import require_roles_if_enabled
 from app.deps import get_quality_repo
 from app.errors import envelope, http_status_for, success
 from app.models.qc import QC_RESULT_VALUES, QC_STATUS_VALUES, RISK_LEVEL_VALUES, QcRecord, QcViolation
@@ -93,6 +94,7 @@ async def records_stats(
     group_by: GroupByQ = Query(...),
     from_ts: datetime | None = Query(None, alias="from"),
     to_ts: datetime | None = Query(None, alias="to"),
+    _auth: dict | None = Depends(require_roles_if_enabled("admin", "supervisor", "qc_reviewer")),
     repo: QualityRepo = Depends(get_quality_repo),
 ):
     if group_by not in {"agent", "rule_id", "day"}:
@@ -123,6 +125,7 @@ async def records_list(
     session_id: str | None = None,
     create_time_from: datetime | None = None,
     create_time_to: datetime | None = None,
+    _auth: dict | None = Depends(require_roles_if_enabled("admin", "supervisor", "qc_reviewer")),
     repo: QualityRepo = Depends(get_quality_repo),
 ):
     if page_size > 100:
@@ -161,6 +164,7 @@ async def records_list(
 @router.get("/records/{session_id}")
 async def records_detail(
     session_id: str,
+    _auth: dict | None = Depends(require_roles_if_enabled("admin", "supervisor", "qc_reviewer")),
     repo: QualityRepo = Depends(get_quality_repo),
 ):
     row = await repo.get_by_session_id(session_id)

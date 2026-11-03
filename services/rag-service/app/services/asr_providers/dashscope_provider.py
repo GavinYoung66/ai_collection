@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 
 import httpx
 import structlog
@@ -114,7 +115,9 @@ class DashScopeASRProvider(ASRProvider):
             )
             if not segs:
                 raise RuntimeError("ffmpeg 分段未产生任何片段")
-            return [open(p, "rb").read() for p in segs]
+            # Path.read_bytes 在返回前确定性关闭文件句柄，不依赖 GC 回收，
+            # 避免批量长音频分段时 fd 累积。
+            return [Path(p).read_bytes() for p in segs]
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

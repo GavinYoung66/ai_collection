@@ -95,7 +95,11 @@ async def hybrid_search(
     # 缓存切面：开关关闭完全跳过；命中原样返回缓存的完整对外响应
     cache_key: str | None = None
     if settings.KB_CACHE_ENABLED and not skip_cache:
-        cache_key = query_cache.make_cache_key(req.query, req.category, req.top_k)
+        # T21：匿名固定 anon 作用域，行级权限开启时登录用户按身份隔离，避免缓存跨身份泄漏
+        scope = query_cache.identity_scope(jwt_payload, settings.KB_ROW_LEVEL_ENABLED)
+        cache_key = query_cache.make_cache_key(
+            req.query, req.category, req.top_k, scope=scope
+        )
         cache_start = time.time()
         cached = await query_cache.get_cached(cache_key)
         if cached is not None:

@@ -213,6 +213,33 @@ async def test_hydrate_after_restart(pg_conn, own_case_id, enable_persist,
     assert rebuilt["task_status"] == TaskStatus.pending_review
 
 
+async def test_concurrent_persist_same_case_id_all_succeed(pg_conn, own_case_id):
+    """T10：并发写同一 case_id 的工单，两次调用均成功且数据库仅一条记录。
+
+    ON CONFLICT DO NOTHING 把「检查-插入」合并为单条原子语句；后到事务
+    不再因主键冲突失败，也不会产生第二行。
+    """
+    import asyncio
+
+    from app.service.complaint_service import complaint_service
+
+    rec = complaint_service.create("并发落库", case_id=own_case_id)
+    results = await asyncio.gather(
+        *[
+            complaint_service._persist_complaint_row(dict(rec), "并发落库")
+            for _ in range(2)
+        ],
+        return_exceptions=True,
+    )
+    assert all(not isinstance(r, Exception) for r in results), results
+
+    cur = await pg_conn.execute(
+        "SELECT count(*) FROM complaints WHERE case_id = %s", (own_case_id,)
+    )
+    row = await cur.fetchone()
+    assert row is not None and row[0] == 1, "并发落库产生了重复工单"
+
+
 async def test_flush_failure_is_fail_open(own_case_id, monkeypatch, enable_persist,
                                           cleanup_memory):
     """写穿失败不回滚内存流转、不抛异常，只置 persist_degraded。"""

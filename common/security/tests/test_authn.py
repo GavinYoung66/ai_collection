@@ -1,7 +1,7 @@
 """common/security/authn.py 单元测试：JWT + API Key 双方案。"""
 from datetime import datetime, timedelta, timezone
 
-from jose import jwt
+import jwt
 
 from common.security.authn import AuthResult, authenticate, authenticate_api_key, authenticate_jwt
 from common.security.rbac import create_token
@@ -71,7 +71,7 @@ class TestJWT:
         assert result.ok is True
 
     def test_verify_token_accepts_aud_claim(self, jwt_secret):
-        # P2-2 回归：token 携带 aud 时 verify_token 不得被 jose 内置校验误拒
+        # P2-2 回归：token 携带 aud 时 verify_token 不得被 PyJWT 内置校验误拒
         from common.security.rbac import verify_token
 
         token = create_token({"sub": "u1", "aud": "any-aud"})
@@ -148,15 +148,17 @@ class TestAuthenticateDispatch:
 
 
 class TestNoSecondJWTDecode:
-    """authn.py 必须复用 rbac 验签，不得自带 jwt.decode / import jose。"""
+    """authn.py 必须复用 rbac 验签，不得自带 jwt.decode / 引入 JWT 库。"""
 
-    def test_authn_source_has_no_jose_or_decode(self):
+    def test_authn_source_has_no_jwt_lib_or_decode(self):
         import inspect
         import common.security.authn as authn_mod
 
         src = inspect.getsource(authn_mod)
         assert "import jose" not in src
         assert "from jose" not in src
+        assert "import jwt" not in src
+        assert "from jwt" not in src
         assert "jwt.decode" not in src
 
     def test_api_key_compare_no_early_return(self):

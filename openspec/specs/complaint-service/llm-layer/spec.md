@@ -9,7 +9,7 @@
 ### Requirement: 投诉研判专用 LLM Provider
 
 系统 SHALL 在 `app/llm/provider.py` 提供 `ComplaintLLMProvider`，核心方法 `async invoke(prompt: str, schema: type[BaseModel], *, trace_id: str, session_id: str) -> BaseModel`：
-- 底层外部大模型 HTTP 走 `common.llm.transport`（`post_chat_completions`）；真路径经 `RealLLMTransport` + `ModelRouter` 编排。兼容入口 `common.llm.provider.chat` / `chat_json` 亦须经同一 transport，并复用 `common.llm.circuit_breaker`；禁止业务节点散落裸调供应商 SDK/HTTP
+- 底层外部大模型 HTTP 走 `common.llm.transport`（`post_chat_completions`）；真路径经 `RealLLMTransport` + `ModelRouter` 编排。兼容入口 `common.llm.provider.chat` / `chat_json` 亦须经同一 transport，并复用 `common.resilience.breaker`；禁止业务节点散落裸调供应商 SDK/HTTP
 - Pydantic Schema 校验失败重试最多 3 次
 - 每次调用累计 `total_tokens_consumed`，超 `max_token_threshold` 抛异常
 - 强制 `response_format=json_object`；`temperature=0.1` / `top_p=0.9` / `seed=42`（可配置但默认硬约束）

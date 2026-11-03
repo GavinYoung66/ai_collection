@@ -17,6 +17,22 @@ const props = defineProps<{
 const sorted = computed(() =>
   [...props.events].sort((a, b) => new Date(a.started_at).getTime() - new Date(b.started_at).getTime()),
 )
+
+/**
+ * 外链协议白名单（frontend-security-hardening REQ-3）。
+ * 后端 langsmith_url 应为 https；防御：若后端数据被污染（如 javascript:、//evil.com），
+ * 此处拦截后 v-if 判定为 null，外链不渲染。
+ */
+const safeLangsmithUrl = computed<string | null>(() => {
+  if (!props.langsmithUrl) return null
+  try {
+    const u = new URL(props.langsmithUrl)
+    if (u.protocol === 'http:' || u.protocol === 'https:') return props.langsmithUrl
+    return null
+  } catch {
+    return null
+  }
+})
 </script>
 
 <template>
@@ -53,11 +69,11 @@ const sorted = computed(() =>
         </div>
       </el-timeline-item>
     </el-timeline>
-    <!-- LangSmith 深链：仅响应含 langsmith_url 时渲染（溯源到真实 Agent 执行） -->
+    <!-- LangSmith 深链：仅响应含 langsmith_url 且协议为 http/https 时渲染（frontend-security-hardening REQ-3） -->
     <a
-      v-if="langsmithUrl"
+      v-if="safeLangsmithUrl"
       class="langsmith-link"
-      :href="langsmithUrl"
+      :href="safeLangsmithUrl"
       target="_blank"
       rel="noopener noreferrer"
     >在 LangSmith 打开本次执行</a>

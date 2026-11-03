@@ -19,7 +19,7 @@ else
     if [ -n "$cand" ] && command -v "$cand" >/dev/null 2>&1; then PY_BIN="$cand"; break; fi
   done
   if [ -z "$PY_BIN" ]; then
-    echo "   FAIL: 未找到可用的 python（需安装 jose 以签发 token），可设置 SMOKE_ADMIN_TOKEN 环境变量"
+    echo "   FAIL: 未找到可用的 python（需安装 PyJWT 以签发 token），可设置 SMOKE_ADMIN_TOKEN 环境变量"
     exit 1
   fi
   # 在 rag-service 目录下签发，保持与运行中的服务相同的 .env 加载来源（settings env_file 相对 cwd），

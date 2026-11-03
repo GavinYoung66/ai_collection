@@ -1,19 +1,20 @@
-"""structlog 结构化 JSON 日志 + 脱敏过滤器。"""
+"""structlog 结构化 JSON 日志 + 脱敏过滤器。
+
+脱敏统一复用 ``common.security.mask.mask_text``（T19）：手机号、身份证号、
+银行卡号三类 PII 在同一实现内维护，禁止各服务另立正则。
+"""
 import logging
-import re
 
 import structlog
 
-_PHONE_RE = re.compile(r"1[3-9]\d{9}")
+from common.security.mask import mask_text
 
 
 def _mask_processor(_, __, event_dict):
-    """脱敏处理器：日志中的手机号中间 4 位替换为 ****。"""
+    """脱敏处理器：对日志中的字符串字段统一应用 PII 掩码。"""
     for key, value in event_dict.items():
         if isinstance(value, str):
-            event_dict[key] = _PHONE_RE.sub(
-                lambda m: m.group()[:3] + "****" + m.group()[7:], value
-            )
+            event_dict[key] = mask_text(value)
     return event_dict
 
 

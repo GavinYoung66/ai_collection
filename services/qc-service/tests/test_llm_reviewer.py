@@ -11,6 +11,8 @@ from app.repositories.job_store import QcJobStore, llm_chain_models, llm_degrade
 from app.services.llm_reviewer import LLMReviewer, turns_payload
 from app.services.offline_qc_service import OfflineQcService
 from common.llm import reliability as reliability_mod
+from common.llm.reliability import orchestrator as llm_orchestrator
+from common.llm.reliability import rate_limit as llm_rate_limit
 from common.resilience._redis import configure_redis, reset_redis
 from tests.test_job_store import MemoryRedis
 
@@ -23,7 +25,7 @@ def _isolate_llm_reliability(monkeypatch):
     configure_redis(redis)
     reliability_mod.set_default_service("qc")
     reliability_mod._llm_breakers.clear()
-    monkeypatch.setattr(reliability_mod, "_LLM_RETRY_DELAY", 0)
+    monkeypatch.setattr(llm_orchestrator, "_LLM_RETRY_DELAY", 0)
     yield redis
     reliability_mod._llm_breakers.clear()
     reliability_mod.set_default_service(None)
@@ -251,7 +253,7 @@ class TestLlmInvokeA2011:
     async def test_llm_rate_limit_error_a2011_not_500(self, monkeypatch, _isolate_llm_reliability):
         redis = _isolate_llm_reliability
         configure_redis(redis)
-        monkeypatch.setattr(reliability_mod, "_LLM_RATE_LIMIT", 0)
+        monkeypatch.setattr(llm_rate_limit, "_LLM_RATE_LIMIT", 0)
         calls = {"n": 0}
 
         async def _ok(model, messages, timeout_seconds):

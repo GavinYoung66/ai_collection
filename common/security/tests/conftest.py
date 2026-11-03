@@ -16,7 +16,8 @@ def _reset_settings():
 
 @pytest.fixture()
 def jwt_secret(monkeypatch):
-    key = "test_jwt_secret_key"
+    # ≥32 字节：满足 RFC 7518 §3.2 对 HS256 密钥长度的建议，避免 PyJWT 告警
+    key = "test_jwt_secret_key_0123456789abcdef"
     monkeypatch.setattr(settings, "JWT_SECRET", key)
     return key
 

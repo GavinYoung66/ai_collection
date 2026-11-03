@@ -9,7 +9,6 @@ from common.config.settings import settings
 @pytest.fixture(autouse=True)
 def _reset_settings():
     """每个测试后恢复 settings 原始值。"""
-    import copy
     original = {k: v for k, v in settings.__dict__.items() if not k.startswith("_")}
     yield
     for k, v in original.items():
@@ -28,5 +27,7 @@ def aes_key(monkeypatch):
 @pytest.fixture()
 def jwt_secret(monkeypatch):
     """提供 JWT 密钥。"""
-    monkeypatch.setattr(settings, "JWT_SECRET", "test_jwt_secret_key")
-    return "test_jwt_secret_key"
+    # ≥32 字节：满足 RFC 7518 §3.2 对 HS256 密钥长度的建议，避免 PyJWT 告警
+    key = "test_jwt_secret_key_0123456789abcdef"
+    monkeypatch.setattr(settings, "JWT_SECRET", key)
+    return key

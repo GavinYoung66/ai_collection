@@ -43,17 +43,21 @@ def assets_enabled() -> bool:
 
 
 def _scale_image(binary: bytes) -> tuple[bytes, str]:
-    """Pillow 等比缩放至 KB_ASSETS_MAX_SIZE，返回 (新字节, mime)。"""
+    """Pillow 等比缩放至 KB_ASSETS_MAX_SIZE，返回 (新字节, mime)。
+
+    句柄生命周期（T15）：``with Image.open(...)`` 确定性关闭解码器，
+    大批量摄入时不依赖 GC 回收，避免文件描述符随批次线性累积。
+    """
     from PIL import Image
 
-    img = Image.open(io.BytesIO(binary))
-    img.thumbnail((settings.KB_ASSETS_MAX_SIZE, settings.KB_ASSETS_MAX_SIZE))
-    fmt = (img.format or "PNG").upper()
-    mime = _MIME_BY_FMT.get(fmt, "image/png")
-    save_fmt = fmt if fmt in ("JPEG", "GIF", "WEBP", "BMP") else "PNG"
-    buf = io.BytesIO()
-    img.save(buf, format=save_fmt)
-    return buf.getvalue(), mime
+    with Image.open(io.BytesIO(binary)) as img:
+        img.thumbnail((settings.KB_ASSETS_MAX_SIZE, settings.KB_ASSETS_MAX_SIZE))
+        fmt = (img.format or "PNG").upper()
+        mime = _MIME_BY_FMT.get(fmt, "image/png")
+        save_fmt = fmt if fmt in ("JPEG", "GIF", "WEBP", "BMP") else "PNG"
+        buf = io.BytesIO()
+        img.save(buf, format=save_fmt)
+        return buf.getvalue(), mime
 
 
 class AssetExtractor:

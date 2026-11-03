@@ -13,6 +13,10 @@ jobs:
   # 五个有实质测试的服务矩阵；检查名形如 service-test (<service>)
   service-test:
     runs-on: ubuntu-latest
+    # T03：CI checkout 无 .env，显式提供非占位测试密钥，满足启动 fail-fast 校验
+    env:
+      JWT_SECRET: ci_jwt_secret_for_tests_only
+      AES_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     strategy:
       fail-fast: false # 任一条目失败不取消其余条目，暴露全部问题（ci-matrix spec：其余 job 仍执行完毕）
       matrix:
@@ -117,14 +121,6 @@ jobs:
           echo "- [ ] Error codes follow common.errors.codes" >> $GITHUB_STEP_SUMMARY
           echo "- [ ] 未新建 app/service/event_publisher.py" >> $GITHUB_STEP_SUMMARY
 
-      # 1.7 D4：ruff 仅 complaint、mcp-gateway 两条目运行；咨询性输出，continue-on-error 不阻塞 job
-      - name: Ruff lint (advisory, non-blocking)
-        if: matrix.service == 'complaint-service' || matrix.service == 'mcp-gateway'
-        continue-on-error: true
-        run: |
-          pip install ruff
-          ruff check app tests
-
   # 公共 job：common 三个测试目录 + call/case/review 三个脚手架服务 health（1.6 落地）
   common:
     runs-on: ubuntu-latest
@@ -161,6 +157,83 @@ jobs:
             (cd services/$svc && PYTHONPATH=../.. pytest tests/ -q)
           done
 
+  # T20 依赖漏洞门禁：对单一全局清单 requirements.lock 的钉死条目执行 pip-audit（OSV 源）。
+  # 阻断口径：存在任何已知漏洞即失败；确无修复版本的存量项以 --ignore-vuln 显式登记。
+  #
+  # 已登记例外（vulnerability-management：暴露面 + 缓解 + 复查日期）：
+  #   PYSEC-2026-1845 / CVE-2025-71176（pytest，MODERATE，tmpdir 处理）
+  #   - 暴露面：pytest 仅测试期依赖，不进入生产镜像；CI 在一次性 runner 内执行，无可信边界外输入。
+  #   - 缓解：根 lock 钉 7.4.4 以兼容 pytest-asyncio 0.23 与项目插件；升级 pytest 9 需同步迁移测试栈。
+  #   - 复查：2027-05-01，届时随 pytest-asyncio 一并升级后移除本例外。
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Q-002 裁决方案 A：Dockerfile 直钉条目必须与根 lock 一致（消除双源漂移），
+      # 带 pins-lock-exempt 标记的独立安装模式文件跳过（如 deploy/ocr）。
+      - name: Verify Dockerfile pins match root lock
+        run: python scripts/check_dockerfile_pins.py
+
+      - name: Install pip-audit
+        run: python -m pip install "pip-audit==2.10.1"
+
+      - name: Audit pinned dependencies
+        run: |
+          set -euo pipefail
+          # 仅审计 `name==version` 钉死条目：全量 lock 解析会触发 rocketmq 传递依赖
+          # （grpcio-tools）构建，CI 无编译链路；--no-deps 保证只核对已钉版本本身。
+          grep -E '^[[:alnum:]_.-]+(\[[^]]*\])?==' requirements.lock > /tmp/requirements.audit.txt
+          pip-audit -r /tmp/requirements.audit.txt \
+            --no-deps --disable-pip \
+            --vulnerability-service osv --timeout 60 \
+            --ignore-vuln PYSEC-2026-1845
+
+  # T01 密钥扫描门禁：工作树出现明文密钥即失败。
+  # 只扫工作树（--no-git）：历史提交中的既有泄漏须先人工轮换再清理历史，
+  # 否则历史遗留会让门禁永久红灯、掩盖新增泄漏。
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: gitleaks scan (working tree)
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.21.2 \
+            detect --source /repo --no-git --config /repo/.gitleaks.toml --redact --verbose
+
+  # T32 静态检查门禁：ruff + mypy 存量基线冻结，基线外新增告警即阻断。
+  # 口径与本地完全一致：ruff/mypy 版本钉死（requirements.lock），依赖同 D2 配方安装；
+  # 基线文件 lint-baseline.json 只降不升（清理存量后 --update 重新生成，评审把关）。
+  # 硬约束：本 job 不允许 continue-on-error / || true（lint 按需启用 spec）。
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # python_version=3.12：numpy 2.x stub 使用 3.12 `type` 语句（见 pyproject.toml [tool.mypy] 注释）
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # ruff / mypy 版本由 requirements.lock 钉定（ruff==0.1.11 / mypy==1.8.0），
+          # 先装 lock 保证工具版本与基线生成时一致，不受最新版规则变更影响
+          grep -vE '^rocketmq-python-client' requirements.lock > /tmp/requirements.base.lock
+          pip install -r /tmp/requirements.base.lock
+          pip install 'rocketmq-python-client==5.1.1' 'opentelemetry-exporter-otlp>=1.33.1'
+
+      - name: Lint baseline gate (ruff + mypy)
+        run: python scripts/check_lint_baseline.py
+
   # 前端门禁（F0 tasks 7.1）：lint / 类型 / 单测 / 分层依赖四道闸，任何一步失败即 job 失败。
   # 硬约束：四个 step 彼此独立，禁止 `|| true`、禁止 `continue-on-error`（覆盖即视为门禁失效）。
   frontend:
@@ -182,6 +255,11 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # 依赖安全扫描（frontend-security-hardening REQ-4）：高危漏洞即 fail build。
+      # 仅审计 level=high（critical 含于 high 以下，--audit-level=high 会同时拦截 critical）。
+      - name: npm audit (high)
+        run: npm audit --audit-level=high
 
       # —— 以下四步为四道独立闸门，任一步非 0 退出即中断 job ——
       # ESLint：0 error 为硬红线；warning 冻结基线（--max-warnings 271 定义在 package.json），

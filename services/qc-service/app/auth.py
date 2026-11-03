@@ -1,6 +1,7 @@
 """qc-service 鉴权：复用 common.security.rbac.verify_token，不另写 JWT。
 
-仅挂 alerts / reviews / rules；replay/records/health 不加 JWT。
+alerts / reviews / rules / llm_usage 始终要求 JWT；
+records（含 PII 台账）在 auth_required 时要求 JWT，本地关闭认证时放行调试。
 """
 from collections.abc import Callable
 
@@ -10,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from uuid import UUID
 
+from common.config.settings import settings
 from common.errors.codes import ERROR_MESSAGES
 from common.security.rbac import verify_token
 from common.trace.middleware import get_trace_id
@@ -76,6 +78,18 @@ def require_roles(*roles: str) -> Callable:
             raise ForbiddenError()
         request.state.user = payload
         return payload
+
+    return check
+
+
+def require_roles_if_enabled(*roles: str) -> Callable:
+    """认证强制时校验角色；本地关闭认证（auth_required=false）时放行。"""
+    checker = require_roles(*roles)
+
+    async def check(request: Request) -> dict | None:
+        if not settings.auth_required:
+            return None
+        return await checker(request)
 
     return check
 

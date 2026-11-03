@@ -11,7 +11,7 @@
 #      QC_RAG_SENSITIVE_BASE=http://rag-service:8000（~50 词 current.dict）。本脚本不强制起 milvus。
 #   4. 路径 replay 需要 data-platform。本脚本主路径用 replay/raw
 #   5. seed 需要能连 PG（psql，或 docker exec 正在跑的 postgres 容器）
-#   6. alerts 签发 JWT 需要能 import common.security.rbac（jose）。pick_python 优先 conda ai_collection；
+#   6. alerts 签发 JWT 需要能 import common.security.rbac（PyJWT）。pick_python 优先 conda ai_collection；
 #        也可 PYTHON=/path/to/ai_collection/bin/python bash scripts/smoke/smoke_qc.sh
 #
 # 轻量冒烟起栈（仓库根，不要起 call-service；非 demo 默认词库）：
@@ -234,13 +234,70 @@ else
     fail "replay/raw code=0 or A2011 with compliance_score"
 fi
 
+echo "--- mint SUPV JWT (records / alerts 冒烟凭证；T02 冒烟补凭证) ---"
+PYBIN="$(pick_python || true)"
+TOKEN=""
+if [ -z "$PYBIN" ]; then
+    fail "could not mint SUPV token: 找不到 python"
+elif [ ! -x "$PYBIN" ] && ! command -v "$PYBIN" >/dev/null 2>&1; then
+    fail "could not mint SUPV token: 找不到 python (${PYBIN})"
+else
+    TOKEN_ERR="$(mktemp)"
+    TOKEN="$(
+        PYTHONPATH="$ROOT" "$PYBIN" - <<'PY' 2>"$TOKEN_ERR"
+import sys
+import traceback
+from uuid import uuid4
+
+try:
+    import jwt  # noqa: F401
+except ImportError as exc:
+    print(f"missing PyJWT: {exc}", file=sys.stderr)
+    traceback.print_exc()
+    sys.exit(2)
+
+try:
+    from common.security.rbac import create_token
+except Exception:
+    traceback.print_exc()
+    sys.exit(3)
+
+try:
+    print(create_token({"sub": str(uuid4()), "role": "supervisor"}))
+except Exception:
+    traceback.print_exc()
+    sys.exit(4)
+PY
+    )"
+    TOKEN_STATUS=$?
+    if [ -z "$TOKEN" ] || [ "$TOKEN_STATUS" -ne 0 ]; then
+        cat "$TOKEN_ERR" >&2
+        ERR_TXT="$(cat "$TOKEN_ERR" 2>/dev/null || true)"
+        rm -f "$TOKEN_ERR"
+        if [ "$TOKEN_STATUS" -eq 127 ] || echo "$ERR_TXT" | grep -qi "No such file"; then
+            fail "could not mint SUPV token: 找不到 python (${PYBIN})"
+        elif [ "$TOKEN_STATUS" -eq 2 ] || echo "$ERR_TXT" | grep -qi "pyjwt"; then
+            fail "could not mint SUPV token: 缺 PyJWT (${PYBIN})"
+        elif echo "$ERR_TXT" | grep -qi "JWT_SECRET\|ValidationError\|pydantic"; then
+            fail "could not mint SUPV token: create_token 抛错（JWT_SECRET / .env）using ${PYBIN}"
+        else
+            fail "could not mint SUPV token: create_token 抛错（JWT_SECRET / .env 或 import 失败）using ${PYBIN} exit=${TOKEN_STATUS}"
+        fi
+        TOKEN=""
+    else
+        rm -f "$TOKEN_ERR"
+    fi
+fi
+
 echo "--- GET /api/v1/qc/records/{session_id} ---"
-if python3 - "$BASE" "$SESSION_ID" <<'PY'
+if python3 - "$BASE" "$SESSION_ID" "$TOKEN" <<'PY'
 import json, sys, urllib.error, urllib.request
-base, session_id = sys.argv[1], sys.argv[2]
+base, session_id, token = sys.argv[1], sys.argv[2], sys.argv[3]
+headers = {"Authorization": f"Bearer {token}"} if token else {}
 url = f"{base}/api/v1/qc/records/{session_id}"
 try:
-    with urllib.request.urlopen(url, timeout=10) as resp:
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=10) as resp:
         status = resp.getcode()
         body = json.loads(resp.read().decode())
 except urllib.error.HTTPError as exc:
@@ -265,59 +322,6 @@ else
 fi
 
 echo "--- GET /api/v1/qc/alerts (SUPV) ---"
-PYBIN="$(pick_python || true)"
-TOKEN=""
-if [ -z "$PYBIN" ]; then
-    fail "could not mint SUPV token: 找不到 python"
-elif [ ! -x "$PYBIN" ] && ! command -v "$PYBIN" >/dev/null 2>&1; then
-    fail "could not mint SUPV token: 找不到 python (${PYBIN})"
-else
-    TOKEN_ERR="$(mktemp)"
-    TOKEN="$(
-        PYTHONPATH="$ROOT" "$PYBIN" - <<'PY' 2>"$TOKEN_ERR"
-import sys
-import traceback
-from uuid import uuid4
-
-try:
-    import jose  # noqa: F401
-except ImportError as exc:
-    print(f"missing jose: {exc}", file=sys.stderr)
-    traceback.print_exc()
-    sys.exit(2)
-
-try:
-    from common.security.rbac import create_token
-except Exception:
-    traceback.print_exc()
-    sys.exit(3)
-
-try:
-    print(create_token({"sub": str(uuid4()), "role": "SUPV"}))
-except Exception:
-    traceback.print_exc()
-    sys.exit(4)
-PY
-    )"
-    TOKEN_STATUS=$?
-    if [ -z "$TOKEN" ] || [ "$TOKEN_STATUS" -ne 0 ]; then
-        cat "$TOKEN_ERR" >&2
-        ERR_TXT="$(cat "$TOKEN_ERR" 2>/dev/null || true)"
-        rm -f "$TOKEN_ERR"
-        if [ "$TOKEN_STATUS" -eq 127 ] || echo "$ERR_TXT" | grep -qi "No such file"; then
-            fail "could not mint SUPV token: 找不到 python (${PYBIN})"
-        elif [ "$TOKEN_STATUS" -eq 2 ] || echo "$ERR_TXT" | grep -qi "jose"; then
-            fail "could not mint SUPV token: 缺 jose (${PYBIN})"
-        elif echo "$ERR_TXT" | grep -qi "JWT_SECRET\|ValidationError\|pydantic"; then
-            fail "could not mint SUPV token: create_token 抛错（JWT_SECRET / .env）using ${PYBIN}"
-        else
-            fail "could not mint SUPV token: create_token 抛错（JWT_SECRET / .env 或 import 失败）using ${PYBIN} exit=${TOKEN_STATUS}"
-        fi
-        TOKEN=""
-    else
-        rm -f "$TOKEN_ERR"
-    fi
-fi
 
 if [ -n "$TOKEN" ]; then
     if python3 - "$BASE" "$TOKEN" "$SESSION_ID" <<'PY'

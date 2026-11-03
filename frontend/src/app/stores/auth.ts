@@ -5,6 +5,7 @@ import http, {
   setAuthToken,
   setUnauthorizedHandler,
   setRateLimitHandler,
+  setRefreshHandler,
 } from '@/shared/request'
 import { STORAGE_KEYS } from '@/shared/utils/constants'
 import { stripBasePath } from '@/shared/utils/path'
@@ -17,8 +18,10 @@ import type { Role, CurrentUser } from '@/shared/types/common'
  */
 interface LoginResponse {
   access_token: string
+  refresh_token: string
   token_type: string
   expires_in: number
+  refresh_expires_in: number
   user: CurrentUser
 }
 
@@ -29,38 +32,41 @@ let fetchMeInFlight: Promise<void> | null = null
 let appRouter: Router | null = null
 
 /**
- * 认证 store（SSOT §10 / D8）。
- * 唯一 localStorage 读写点：仅 token 持久化（key ac_token）；
+ * 认证 store（SSOT §10 / D8 / frontend-security-hardening REQ-2）。
+ * 唯一 sessionStorage 读写点：仅 token 持久化（key ac_token）；
  * user / role 不持久化，由 /me 重建（防御「权限被回收但 token 未过期」）。
+ * 安全加固：从 localStorage 换 sessionStorage——会话级存储降低 XSS 接管
+ * 爆炸半径（关闭 tab 自动清除）；刷新页面同 tab 保留，登录体验不变。
  */
 export const useAuthStore = defineStore('auth', {
   state: () => ({
     token: null as string | null,
+    refresh_token: null as string | null,
     user: null as CurrentUser | null,
     role: null as Role | null,
     loaded: false,
   }),
 
   actions: {
-    /** 清空四字段 + 删 localStorage + 通知请求层清 token */
+    /** 清空五字段 + 删 sessionStorage + 通知请求层清 token */
     clearAuth(): void {
       this.token = null
+      this.refresh_token = null
       this.user = null
       this.role = null
       this.loaded = false
-      localStorage.removeItem(STORAGE_KEYS.TOKEN)
+      sessionStorage.removeItem(STORAGE_KEYS.TOKEN)
+      sessionStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
       setAuthToken(null)
     },
 
-    /** 启动期：读 localStorage token，有则注入请求层并拉 /me 重建 user/role */
+    /** 启动期：读 sessionStorage token，有则注入请求层并拉 /me 重建 user/role */
     initFromStorage(): void {
-      const token = localStorage.getItem(STORAGE_KEYS.TOKEN)
+      const token = sessionStorage.getItem(STORAGE_KEYS.TOKEN)
       if (token) {
         this.token = token
+        this.refresh_token = sessionStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
         setAuthToken(token)
-        // 有 token 才重建 user/role；走 ensureLoaded 复用 in-flight Promise，
-        // 避免首屏 guard 再次触发 /me（spec：刷新页 /me 只发一次）。
-        // 401 由拦截器 unauthorizedHandler 统一清态跳登录，此处不重复跳转。
         this.ensureLoaded().catch(() => {})
       }
     },
@@ -95,18 +101,45 @@ export const useAuthStore = defineStore('auth', {
       return fetchMeInFlight
     },
 
-    /** 登录：写 token + user + role，持久化 token，注入请求层 */
+    /** 登录：写双 token + user + role，持久化，注入请求层 */
     async login(username: string, password: string): Promise<void> {
       const data = await http.post<LoginResponse, LoginResponse>('/api/v1/auth/login', {
         username,
         password,
       })
       this.token = data.access_token
+      this.refresh_token = data.refresh_token
       this.user = data.user
       this.role = data.user.role
       setAuthToken(data.access_token)
-      localStorage.setItem(STORAGE_KEYS.TOKEN, data.access_token)
+      sessionStorage.setItem(STORAGE_KEYS.TOKEN, data.access_token)
+      sessionStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, data.refresh_token)
       this.loaded = true
+    },
+
+    /** Refresh Token 换 access_token（401 自动刷新链路调用） */
+    async refreshAccessToken(): Promise<string | null> {
+      if (!this.refresh_token) return null
+      try {
+        const data = await http.post<{ access_token: string }, { access_token: string }>(
+          '/api/v1/auth/refresh',
+          undefined,
+          {
+            headers: { Authorization: `Bearer ${this.refresh_token}` },
+            // 标记跳过拦截器注入——refresh_token 端点自带 Bearer，
+            // 不能让 authToken（过期的 access_token）覆盖掉 refresh_token
+            _skipAuthInterceptor: true,
+          },
+        )
+        this.token = data.access_token
+        setAuthToken(data.access_token)
+        sessionStorage.setItem(STORAGE_KEYS.TOKEN, data.access_token)
+        return data.access_token
+      } catch {
+        // refresh 失败（过期 / 被吊销 / 类型错）→ 清态交给外层 unauthorizedHandler 跳登录
+        this.clearAuth()
+        return null
+      }
     },
 
     /** 登出：清态并跳登录页 */
@@ -147,4 +180,7 @@ export function setupAuthHandlers(router: Router): void {
       : '系统繁忙，稍后重试'
     ElMessage.warning(`${tip}（trace: ${formatTrace(trace)}）`)
   })
+
+  // 401 / B0002：Refresh Token 换新 access_token（拦截器重放原请求）
+  setRefreshHandler(() => useAuthStore().refreshAccessToken())
 }

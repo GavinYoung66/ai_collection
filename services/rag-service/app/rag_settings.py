@@ -33,6 +33,8 @@ class RagSettings(BaseSettings):
     KB_ROUTING_ENABLED: bool = False
     KB_WEIGHTING_ENABLED: bool = False
     KB_ROW_LEVEL_ENABLED: bool = False
+    # T21：匿名（无身份）检索可见类别白名单（逗号分隔，空=不放行任何类别）
+    KB_ANONYMOUS_CATEGORIES: str = "regulation"
     KB_MULTITURN_ENABLED: bool = False
     KB_EMBED_DEGRADED_KEEP_TEXT: bool = False
     ES_DUAL_WRITE: bool = False

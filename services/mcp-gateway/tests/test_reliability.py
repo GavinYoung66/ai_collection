@@ -349,8 +349,8 @@ def _counting_500_client(counter: dict) -> httpx.AsyncClient:
 async def test_4_4_rag_kb_5xx_returns_empty_list(isolate, monkeypatch):
     monkeypatch.setattr(mcp_mod, "_MCP_RETRY_DELAY", 0)
     counter = {"n": 0}
-    toolset = RagKbToolset("http://rag", timeout=0.5)
-    toolset._http = BridgeHttpClient("http://rag", client=_counting_500_client(counter))
+    toolset = RagKbToolset("http://rag-service", timeout=0.5)
+    toolset._http = BridgeHttpClient("http://rag-service", client=_counting_500_client(counter))
     monkeypatch.setitem(
         TOOL_ROUTES["rag_kb"],
         "search_regulations",
@@ -371,8 +371,8 @@ async def test_4_4_rag_kb_5xx_returns_empty_list(isolate, monkeypatch):
 async def test_4_4_business_ticket_5xx_returns_default_fixture(isolate, monkeypatch):
     monkeypatch.setattr(mcp_mod, "_MCP_RETRY_DELAY", 0)
     counter = {"n": 0}
-    toolset = BusinessTicketToolset("http://dp")
-    toolset._http = BridgeHttpClient("http://dp", client=_counting_500_client(counter))
+    toolset = BusinessTicketToolset("http://data-platform")
+    toolset._http = BridgeHttpClient("http://data-platform", client=_counting_500_client(counter))
     monkeypatch.setitem(
         TOOL_ROUTES["business_ticket"],
         "query_case_info",
@@ -396,8 +396,8 @@ async def test_4_4_data_platform_5xx_enqueues_and_returns_success_shape(
 ):
     monkeypatch.setattr(mcp_mod, "_MCP_RETRY_DELAY", 0)
     counter = {"n": 0}
-    toolset = DataPlatformToolset("http://dp")
-    toolset._http = BridgeHttpClient("http://dp", client=_counting_500_client(counter))
+    toolset = DataPlatformToolset("http://data-platform")
+    toolset._http = BridgeHttpClient("http://data-platform", client=_counting_500_client(counter))
     monkeypatch.setitem(
         TOOL_ROUTES["data_platform"],
         "write_session",
@@ -440,8 +440,8 @@ async def test_4_4_data_platform_5xx_enqueues_and_returns_success_shape(
 async def test_4_4_call_qc_asr_5xx_returns_empty_list(isolate, monkeypatch):
     monkeypatch.setattr(mcp_mod, "_MCP_RETRY_DELAY", 0)
     counter = {"n": 0}
-    toolset = CallQcAsrToolset("http://dp")
-    toolset._dp = BridgeHttpClient("http://dp", client=_counting_500_client(counter))
+    toolset = CallQcAsrToolset("http://data-platform")
+    toolset._dp = BridgeHttpClient("http://data-platform", client=_counting_500_client(counter))
     monkeypatch.setitem(
         TOOL_ROUTES["call_qc"],
         "query_call_asr",

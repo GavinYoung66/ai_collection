@@ -27,6 +27,13 @@ setup_logging(env=settings.ENV, level=settings.LOG_LEVEL)
 
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI) -> AsyncGenerator[None]:
+    # T03：JWT/AES 密钥为默认占位值时立即失败（生产必须由 KMS 注入）
+    # 注意：网关 ProfileSettings 使用 MCP_GATEWAY_ 前缀，不含 JWT/AES 字段，须校验平台 Settings
+    from common.config.settings import settings as platform_settings
+    from common.config.settings import validate_required_secrets
+
+    validate_required_secrets(platform_settings)
+
     # MCP streamable-http session manager 必须随应用启停（挂载子应用的 lifespan 不会自动执行）
     async with mcp_server.mcp.session_manager.run():
         # Batch 2/3：下游 HTTP 连接池在此初始化/清理

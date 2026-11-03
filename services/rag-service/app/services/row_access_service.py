@@ -3,7 +3,8 @@
 配置 Schema：
     {"(role, dept)": [category list]}
 
-- JWT 缺失 → 原样返回 items（V1 兼容）。
+- JWT 缺失（匿名）→ 只放行 ``KB_ANONYMOUS_CATEGORIES`` 白名单（默认 regulation），
+  受限类别（script/case/other）一律不返回（T21，替代 V1 原样放行）。
 - JWT 缺 department 或为 "UNKNOWN" → 走 (role, default)。
 - (role, dept) 无匹配 → 走 (role, default)。
 - 仍无匹配 → (default, default) 保底放行全部 4 类（V1 兼容）。
@@ -17,6 +18,8 @@ from pathlib import Path
 import structlog
 import yaml
 
+from app.settings import settings
+
 logger = structlog.get_logger()
 
 # 默认权限矩阵路径：services/rag-service/conf/row_access_matrix.yaml
@@ -26,6 +29,32 @@ _DEFAULT_MATRIX_PATH = (
 
 # 保底全量放行的 4 类 category（V1 兼容）
 _ALL_CATEGORIES = {"regulation", "script", "case", "other"}
+
+# 匿名默认可见类别：仅公开发布的制度文本（T21）
+_DEFAULT_ANONYMOUS_CATEGORIES = "regulation"
+
+
+def anonymous_allowed_categories() -> set[str]:
+    """匿名（无身份）请求允许访问的 category 白名单。
+
+    读取 ``KB_ANONYMOUS_CATEGORIES``（逗号分隔，默认 ``regulation``），
+    仅保留合法类别；空配置或全部非法 → 空集合（fail-closed，匿名零结果）。
+    """
+    raw = getattr(settings, "KB_ANONYMOUS_CATEGORIES", _DEFAULT_ANONYMOUS_CATEGORIES)
+    if isinstance(raw, (list, tuple, set)):
+        values = [str(v).strip() for v in raw]
+    else:
+        values = [v.strip() for v in str(raw).split(",")]
+    return {v for v in values if v in _ALL_CATEGORIES}
+
+
+def filter_by_categories(
+    items: list[dict], allowed: set[str], category_filter: str | None = None
+) -> list[dict]:
+    """按 allowed 类别集合过滤 items；category_filter 非空时先取交集。"""
+    if category_filter is not None:
+        allowed = allowed & {category_filter}
+    return [item for item in items if item.get("category") in allowed]
 
 
 class RowAccessService:
@@ -151,14 +180,25 @@ class RowAccessService:
 
         Args:
             items: 候选 chunk 列表，每项含 category 字段。
-            jwt_payload: JWT 载荷；None 时原样返回（V1 兼容）。
+            jwt_payload: JWT 载荷；None（匿名）时仅放行
+                ``KB_ANONYMOUS_CATEGORIES`` 白名单（默认 regulation）。
             category_filter: 可选类别过滤，与 allowed 集合取交集。
 
         Returns:
             过滤后的 items 列表；空结果合法，不抛 403。
         """
         if jwt_payload is None:
-            return items
+            # T21：匿名请求不再放行受限文档，仅可见公开类别白名单
+            allowed = anonymous_allowed_categories()
+            result = filter_by_categories(items, allowed, category_filter)
+            logger.info(
+                "row_access_anonymous_filtered",
+                allowed=sorted(allowed),
+                category_filter=category_filter,
+                before=len(items),
+                after=len(result),
+            )
+            return result
 
         raw_role = jwt_payload.get("role")
         role = str(raw_role).upper() if raw_role else "default"
@@ -176,10 +216,7 @@ class RowAccessService:
         allowed = self._resolve_allowed(tenant_id, role, dept)
 
         # category_filter 非空时取交集
-        if category_filter is not None:
-            allowed = allowed & {category_filter}
-
-        result = [item for item in items if item.get("category") in allowed]
+        result = filter_by_categories(items, allowed, category_filter)
         logger.info(
             "row_access_filtered",
             role=role,

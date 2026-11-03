@@ -15,13 +15,21 @@ import { getErrorMessage, formatTrace } from './utils/error-map'
 export interface RequestError extends Error {
   code?: string
   trace?: string
+  /** 触发该错误的请求配置（用于前端错误上报回填 url 等上下文） */
+  config?: InternalAxiosRequestConfig
 }
 
 /** 构造带 code / trace 的 Error，保持原有 message 不变 */
-function makeError(message: string, code?: string | number, trace?: string): RequestError {
+function makeError(
+  message: string,
+  code?: string | number,
+  trace?: string,
+  config?: InternalAxiosRequestConfig,
+): RequestError {
   const err = new Error(message) as RequestError
   if (code !== undefined) err.code = String(code)
   if (trace) err.trace = trace
+  if (config) err.config = config
   return err
 }
 
@@ -71,6 +79,16 @@ export function setRateLimitHandler(handler: RateLimitHandler | null): void {
   rateLimitHandler = handler
 }
 
+/** Refresh Token 刷新回调：由 app 层 auth store 注册（shared 不得反向依赖 app） */
+export type RefreshHandler = () => Promise<string | null>
+
+let refreshHandler: RefreshHandler | null = null
+
+/** 注册 Refresh Token 刷新回调；传 null 可注销 */
+export function setRefreshHandler(handler: RefreshHandler | null): void {
+  refreshHandler = handler
+}
+
 // 模块级 trace 上下文（spec R13：MUST 预留读写函数供 F1 使用）。
 // F1 起请求拦截器在上下文非空时注入 X-Trace-Id（§9.4：详情页复合链路串联）；
 // 上下文的生成/清空由模块侧 composable 负责（F1 ComplaintDetail），本文件不生成。
@@ -100,12 +118,14 @@ const http: AxiosInstance = axios.create({
 })
 
 // 请求拦截器：注入 Bearer token；token 为空时不注入（禁止 Bearer null）
-http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
-  if (authToken) {
+// 特殊标记 _skipAuthInterceptor=true 时跳过注入（refresh_token 端点自带 Bearer）
+http.interceptors.request.use((config: InternalAxiosRequestConfig & { _skipAuthInterceptor?: boolean }) => {
+  if (authToken && !config._skipAuthInterceptor) {
     config.headers.set('Authorization', `Bearer ${authToken}`)
   }
-  // X-Trace-Id 注入（§9.4 F1 落地）：trace 上下文非空时注入请求头，
-  // 串联详情页「查看→研判→定责→回电→关单」复合链路；为空不注入。
+  // _skipAuthInterceptor 是业务内部标记，不下发；删除避免透传到后端
+  delete config._skipAuthInterceptor
+  // X-Trace-Id 注入（§9.4 F1 落地）
   const ctx = getTraceContext()
   if (ctx) {
     config.headers.set('X-Trace-Id', ctx)
@@ -115,19 +135,15 @@ http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
 
 // 响应拦截器：统一信封解析
 http.interceptors.response.use(
-  (response: AxiosResponse) => {
+  async (response: AxiosResponse) => {
     const { config, status, data, headers } = response
 
     // —— 非信封白名单：仅 GET /api/v1/sensitive-words/current.dict 走 text ——
-    // api 层对该端点设置 responseType:'text'，此处直接返回字符串；404 映射为空态。
-    // 必须同时校验 URL（S2）：否则任何 api 函数只要设了 responseType:'text'
-    // 就能绕过信封解析，白名单会退化为「全局开关」。
     if (config.responseType === 'text' && (config.url ?? '').includes(TEXT_WHITELIST)) {
       if (status === 404) return ''
       return data
     }
 
-    // —— 信封解析 ——
     const body = data as ApiEnvelope<unknown>
     const isEnvelope =
       body !== null &&
@@ -137,52 +153,76 @@ http.interceptors.response.use(
       'data' in body
 
     if (!isEnvelope) {
-      // 非信封（HTML 404 / 非 JSON）：兜底提示，trace 优先响应头，缺失则「无」
       const trace = (headers['x-trace-id'] as string | undefined) || undefined
-      return Promise.reject(makeError(`响应格式异常（trace: ${formatTrace(trace)}）`, undefined, trace))
+      return Promise.reject(makeError(`响应格式异常（trace: ${formatTrace(trace)}）`, undefined, trace, config))
     }
 
     const { code, message, trace_id } = body
-    // trace 优先取响应头 X-Trace-Id，回退信封 trace_id（SSOT §9.4 / D7）
     const trace = (headers['x-trace-id'] as string | undefined) || trace_id
 
-    // 成功：解包返回 data
     if (isSuccess(code)) {
       return body.data
     }
 
-    // 401 或 B0002：清登录态 + 跳登录
+    // 401 或 B0002：尝试 Refresh Token 自动刷新 → 重放原请求
     if (status === 401 || code === 'B0002') {
-      // 例外：POST /api/v1/auth/login 自身的 401 只提示、不清态、不跳转（防登录页自跳死循环）
       const isLoginSelf =
         (config.url ?? '').includes('/api/v1/auth/login') &&
         (config.method ?? 'get').toUpperCase() === 'POST'
       if (!isLoginSelf) {
+        try {
+          // ── backend-security-completion REQ-5c：Refresh Token 自动刷新 ──
+          // 刷新动作由 auth store 通过 setRefreshHandler 注册，
+          // shared → app 单向依赖（模块顶层不能 import app 层）
+          const newToken = await refreshHandler?.()
+          if (newToken) {
+            return http.request(config)
+          }
+        } catch {
+          // refresh 抛错（auth store 已内部清态）：fallthrough 到 unauthorizedHandler
+        }
         const redirectPath = window.location.pathname + window.location.search
         unauthorizedHandler?.(redirectPath)
       }
-      return Promise.reject(makeError(message, code, trace))
+      return Promise.reject(makeError(message, code, trace, config))
     }
 
     // 429 或 B0006：读 Retry-After 提示退避，拦截器不自动重试
-    // 提示文案走 error-map 白名单 + 附 trace 后 8 位（spec R2 的 429 Scenario）
     if (status === 429 || code === 'B0006') {
       const retryAfter = Number(headers['retry-after']) || 0
       rateLimitHandler?.(retryAfter, trace)
       const displayMessage = getErrorMessage(code, message)
       return Promise.reject(
-        makeError(`${displayMessage}（trace: ${formatTrace(trace)}）`, code, trace),
+        makeError(`${displayMessage}（trace: ${formatTrace(trace)}）`, code, trace, config),
       )
     }
 
     // 其他非成功 code：走 error-map 白名单，提示附 trace 后 8 位
     const displayMessage = getErrorMessage(code, message)
-    return Promise.reject(makeError(`${displayMessage}（trace: ${formatTrace(trace)}）`, code, trace))
+    const finalError = makeError(`${displayMessage}（trace: ${formatTrace(trace)}）`, code, trace, config)
+    // fire-and-forget：调度到 errorReporters（后端 audit/frontend-error 端点）
+    _dispatchError(finalError)
+    return Promise.reject(finalError)
   },
   (_error: AxiosError) => {
-    // 网络层错误（超时 / 连接中断 / DNS 失败）：兜底提示，trace 显示「无」
-    return Promise.reject(makeError('网络异常，请稍后重试（trace: 无）'))
+    return Promise.reject(makeError('网络异常，请稍后重试（trace: 无）', undefined, undefined, _error.config))
   },
 )
 
 export default http
+
+// ── backend-security-completion REQ-5a：前端错误上报钩子 ──
+// 收集器：main.ts 初始化时桥接全局 window.onerror / unhandledrejection
+// + app.config.errorHandler 到此数组，每个错误都会被遍历调用。
+// fire-and-forget：hook 内部应自行 try/catch 吞掉（审计失败绝不阻塞 UI）。
+type ErrorReporter = (err: RequestError) => void
+const errorReporters: ErrorReporter[] = []
+export function registerErrorReporter(fn: ErrorReporter): void {
+  errorReporters.push(fn)
+}
+// 请求层 401/非零 code 错误发生时遍历（interceptor 内调用）
+export function _dispatchError(err: RequestError): void {
+  for (const hook of errorReporters) {
+    try { hook(err) } catch { /* 审计失败静默吞 */ }
+  }
+}

@@ -1,5 +1,6 @@
 services:
   postgres:
+    restart: "no"
     image: postgres:15-alpine
     ports: ["5432:5432"]
     environment:
@@ -16,6 +17,7 @@ services:
       retries: 5
 
   redis:
+    restart: "no"
     image: redis:7-alpine
     ports: ["6379:6379"]
     command: redis-server --maxmemory 2gb --maxmemory-policy allkeys-lru --appendonly yes
@@ -28,6 +30,7 @@ services:
       retries: 5
 
   etcd:
+    restart: "no"
     image: quay.io/coreos/etcd:v3.5.16
     environment:
       ETCD_AUTO_COMPACTION_MODE: revision
@@ -44,6 +47,7 @@ services:
     command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls=http://0.0.0.0:2379 --data-dir /etcd
 
   minio:
+    restart: "no"
     image: minio/minio:latest
     ports: ["9000:9000", "9001:9001"]
     environment:
@@ -54,6 +58,7 @@ services:
       - minio_data:/data
 
   milvus:
+    restart: "no"
     image: milvusdb/milvus:v2.4.13
     command: ["milvus", "run", "standalone"]
     ports: ["19530:19530", "9091:9091"]
@@ -79,6 +84,7 @@ services:
       start_period: 60s
 
   elasticsearch:
+    restart: "no"
     image: ai_collection/elasticsearch-ik:8.11.3
     build:
       context: ./deploy/elasticsearch
@@ -100,6 +106,7 @@ services:
       retries: 5
 
   ocr-service:
+    restart: "no"
     build: ./deploy/ocr
     ports: ["8200:8200"]
     healthcheck:
@@ -111,6 +118,7 @@ services:
 
   # ===== RocketMQ 5.x（event bus；端口避让 19876/18080/18081；见 design Decision 8）=====
   rocketmq-namesrv:
+    restart: "no"
     image: apache/rocketmq:5.3.2
     ports: ["19876:9876"]
     command: sh mqnamesrv
@@ -122,6 +130,7 @@ services:
       start_period: 20s
 
   rocketmq-broker:
+    restart: "no"
     image: apache/rocketmq:5.3.2
     ports:
       - "10909:10909"
@@ -157,7 +166,7 @@ services:
         condition: service_healthy
       rocketmq-namesrv:
         condition: service_healthy
-    restart: on-failure
+    restart: "no"
     command: sh mqproxy -pc /home/rocketmq/rocketmq-5.3.2/conf/rmq-proxy.json
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/8081'"]
@@ -207,7 +216,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-    restart: unless-stopped
+    restart: "no"
 
   grafana:
     image: grafana/grafana:11.2.0
@@ -226,7 +235,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
-    restart: unless-stopped
+    restart: "no"
 
 volumes:
   pg_data:

@@ -122,7 +122,9 @@ services:
       retries: 30
       start_period: 30s
 
+  # T24：默认 `up` 不拉起 health 空壳服务；冒烟脚本按服务名显式启动时仍会运行。
   call-service:
+    profiles: ["shell-services"]
     build:
       context: .
       dockerfile: services/call-service/Dockerfile
@@ -146,6 +148,7 @@ services:
       start_period: 30s
 
   case-service:
+    profiles: ["shell-services"]
     build:
       context: .
       dockerfile: services/case-service/Dockerfile
@@ -197,6 +200,7 @@ services:
       start_period: 30s
 
   review-service:
+    profiles: ["shell-services"]
     build:
       context: .
       dockerfile: services/review-service/Dockerfile

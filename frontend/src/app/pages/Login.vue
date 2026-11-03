@@ -50,6 +50,9 @@ async function handleSubmit(): Promise<void> {
     } else if (e.code === 'B0003') {
       // 账号停用/锁定：不当作登录态失效，不清态、不跳转，原地提示
       errorMsg.value = `账号已停用或锁定（trace: ${formatTrace(e.trace)}）`
+    // ── backend-security-completion REQ-5b：B0011 账号锁定 ──
+    } else if (e.code === 'B0011') {
+      errorMsg.value = '账号已锁定，请15分钟后重试'
     } else {
       errorMsg.value = e.message || '登录失败'
     }

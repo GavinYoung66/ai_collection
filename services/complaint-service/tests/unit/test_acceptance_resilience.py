@@ -22,7 +22,8 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.events.publisher import publisher
-from app.main import _consume_queue_once, app
+from app.main import app
+from app.worker import consume_queue_once
 from app.service.complaint_service import complaint_service
 from app.service.rate_limiter import rate_limiter
 from app.utils.redis_keys import judge_lock_key, queue_start_key
@@ -219,7 +220,7 @@ async def test_consumer_ready_dispatches_judge(monkeypatch):
     assert await rl.acquire_complaint(cid) == "queued"
     rl.release_complaint()
 
-    await _consume_queue_once()
+    await consume_queue_once()
     # 轮询等待派发 task 完成（含槽/锁释放）：固定 sleep 在慢 runner 上读到的仍是
     # pending（PR #4 master 侧两次失败）；judge_async 置 pending_review 后，
     # finally 才释放并发槽与幂等锁，故三个条件必须同时等待。
@@ -249,7 +250,7 @@ async def test_consumer_expired_marks_a5010():
     del fake.store[queue_start_key(cid)]
     rl.release_complaint()
 
-    await _consume_queue_once()
+    await consume_queue_once()
 
     rec = complaint_service.get(cid)
     assert rec["task_status"] == "pending_review"
@@ -270,7 +271,7 @@ async def test_consumer_expired_marks_a5010():
 @pytest.mark.asyncio
 async def test_consumer_spawned_task_is_referenced_until_done(monkeypatch):
     """create_task 返回值若被 GC，研判会中途消失且槽/锁不释放。"""
-    from app.main import _consume_queue_once, _running_queued
+    from app.worker import _running_queued, consume_queue_once
 
     fake = _GlobalFakeRedis()
     rl = _reset_limiter(max_active=1, queue_max=10, fake=fake)
@@ -282,7 +283,7 @@ async def test_consumer_spawned_task_is_referenced_until_done(monkeypatch):
     assert await rl.acquire_complaint(cid) == "queued"
     rl.release_complaint()
 
-    await _consume_queue_once()
+    await consume_queue_once()
     # 任务在途：被集合强引用（防 GC）
     assert len(_running_queued) == 1
     # 直接等任务终结：固定 sleep 在慢 runner 上会读到仍在途的任务并泄漏给后续
@@ -382,7 +383,7 @@ class _HangGraph:
 @pytest.mark.asyncio
 async def test_shutdown_cancel_marks_pending_review_and_releases(monkeypatch):
     """关停取消在途排队研判：session 不滞留流水线态，槽/锁仍释放，任务正常终态。"""
-    from app.main import _consume_queue_once, _running_queued
+    from app.worker import _running_queued, consume_queue_once
 
     fake = _GlobalFakeRedis()
     rl = _reset_limiter(max_active=1, queue_max=10, fake=fake)
@@ -392,7 +393,7 @@ async def test_shutdown_cancel_marks_pending_review_and_releases(monkeypatch):
     assert await rl.acquire_complaint(cid) == "queued"
     rl.release_complaint()
 
-    await _consume_queue_once()
+    await consume_queue_once()
     assert len(_running_queued) == 1
     await asyncio.sleep(0)  # 让在途任务进入挂起点
 

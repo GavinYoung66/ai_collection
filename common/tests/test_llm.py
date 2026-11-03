@@ -1,12 +1,10 @@
 """common.llm 模块单元测试。"""
-import json
-
 import pytest
 from pydantic import ValidationError
 
 from common.llm.schemas.dialog_schema import DialogResponse, DialogTurn
 from common.llm.schemas.intent_schema import INTENT_TYPES, IntentResult, IntentType
-from common.llm.prompt_files import load_dialog_prompt, load_fallback_scripts
+from common.prompt import load_dialog_prompt, load_fallback_scripts
 from common.llm.rule_engine import RuleBasedScriptEngine
 
 

@@ -46,6 +46,7 @@
 services:
   # ========== 检索链路 mock（真实服务地址可在 .env 切换） ==========
   embedding:
+    restart: "no"
     # 用 Dockerfile.mock 构建（sentence-transformers 依赖延迟安装，真实版镜像在本机不可用），
     # 且不挂载宿主机 ./deploy/embedding（真实 app.py 会覆盖 mock 镜像内的 app.py）
     build:
@@ -68,6 +69,7 @@ services:
       retries: 3
 
   rerank-service:
+    restart: "no"
     # 与 embedding 同理：Dockerfile.mock 构建，不挂载宿主机真实 app.py
     build:
       context: ./deploy/rerank
@@ -93,6 +95,7 @@ services:
   # 仅 smoke 场景显式启用：
   #   docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile smoke up -d rag-dict-mock
   rag-dict-mock:
+    restart: "no"
     image: python:3.11.15-slim
     profiles: ["smoke"]
     expose: ["8000"]
@@ -119,7 +122,7 @@ services:
       context: .
       dockerfile: services/data-platform/Dockerfile
     ports: ["8001:8000"]
-    restart: unless-stopped
+    restart: "no"
     env_file: .env
     environment:
       PG_HOST: postgres
@@ -162,7 +165,7 @@ services:
       context: .
       dockerfile: services/rag-service/Dockerfile
     ports: ["8002:8000"]
-    restart: unless-stopped
+    restart: "no"
     env_file: .env
     environment:
       PG_HOST: postgres
@@ -248,7 +251,7 @@ services:
       context: .
       dockerfile: services/qc-service/Dockerfile
     ports: ["8003:8000"]
-    restart: unless-stopped
+    restart: "no"
     env_file: .env
     environment:
       PG_HOST: postgres
@@ -319,12 +322,15 @@ services:
       - default
       - ai-shared-net
 
+  # T24：health 空壳服务不随默认 `docker compose up` 启动；需显式指定服务名
+  # 或 `--profile shell-services` 才会拉起。
   call-service:
+    profiles: ["shell-services"]
     build:
       context: .
       dockerfile: services/call-service/Dockerfile
     ports: ["8004:8000"]
-    restart: unless-stopped
+    restart: "no"
     env_file: .env
     environment:
       PG_HOST: postgres
@@ -355,11 +361,12 @@ services:
       start_period: 30s
 
   case-service:
+    profiles: ["shell-services"]
     build:
       context: .
       dockerfile: services/case-service/Dockerfile
     ports: ["8005:8000"]
-    restart: unless-stopped
+    restart: "no"
     env_file: .env
     environment:
       PG_HOST: postgres
@@ -401,7 +408,7 @@ services:
       context: .
       dockerfile: services/mcp-gateway/Dockerfile
     ports: ["9009:9000"]
-    restart: unless-stopped
+    restart: "no"
     env_file: .env
     environment:
       # 容器内 Redis 用服务名（根 .env 的 REDIS_HOST=localhost 是宿主机视角）；
@@ -450,7 +457,7 @@ services:
       context: .
       dockerfile: services/complaint-service/Dockerfile
     ports: ["8006:8000"]
-    restart: unless-stopped
+    restart: "no"
     env_file: .env
     environment:
       PG_HOST: postgres
@@ -513,12 +520,54 @@ services:
       - default
       - ai-shared-net
 
+  # T25：常驻循环与 EventBus 订阅独立进程；FastAPI 进程不再承载后台循环。
+  complaint-worker:
+    build:
+      context: .
+      dockerfile: services/complaint-service/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB: "6"
+      PROMPT_TEMPLATES_DIR: /app/app/prompt/templates
+      MCP_GATEWAY_MODE: standalone
+      MCP_GATEWAY_URL: ${MCP_GATEWAY_URL:-http://mcp-gateway:9000}
+      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL_DOCKER:-http://host.docker.internal:3000}
+      USE_MOCK_MCP: ${USE_MOCK_MCP:-true}
+      RAG_SERVICE_URL: ${RAG_SERVICE_URL:-http://rag-service:8000}
+      DATA_PLATFORM_URL: ${DATA_PLATFORM_URL:-http://data-platform:8000}
+      QC_SERVICE_URL: ${QC_SERVICE_URL:-http://qc-service:8000}
+      EVENT_BUS: ${EVENT_BUS:-rocketmq}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
+      EVENT_BUS_SVC: ${EVENT_BUS_SVC:-cs}
+      SIM_AUTO_REVIEW: ${SIM_AUTO_REVIEW:-false}
+    volumes:
+      - ./services/complaint-service/app:/app/app
+      - ./services/complaint-service/tests:/app/tests
+      - ./common:/app/common
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks:
+      - default
+      - ai-shared-net
+
   review-service:
+    profiles: ["shell-services"]
     build:
       context: .
       dockerfile: services/review-service/Dockerfile
     ports: ["8007:8000"]
-    restart: unless-stopped
+    restart: "no"
     env_file: .env
     environment:
       PG_HOST: postgres
