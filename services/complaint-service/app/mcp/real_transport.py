@@ -18,6 +18,7 @@ Batch 5（mcp-gateway-standalone）：
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -234,10 +235,17 @@ def _error_text(result: Any) -> str:
 def _extract_payload(result: Any, server: str = "", tool: str = "") -> Any:
     """CallToolResult → 工具原始返回值（dict/list）。
 
-    形状由网关响应的 ``structuredContent`` 携带（``{"shape","payload"}``，
-    common.mcp.contract）；客户端按元数据还原，不再静态镜像工具名单。
+    形状由网关响应携带（``{"shape","payload"}``，common.mcp.contract）；
+    客户端按元数据还原，不再静态镜像工具名单（T35）。
     缺少元数据即契约违约：明确报错，不猜测形状（避免 list/dict 误解析）。
-    仅保留对 FastMCP SDK 自身 ``{"result": ...}`` 包装的读取。
+
+    契约数据可能出现在两个通道，按优先级读取：
+    1. ``structuredContent``：支持 structured output 的 SDK 版本直接携带；
+       另兼容 FastMCP 自身 ``{"result": ...}`` 包装。
+    2. TextContent JSON 文本（mcp 1.30 实测兜底）：FastMCP 对 ``-> dict``
+       工具不生成 ``structuredContent``（恒为 None），返回值以完整 JSON
+       落在单个 TextContent block——解析后仍按同一契约还原，形状声明方
+       始终是服务端，客户端不引入任何静态工具名单。
     """
     structured = getattr(result, "structuredContent", None)
     if has_shape_metadata(structured):
@@ -249,6 +257,25 @@ def _extract_payload(result: Any, server: str = "", tool: str = "") -> Any:
     if isinstance(structured, dict) and set(structured.keys()) == {"result"}:
         # SDK 级包装：value 即原始返回值，形状无需推断
         return structured["result"]
+
+    # mcp 1.30 兜底：契约包裹体以 JSON 文本落在 TextContent block
+    parts = [
+        text
+        for block in getattr(result, "content", None) or []
+        if (text := getattr(block, "text", None))
+    ]
+    if parts:
+        try:
+            parsed = json.loads("\n".join(parts))
+        except json.JSONDecodeError:
+            parsed = None
+        if has_shape_metadata(parsed):
+            try:
+                return unwrap_typed_result(parsed)
+            except ValueError as exc:
+                raise MCPError(server, tool, f"invalid gateway response shape: {exc}") from exc
+        if isinstance(parsed, dict) and set(parsed.keys()) == {"result"}:
+            return parsed["result"]
 
     raise MCPError(
         server,
