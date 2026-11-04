@@ -18,7 +18,7 @@ def test_max_retry_times_is_three():
 
 
 def test_consumer_group_from_svc_short_code():
-    assert consumer_group_name("qc", "call.session.ended") == "gid_qc_call_session_ended"
+    assert consumer_group_name("qc") == "gid_qc"
 
 
 @pytest.mark.asyncio
@@ -73,8 +73,8 @@ async def test_subscribe_uses_gid_and_filter_expression():
         def ack(self, *_a, **_k):
             return None
 
-    def _start(event_name, consumer_group):
-        started["event_name"] = event_name
+    def _start(tags, consumer_group):
+        started["tags"] = tags
         started["consumer_group"] = consumer_group
         return _FakeConsumer()
 
@@ -86,8 +86,8 @@ async def test_subscribe_uses_gid_and_filter_expression():
         await asyncio.sleep(0.05)
         await bus.aclose()
 
-    assert started["event_name"] == "call.session.ended"
-    assert started["consumer_group"] == "gid_qc_call_session_ended"
+    assert started["tags"] == ("call.session.ended",)
+    assert started["consumer_group"] == "gid_qc"
 
 
 @pytest.mark.asyncio
@@ -122,7 +122,7 @@ async def test_receive_failure_emits_warning_and_continues():
          patch("common.eventbus.rocketmq._receive_backoff_seconds", return_value=0.0), \
          patch("common.eventbus.rocketmq.logger") as mock_logger:
         task = asyncio.create_task(
-            bus._consume_loop("call.session.ended", "gid_qc_call_session_ended", MagicMock())
+            bus._consume_group("gid_qc", {"call.session.ended": MagicMock()})
         )
         await asyncio.wait_for(done.wait(), timeout=5)
         assert not task.done(), "receive 异常后订阅循环不得退出"
@@ -136,5 +136,5 @@ async def test_receive_failure_emits_warning_and_continues():
     ]
     assert warning_calls, "receive 失败必须记录 eventbus_consumer_receive_failed"
     kwargs = warning_calls[0].kwargs
-    assert kwargs["consumer_group"] == "gid_qc_call_session_ended"
+    assert kwargs["consumer_group"] == "gid_qc"
     assert kwargs["error"] == "proxy unavailable"

@@ -1,6 +1,7 @@
 """Data Platform FastAPI 入口。"""
 from contextlib import asynccontextmanager
 
+import structlog
 from fastapi import FastAPI
 
 from common.config.logging import setup_logging
@@ -10,6 +11,8 @@ from common.trace.middleware import TraceMiddleware
 from app.api.health import router as health_router
 from app.api.qc_source import router as qc_source_router
 from app.api.snapshot import router as snapshot_router
+
+logger = structlog.get_logger()
 
 
 @asynccontextmanager
@@ -34,7 +37,8 @@ async def lifespan(app: FastAPI):
             try:
                 await t
             except Exception:
-                pass
+                # T40：后台任务终止异常 MUST NOT 静默丢弃——留 warning + 异常栈。
+                logger.warning("dp_background_task_failed_on_shutdown", exc_info=True)
 
 
 setup_logging()

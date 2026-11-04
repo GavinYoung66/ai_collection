@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 
 from common.config.logging import setup_logging
@@ -24,10 +25,14 @@ from app.config import settings
 setup_logging(env=getattr(settings, "ENV", "dev"), level=getattr(settings, "LOG_LEVEL", None))
 
 
-def _probe_mcp_gateway() -> bool:
+async def _probe_mcp_gateway() -> bool:
     """standalone 且非 Mock 时探活 MCP_GATEWAY_URL；失败返回 False（标记 mcp_degraded）。
 
     inline / Mock：不发起外网探活，视为可达。
+
+    T43：原实现用阻塞 `urllib.request.urlopen`（最长 2×2s）直接在异步 lifespan
+    中调用，会冻结事件循环、劣化并发健康检查响应；改为 `httpx.AsyncClient`
+    异步探测（每路径 2s 超时，语义与原实现一致：/health → 根路径，2xx 即可达）。
     """
     mode = getattr(settings, "MCP_GATEWAY_MODE", "inline")
     if mode != "standalone":
@@ -37,15 +42,14 @@ def _probe_mcp_gateway() -> bool:
     gateway_url = (getattr(settings, "MCP_GATEWAY_URL", "") or "").rstrip("/")
     if not gateway_url:
         return False
-    import urllib.error
-    import urllib.request
 
     for path in ("/health", ""):
         try:
-            with urllib.request.urlopen(f"{gateway_url}{path}", timeout=2) as resp:
-                if 200 <= getattr(resp, "status", 200) < 300:
-                    return True
-        except (urllib.error.URLError, TimeoutError, OSError):
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                resp = await client.get(f"{gateway_url}{path}")
+            if 200 <= resp.status_code < 300:
+                return True
+        except httpx.HTTPError:
             continue
     return False
 
@@ -119,8 +123,9 @@ async def lifespan(app: FastAPI):
         app.state.pg_degraded = True
 
     # MCP：standalone 且非 Mock 时探活网关，避免 health mcp 假绿
+    # T43：异步探测，不阻塞事件循环（并发 /health 响应不因探测劣化）
     try:
-        if not _probe_mcp_gateway():
+        if not await _probe_mcp_gateway():
             app.state.mcp_degraded = True
     except Exception:
         app.state.mcp_degraded = True

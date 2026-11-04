@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from common.eventbus.envelope import DATA_WHITELIST, EventEnvelope, build_envelope
+from common.eventbus.envelope import EventEnvelope, build_envelope, data_whitelist
 
 
 def test_valid_data_accepted():
@@ -15,11 +15,11 @@ def test_valid_data_accepted():
     assert env.event_name == "call.session.ended"
     assert env.data == {"case_id": "c1", "session_id": "s1"}
     assert env.event_id.startswith("evt_")
-    assert set(DATA_WHITELIST) >= set(env.data)
+    assert set(data_whitelist()) >= set(env.data)
 
 
 def test_all_whitelist_fields_ok():
-    data = {k: f"v-{k}" for k in DATA_WHITELIST}
+    data = {k: f"v-{k}" for k in data_whitelist()}
     env = EventEnvelope(
         event_id="evt_1",
         event_name="qc.check.completed",

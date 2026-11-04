@@ -31,11 +31,22 @@ class TestSettings:
         s = Settings()
         assert s.es_url == "http://localhost:9200"
 
-    def test_business_params(self):
+    def test_platform_settings_excludes_business_params(self):
+        """T33：common 只保留平台级参数，外呼/会话等业务参数下沉服务级配置。"""
         s = Settings()
-        assert s.CALL_MAX_CONCURRENCY == 50
-        assert s.MAX_DIALOG_TURNS == 15
-        assert s.LLM_CONFIDENCE_THRESHOLD == 0.7
+        for field in (
+            "CALL_MAX_CONCURRENCY",
+            "CALL_TIMEZONE",
+            "CALL_ALLOWED_HOURS",
+            "CALL_DAILY_LIMIT_PER_USER",
+            "CALL_RETRY_INTERVAL_MIN",
+            "CALL_MAX_RETRY",
+            "MAX_DIALOG_TURNS",
+            "LLM_CONFIDENCE_THRESHOLD",
+        ):
+            assert field not in Settings.model_fields
+        # LLM 熔断阈值属于平台级可靠性参数，仍在 common
+        assert s.LLM_CIRCUIT_BREAKER_THRESHOLD == 3
         # RAG_SCORE_THRESHOLD 已迁至 rag-service RagSettings
         assert "QC_RESPONSE_TIMEOUT" not in Settings.model_fields
 

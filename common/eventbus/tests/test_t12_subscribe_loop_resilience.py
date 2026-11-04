@@ -13,7 +13,7 @@ from common.eventbus.rocketmq import (
 )
 
 EVENT = "complaint.created"
-GROUP = "gid_cs_complaint_created"
+GROUP = "gid_cs"
 
 
 class _FlakyConsumer:
@@ -60,7 +60,7 @@ async def test_receive_error_does_not_stop_subscription():
         patch("common.eventbus.rocketmq._receive_backoff_seconds", return_value=0.0),
         patch("common.eventbus.rocketmq.logger.warning", side_effect=warning_spy),
     ):
-        task = asyncio.create_task(bus._consume_loop(EVENT, GROUP, MagicMock()))
+        task = asyncio.create_task(bus._consume_group(GROUP, {EVENT: MagicMock()}))
         await asyncio.wait_for(done.wait(), timeout=5)
 
         # 单次 receive 异常后订阅仍存活，并继续消费后续消息
@@ -105,7 +105,7 @@ async def test_receive_recovery_logged_after_consecutive_failures():
         patch("common.eventbus.rocketmq._receive_backoff_seconds", return_value=0.0),
         patch("common.eventbus.rocketmq.logger.info", side_effect=info_spy),
     ):
-        task = asyncio.create_task(bus._consume_loop(EVENT, GROUP, MagicMock()))
+        task = asyncio.create_task(bus._consume_group(GROUP, {EVENT: MagicMock()}))
         await asyncio.wait_for(done.wait(), timeout=5)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -158,7 +158,7 @@ async def test_consumer_startup_failure_does_not_stop_subscription():
         patch("common.eventbus.rocketmq.logger.warning", side_effect=warning_spy),
         patch("common.eventbus.rocketmq.logger.info", side_effect=info_spy),
     ):
-        task = asyncio.create_task(bus._consume_loop(EVENT, GROUP, MagicMock()))
+        task = asyncio.create_task(bus._consume_group(GROUP, {EVENT: MagicMock()}))
         await asyncio.wait_for(done.wait(), timeout=5)
 
         assert not task.done(), "启动失败重试成功后订阅必须存活"

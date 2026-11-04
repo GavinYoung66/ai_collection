@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
+import structlog
 from fastapi import FastAPI
 
 from app.api.health import router as health_router
@@ -23,6 +24,7 @@ from common.observability.metrics import mount_metrics
 from common.trace.middleware import TraceMiddleware
 
 setup_logging()
+logger = structlog.get_logger()
 
 
 def wire_resilience_hooks() -> None:
@@ -92,7 +94,8 @@ async def lifespan(_app: FastAPI):
             try:
                 await task
             except Exception:
-                pass
+                # T40：后台任务终止异常 MUST NOT 静默丢弃——留 warning + 异常栈。
+                logger.warning("qc_background_task_failed_on_shutdown", exc_info=True)
         _unwire_resilience_hooks()
         _unwire_resilience_redis()
 

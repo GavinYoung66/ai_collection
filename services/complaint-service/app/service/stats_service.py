@@ -12,8 +12,12 @@ import statistics
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import structlog
+
 from app.models.state import VerdictType
 from app.utils.redis_keys import TTL_HOTSPOTS, hotspots_key
+
+logger = structlog.get_logger()
 
 _HOTSPOT_TTL = TTL_HOTSPOTS  # 6h
 _CONSISTENCY_ALERT_THRESHOLD = 0.80
@@ -80,7 +84,11 @@ class StatsService:
             try:
                 return json.loads(cached)
             except Exception:
-                pass
+                # T40：热点缓存损坏 MUST NOT 静默丢弃——留 warning + 异常栈，
+                # 降级为重新计算并覆写缓存（自愈路径）。
+                logger.warning(
+                    "stats_hotspot_cache_corrupted", cache_key=cache_key, exc_info=True
+                )
 
         consistency = self.get_consistency_rate()
         result = {

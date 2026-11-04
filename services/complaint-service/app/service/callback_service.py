@@ -7,9 +7,13 @@
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
+
+import structlog
 
 from app.utils.redis_keys import callback_dlq_key
+
+logger = structlog.get_logger()
 
 _BACKOFF = [10, 30, 60]  # 秒
 _MAX_RETRY = 3
@@ -56,7 +60,15 @@ class CallbackService:
                 if ok:
                     return True
             except Exception:
-                pass
+                # T40：单次投递失败 MUST NOT 静默丢弃——留 warning + 异常栈；
+                # 继续退避重试，3 次耗尽后入 DLQ（见下方死信路径）。
+                logger.warning(
+                    "callback_send_attempt_failed",
+                    session_id=session_id,
+                    version=version,
+                    attempt=attempt + 1,
+                    exc_info=True,
+                )
             # 退避（Mock 时钟可测，不真睡）
             _ = self._clock() + _BACKOFF[attempt]
         # 3 次失败入 DLQ

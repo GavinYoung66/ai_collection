@@ -36,10 +36,10 @@ class TransferResult:
 class CCCProvider:
     """封装阿里云呼叫中心核心操作：外呼、转人工、挂断。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_concurrency: int) -> None:
         self._access_key_id = settings.CCC_ACCESS_KEY_ID
         self._access_key_secret = settings.CCC_ACCESS_KEY_SECRET
-        self._max_concurrency = settings.CALL_MAX_CONCURRENCY
+        self._max_concurrency = max_concurrency
         self._semaphore = CallSemaphore(self._max_concurrency)
 
     def _sign(self, params: dict, timestamp: str) -> str:
@@ -145,6 +145,3 @@ class CCCProvider:
         success = result.get("mock") or result.get("status") == "ok"
         logger.info("ccc_hangup", session_id=session_id, success=success)
         return bool(success)
-
-
-ccc_provider = CCCProvider()

@@ -11,6 +11,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 from common.config.settings import settings
+from common.llm.constants import DASHSCOPE_COMPAT_BASE  # T44：单一常量源
 from common.observability.llm_metrics import LLM_METRICS
 from common.resilience.breaker import BreakerRegistry, make_llm_breaker_key
 from common.resilience.rate_limit import allow as rate_limit_allow
@@ -36,7 +37,6 @@ from common.resilience.retry import LLM_RETRY, retry_delay
 
 _LLM_MAX_ATTEMPTS = LLM_RETRY.max_attempts  # 业务错有界重试次数
 _LLM_RETRY_DELAY = LLM_RETRY.base_delay     # 重试基础退避（秒），指数递增
-_DASHSCOPE_COMPAT_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 _llm_breakers = BreakerRegistry(
     fail_max=settings.LLM_CIRCUIT_BREAKER_THRESHOLD,
@@ -75,7 +75,7 @@ async def _default_llm_transport(
         _resolve_llm_api_key(), label="LLM_API_KEY / DASHSCOPE_API_KEY"
     )
     body = await post_chat_completions(
-        base_url=_DASHSCOPE_COMPAT_BASE,
+        base_url=DASHSCOPE_COMPAT_BASE,
         api_key=api_key,
         model=model,
         messages=messages,

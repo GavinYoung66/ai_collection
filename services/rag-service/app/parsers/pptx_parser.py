@@ -3,7 +3,11 @@ import asyncio
 import re
 from pathlib import Path
 
+import structlog
+
 from app.parsers.base import DocumentParser
+
+logger = structlog.get_logger()
 
 # 版式占位文案（精确匹配才剔除，保守启发式，防误删正文）
 _PLACEHOLDER_TEXTS = frozenset({
@@ -66,7 +70,8 @@ class PptxParser(DocumentParser):
                     if notes:
                         body_lines.append(f"备注: {notes}")
             except Exception:
-                pass
+                # T40：备注缺失/解析异常不影响正文（允许忽略），但不静默。
+                logger.debug("pptx_notes_parse_failed", page=i, exc_info=True)
 
             parts = [f"第{i}页"]
             if title_text:

@@ -170,7 +170,9 @@ class RealLLMTransport:
                 schema_hint = json.dumps(schema.model_json_schema(), ensure_ascii=False)[:4000]
                 system += f" JSON schema hint: {schema_hint}"
             except Exception:
-                pass
+                # T40：schema hint 仅为提示性优化，序列化失败不阻断主流程，
+                # 但不静默——留 debug + 异常栈便于排查异常 schema。
+                logger.debug("llm_schema_hint_serialize_failed", exc_info=True)
         return system
 
     async def invoke(

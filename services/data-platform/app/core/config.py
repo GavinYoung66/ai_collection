@@ -1,17 +1,18 @@
 """data-platform 产品配置。
 
-平台 PG/Redis host 仍读 common Settings（唯一事实源）。
+平台级参数（PG/Redis/密钥/公共超时）统一继承 common Settings（唯一事实源）。
 QC_REDIS_DB 与 qc-service 同名同库（同一 Redis 实例 SELECT 3），
 data-platform 不另起 Redis 实例，且禁止使用 0 号库。
 """
 from __future__ import annotations
 
 from pydantic import model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from common.config.settings import Settings
 
 
-class DataPlatformSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+class DataPlatformSettings(Settings):
+    """数据平台业务配置；平台参数继承自 common Settings。"""
 
     # 最小闭环事件通道（etl.task.done / qc.check.completed）与 qc-service 共用逻辑库。
     QC_REDIS_DB: int = 3

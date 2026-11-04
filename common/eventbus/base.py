@@ -15,9 +15,13 @@ PHYSICAL_TOPIC = "csmp_business_events"
 DLQ_TOPIC_PREFIX = "%DLQ%"
 
 
-def consumer_group_name(svc: str, event_name: str) -> str:
-    """Build ``gid_{svc}_{event}`` (event dots → underscores)."""
-    return f"gid_{svc}_{event_name.replace('.', '_')}"
+def consumer_group_name(svc: str) -> str:
+    """Build the shared consumer group ``gid_{svc}``.
+
+    消费组按服务收敛（而非“服务×事件”），事件区分交给订阅 tag 过滤，
+    因此消费组数量不随事件类型数量增长（T34）。
+    """
+    return f"gid_{svc}"
 
 
 def dlq_topic_name(consumer_group: str) -> str:

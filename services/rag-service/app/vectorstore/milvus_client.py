@@ -175,7 +175,9 @@ class MilvusClient:
             try:
                 col.load()
             except Exception:
-                pass  # collection 可能已加载或未创建，忽略
+                # T40：collection 可能已加载或未创建（允许忽略），但不静默——
+                # 留 debug + 异常栈，便于区分「已加载」与「集合不存在」两类情况。
+                logger.debug("milvus_collection_load_skipped", exc_info=True)
             doc_id_int = uuid_to_int64(doc_id)
             col.delete(expr=f"doc_id == {doc_id_int}")
             col.flush()

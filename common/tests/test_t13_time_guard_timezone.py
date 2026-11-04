@@ -1,7 +1,8 @@
 """T13：外呼时段判定的时区确定性单测。
 
-核心验证：容器 ``TZ=UTC`` 下，业务时区（CALL_TIMEZONE=Asia/Shanghai）的时段
-判定与本地北京时间一致；固定时钟注入，不依赖真实时间。
+核心验证：容器 ``TZ=UTC`` 下，业务时区（call-service ``CALL_TIMEZONE=Asia/Shanghai``）
+的时段判定与本地北京时间一致；合规模块由调用方注入参数（T33 后 common 不再读全局业务配置），
+固定时钟注入，不依赖真实时间。
 """
 import time as time_module
 from datetime import datetime, timezone
@@ -9,12 +10,12 @@ from zoneinfo import ZoneInfoNotFoundError
 
 import pytest
 
-from common.config.settings import settings
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
 from common.utils.time_guard import check_call_time
 
 BEIJING = "Asia/Shanghai"
+ALLOWED_HOURS = "08:00-21:00"
 
 
 @pytest.fixture
@@ -29,19 +30,17 @@ def utc_container(monkeypatch):
         time_module.tzset()
 
 
-@pytest.fixture(autouse=True)
-def _default_business_config(monkeypatch):
-    monkeypatch.setattr(settings, "CALL_TIMEZONE", BEIJING)
-    monkeypatch.setattr(settings, "CALL_ALLOWED_HOURS", "08:00-21:00")
+def _check(now: datetime, timezone_name: str = BEIJING) -> None:
+    check_call_time(now, timezone_name=timezone_name, allowed_hours=ALLOWED_HOURS)
 
 
-def _assert_allowed(now: datetime) -> None:
-    assert check_call_time(now) is None
+def _assert_allowed(now: datetime, timezone_name: str = BEIJING) -> None:
+    assert _check(now, timezone_name) is None
 
 
-def _assert_denied(now: datetime) -> None:
+def _assert_denied(now: datetime, timezone_name: str = BEIJING) -> None:
     with pytest.raises(BizException) as exc_info:
-        check_call_time(now)
+        _check(now, timezone_name)
     assert exc_info.value.code == ErrorCode.A1001
 
 
@@ -71,26 +70,23 @@ def test_naive_clock_is_interpreted_in_business_timezone(utc_container):
     _assert_denied(datetime(2026, 1, 15, 22, 0))
 
 
-def test_business_timezone_drives_decision(monkeypatch):
-    """同一 UTC 瞬间，配置时区不同则判定不同：02:00Z 在 UTC 为凌晨、在北京为上午。"""
+def test_business_timezone_drives_decision():
+    """同一 UTC 瞬间，注入时区不同则判定不同：02:00Z 在 UTC 为凌晨、在北京为上午。"""
     instant = datetime(2026, 1, 15, 2, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(settings, "CALL_TIMEZONE", "UTC")
-    _assert_denied(instant)
-    monkeypatch.setattr(settings, "CALL_TIMEZONE", BEIJING)
-    _assert_allowed(instant)
+    _assert_denied(instant, timezone_name="UTC")
+    _assert_allowed(instant, timezone_name=BEIJING)
 
 
 def test_live_clock_path_uses_business_timezone(utc_container):
     """真实时钟路径（now=None）产出时区感知时间：不因容器 UTC 抛 naive 相关错误。"""
-    # 只验证时区感知路径可执行；具体时刻由 CALL_ALLOWED_HOURS 决定，捕获业务拒绝即可。
+    # 只验证时区感知路径可执行；具体时刻由 allowed_hours 决定，捕获业务拒绝即可。
     try:
-        check_call_time()
+        check_call_time(timezone_name=BEIJING, allowed_hours=ALLOWED_HOURS)
     except BizException as exc:
         assert exc.code == ErrorCode.A1001
 
 
-def test_invalid_timezone_name_fails_fast(monkeypatch):
-    """非法 CALL_TIMEZONE 不做静默回退，直接抛出配置错误。"""
-    monkeypatch.setattr(settings, "CALL_TIMEZONE", "Not/AZone")
+def test_invalid_timezone_name_fails_fast():
+    """非法时区名不做静默回退，直接抛出配置错误。"""
     with pytest.raises(ZoneInfoNotFoundError):
-        check_call_time(datetime(2026, 1, 15, 10, 0))
+        _check(datetime(2026, 1, 15, 10, 0), timezone_name="Not/AZone")

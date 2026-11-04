@@ -16,6 +16,7 @@ from app.repositories.job_store import QcJobStore, llm_chain_models, llm_degrade
 from app.services.ac_filter import WordHit
 from app.services.demo_trace import OptionalLangfuseRun, OptionalLangSmithRun
 from common.db.models.llm_log import LLMCallLog
+from common.llm.constants import DASHSCOPE_COMPAT_BASE  # T44：单一常量源
 from common.prompt.ab import configure_ab, get_ab_config, select_version
 from common.prompt.loader import load_prompt_sections
 from common.prompt.telemetry import prompt_metadata
@@ -43,7 +44,6 @@ if get_ab_config(_QC_PROMPT_ID) is None:
 VALID_RULE_IDS = frozenset(f"R{i:02d}" for i in range(1, 16))
 _AMOUNT_RE = re.compile(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*(?:元|块|万|圆)?")
 _OVERDUE_KEYS = ("due_amount", "overdue_amount", "overdue_days", "ptp_amount")
-_DASHSCOPE_COMPAT_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 _DEEPSEEK_DEFAULT_BASE = "https://api.deepseek.com"
 InvokeFn = Callable[..., Awaitable[str]]
 
@@ -55,7 +55,7 @@ def _provider_for_model(model: str) -> tuple[str, str]:
     if (model or "").lower().startswith("deepseek"):
         base = (settings.DEEPSEEK_BASE_URL or _DEEPSEEK_DEFAULT_BASE).rstrip("/")
         return "deepseek", base
-    return "dashscope", _DASHSCOPE_COMPAT_BASE
+    return "dashscope", DASHSCOPE_COMPAT_BASE
 
 
 def _api_key_for(provider: str) -> str:

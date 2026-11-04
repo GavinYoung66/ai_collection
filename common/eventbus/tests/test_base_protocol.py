@@ -10,10 +10,9 @@ from common.eventbus.rocketmq import RocketMQEventBus
 
 
 def test_consumer_group_naming():
-    assert (
-        consumer_group_name("qc", "call.session.ended")
-        == "gid_qc_call_session_ended"
-    )
+    assert consumer_group_name("qc") == "gid_qc"
+    # 共享消费组：分组名与事件无关，数量不随事件数增长
+    assert consumer_group_name("qc") == consumer_group_name("qc")
 
 
 def test_rocketmq_adapter_satisfies_protocol():

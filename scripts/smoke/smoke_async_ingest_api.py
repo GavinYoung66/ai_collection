@@ -106,8 +106,9 @@ def search_hits_doc(token: str, doc_id: str) -> bool:
 def delete_doc(token: str, doc_id: str) -> None:
     try:
         http("DELETE", f"/kb/documents/{doc_id}", token)
-    except Exception:
-        pass
+    except Exception as exc:
+        # T40：清理失败留痕（冒烟脚本残留文档需人工清理），不再静默 pass。
+        print(f"[smoke] cleanup delete_doc {doc_id} failed: {exc}")
 
 
 def main() -> int:

@@ -273,7 +273,7 @@ class QcEventSubscriber:
         return {"status": "ok", "version": key, "strategy_type": payload.get("strategy_type")}
 
     async def listen(self, redis: Any | None = None) -> None:
-        """Subscribe via EventBus (group short-code ``qc`` → gid_qc_*).
+        """Subscribe via EventBus (group short-code ``qc`` → shared ``gid_qc``).
 
         All four inbound channels use the RocketMQ EventBus. ``redis`` is
         accepted for API compatibility but is not used as a bus transport.

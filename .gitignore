@@ -94,3 +94,18 @@ logs/
 # 仅忽略仓库根 ML 权重目录。禁止写成未锚定的 models/，否则会误伤
 # common/db/models/ 与 services/*/app/models/（Python ORM 包）。
 /models/
+
+# ── 隐藏文件/目录（点开头）统一忽略 ────────────────────
+# 所有点开头条目默认视为工具本地产物，不入库；
+# 下方白名单为仓库必需的已入库配置，必须保持跟踪。
+.*
+!/.gitignore
+!/.dockerignore
+!/.env.example
+!/.env.enc
+!/.gitleaks.toml
+!/.sops.yaml
+!/.github/
+# 显式声明常见工具目录（与通配规则语义相同，便于检索）
+.codeartsdoer/
+.screenshots/

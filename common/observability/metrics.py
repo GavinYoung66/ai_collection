@@ -80,6 +80,14 @@ def build_http_metrics(registry: CollectorRegistry) -> HTTPMetrics:
 
 
 # 模块级默认实例：导入即注册到默认 REGISTRY（生产 mount_metrics 复用，重复 mount 不冲突）
+#
+# 并发假设（T45，评审结论「可接受」）：
+# - 本行在模块导入时执行一次：Python 导入锁保证同一进程内模块体不重入，
+#   不会出现向默认 REGISTRY 重复注册同名指标（Duplicated timeseries）。
+# - 多 worker（uvicorn/gunicorn）为多进程部署：各进程独立导入本模块、各自
+#   持有实例与默认 REGISTRY，进程间无共享状态，不存在跨进程竞态。
+# - 单进程内 asyncio 事件循环单线程调度，Counter/Histogram/Gauge 的 inc/observe
+#   自身线程安全（prometheus_client 内部锁），并发请求共享本实例计数是预期语义。
 DEFAULT_HTTP_METRICS = build_http_metrics(REGISTRY)
 
 
@@ -156,6 +164,15 @@ class MetricsMiddleware:
 
         惰性派生（而非 mount 时点急切派生）可消除「mount_metrics 早于业务路由注册」导致的
         业务路径全部落入 __unmatched__ 的静默降级——首次请求时 app.routes 必已全部注册。
+
+        并发假设（T45，评审结论「无锁可接受」）：
+        - 缓存读写（check-then-act）之间无任何 await 挂起点；asyncio 单线程事件
+          循环下协程无法在本方法中途交错，故对同实例并发请求天然原子，无需加锁。
+        - 即便部署于多线程 ASGI（每线程独立 loop），竞态最坏结果是两个线程各自
+          重复派生同一 tuple 并先后赋值：tuple 整体赋值原子（GIL），结果幂等、
+          无中间态可见，仅浪费一次 O(路由数) 计算。
+        - 派生输入（app.routes / override / extra）在 mount 后只读，不存在
+          「缓存过期/失效」问题，故无需锁或 double-check。
         """
         if self._templates_cache is None:
             if self._templates_override is not None:

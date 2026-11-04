@@ -41,5 +41,5 @@
 - **依赖**：T20 会升级 aiohttp / python-multipart / python-jose / cryptography，并新增 `pip-audit` 门禁，需与根 `requirements.in`/`requirements.lock` 的单一全局依赖源约束保持一致（不得新增服务级旁路清单）。
 - **CI**：T32 要求 ruff/mypy 由 advisory 升级为阻断（涉及 `.github/workflows/ci.yml` 与根 `pyproject.toml`）；T20 新增依赖漏洞扫描 job/step。
 - **部署**：T36 引入 `docker-compose.prod.yml` 与 RocketMQ 持久化卷、端口收敛；T24 用 compose `profiles` 收敛 3 个 health 空壳服务。
-- **兼容性**：无对外 API 契约变更（不新增错误码）；T02/T21 若在生产开启认证，调用方需携带凭证，属**部署期行为收紧**，需在灰度说明中标注。
+- **兼容性**：无对外 API 契约变更（不新增错误码）；T02/T21 若在生产开启认证，调用方需携带凭证，属**部署期行为收紧**，需在灰度说明中标注。T35 网关工具响应新增 `{"shape","payload"}` 形状元数据（经 structuredContent 返回，外部 MCP 调用方可见），同属**部署期行为收紧**，需在灰度说明中通知调用方（S-001 修订，2026-11-03 批次 8 评审裁决）。
 - **文档**：T26 修正 README 架构图对「大模型网关」的表述（进程内编排器，非独立进程）。

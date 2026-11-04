@@ -179,7 +179,7 @@ async def _subscribe_qc_event(
             try:
                 await close()
             except Exception:
-                pass
+                logger.warning("eventbus aclose failed on shutdown", exc_info=True)
 
 
 async def _enrich_score_risk(payload: dict[str, Any]) -> dict[str, Any]:
@@ -618,7 +618,8 @@ async def verify_6_6() -> None:
             resp = await c.get(f"{rag_url}/health")
             rag_reachable = resp.status_code == 200
     except Exception:
-        pass
+        # T40：探活失败属预期离线路径（rag_reachable 置 False 走降级文案），留 debug 留痕。
+        logger.debug("rag health probe failed", exc_info=True)
     # 工单 trace 里的 rag_kb 真调用（judge 期间落盘）
     rag_calls: list[str] = []
     try:

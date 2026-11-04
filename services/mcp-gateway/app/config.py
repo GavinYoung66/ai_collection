@@ -1,6 +1,7 @@
 """mcp-gateway 配置。
 
-- 从环境变量读取（前缀 MCP_GATEWAY_），提供合理默认值，禁止硬编码；
+- 平台级参数统一继承 ``common.config.settings.Settings``；网关自有参数从环境变量
+  读取（前缀 MCP_GATEWAY_），提供合理默认值，禁止硬编码；
 - 下游地址默认值为 docker network 服务名（容器内禁止 host.docker.internal）；
   宿主机本地调测时经 .env / 环境变量覆盖为 http://localhost:<映射端口>；
 - 与任务 8.2 的 .env 变量对齐：MCP_GATEWAY_ENABLE_AUTH / MCP_GATEWAY_AUTH_API_KEY。
@@ -10,10 +11,12 @@ from __future__ import annotations
 import os
 
 from pydantic import model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
+
+from common.config.settings import Settings
 
 
-class GatewaySettings(BaseSettings):
+class GatewaySettings(Settings):
     # env_prefix + env_file 对齐 common/config/settings.py 约定：根 .env 为单一事实源，
     # 本地调测从项目根运行时读取 .env（如 MCP_GATEWAY_SERVICE_NAME）；容器部署经 compose
     # env_file: .env 注入同名环境变量，二者同源不漂移。
@@ -30,13 +33,10 @@ class GatewaySettings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 9000
 
-    # 运行环境 / 日志
-    ENV: str = "dev"
+    # 日志（ENV / ENABLE_AUTH 继承自平台 Settings，经 MCP_GATEWAY_ 前缀读取）
     LOG_LEVEL: str | None = None
 
-    # 鉴权开关（任务 6.x；默认关闭直通）。开启后 POST /mcp 与 GET /metrics 均需
-    # Authorization: Bearer <JWT|API Key>，/health 始终放行（见 app/auth.py）
-    ENABLE_AUTH: bool = False
+    # 网关自有鉴权 API Key（鉴权开关 ENABLE_AUTH 由平台 Settings 提供）
     AUTH_API_KEY: str = ""
 
     @model_validator(mode="after")

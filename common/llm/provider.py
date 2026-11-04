@@ -19,9 +19,8 @@ from common.llm.reliability import (
     resolve_service_name,
 )
 from common.resilience.breaker import BreakerRegistry, make_llm_breaker_key
+from common.llm.constants import DASHSCOPE_COMPAT_BASE  # T44：单一常量源
 from common.llm.transport import message_content_from_completions, post_chat_completions
-
-_DASHSCOPE_COMPAT_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 _per_key_breakers = BreakerRegistry(
     fail_max=settings.LLM_CIRCUIT_BREAKER_THRESHOLD,
@@ -77,7 +76,7 @@ async def _chat_once(
 ) -> str:
     api_key = require_real_secret(_resolve_api_key(), label="LLM_API_KEY / DASHSCOPE_API_KEY")
     body = await post_chat_completions(
-        base_url=_DASHSCOPE_COMPAT_BASE,
+        base_url=DASHSCOPE_COMPAT_BASE,
         api_key=api_key,
         model=model or settings.LLM_MODEL,
         messages=messages,

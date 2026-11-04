@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -109,6 +110,14 @@ def _proxy_endpoints() -> str:
     return os.getenv("ROCKETMQ_PROXY", _DEFAULT_PROXY)
 
 
+@dataclass
+class _GroupSubscription:
+    """一个服务共享消费组的注册表：tag → handler，一个消费循环服务全部事件。"""
+
+    handlers: dict[str, EventHandler] = field(default_factory=dict)
+    started: bool = False
+
+
 class RocketMQEventBus:
     """EventBus over RocketMQ Proxy (gRPC); topic + tag routing."""
 
@@ -138,6 +147,8 @@ class RocketMQEventBus:
             max_workers=2, thread_name_prefix="eventbus-rmq-pub"
         )
         self._tasks: list[asyncio.Task[None]] = []
+        # 共享消费组：gid_{svc} → {tag: handler}，消费组数量不随事件数增长（T34）
+        self._subscriptions: dict[str, _GroupSubscription] = {}
         self._producer = None
 
     @property
@@ -222,27 +233,44 @@ class RocketMQEventBus:
     ) -> None:
         # ``group`` may be full gid_* or a svc short code (qc/dp/cs).
         consumer_group = (
-            group
-            if group.startswith("gid_")
-            else consumer_group_name(group, event_name)
+            group if group.startswith("gid_") else consumer_group_name(group)
         )
-        task = asyncio.create_task(
-            self._consume_loop(event_name, consumer_group, handler),
-            name=f"eventbus-rmq-{event_name}-{consumer_group}",
-        )
-        self._tasks.append(task)
+        sub = self._subscriptions.get(consumer_group)
+        if sub is None:
+            sub = _GroupSubscription()
+            self._subscriptions[consumer_group] = sub
+            task = asyncio.create_task(
+                self._consume_group(consumer_group, sub.handlers),
+                name=f"eventbus-rmq-{consumer_group}",
+            )
+            self._tasks.append(task)
+        elif sub.started:
+            # 订阅 tag 在 consumer 启动后不可修改：新增事件需重启进程生效（T34）
+            logger.warning(
+                "eventbus_subscribe_after_consumer_start",
+                transport="rocketmq",
+                event_name=event_name,
+                consumer_group=consumer_group,
+            )
+        sub.handlers[event_name] = handler
         logger.info(
             "eventbus_subscribe",
             transport="rocketmq",
             event_name=event_name,
             consumer_group=consumer_group,
+            subscribed_tags=sorted(sub.handlers),
             max_retry_times=self._max_retry_times,
             topic=self._topic,
         )
 
-    async def _consume_loop(
-        self, event_name: str, consumer_group: str, handler: EventHandler
+    async def _consume_group(
+        self, consumer_group: str, handlers: dict[str, EventHandler]
     ) -> None:
+        """单个共享消费组循环：一次订阅所有 tag，按 envelope tag 分派 handler。"""
+        sub = self._subscriptions.get(consumer_group)
+        if sub is not None:
+            sub.started = True
+        tags = tuple(sorted(handlers))
         loop = asyncio.get_running_loop()
         # Q-001 裁决（纳入 T12 边界）：consumer 启动失败与 receive 失败同属
         # 「订阅永久停止、无自动重启」缺陷类 —— 启动失败同样记日志 + 退避重试，
@@ -251,7 +279,7 @@ class RocketMQEventBus:
         while True:
             try:
                 consumer = await loop.run_in_executor(
-                    self._executor, self._start_consumer, event_name, consumer_group
+                    self._executor, self._start_consumer, tags, consumer_group
                 )
                 break
             except Exception as exc:
@@ -260,7 +288,7 @@ class RocketMQEventBus:
                 logger.warning(
                     "eventbus_consumer_start_failed",
                     transport="rocketmq",
-                    event_name=event_name,
+                    event_names=list(tags),
                     consumer_group=consumer_group,
                     error=str(exc),
                     error_type=type(exc).__name__,
@@ -272,7 +300,7 @@ class RocketMQEventBus:
             logger.info(
                 "eventbus_consumer_start_recovered",
                 transport="rocketmq",
-                event_name=event_name,
+                event_names=list(tags),
                 consumer_group=consumer_group,
                 failures=startup_failures,
             )
@@ -293,7 +321,7 @@ class RocketMQEventBus:
                     logger.warning(
                         "eventbus_consumer_receive_failed",
                         transport="rocketmq",
-                        event_name=event_name,
+                        event_names=list(tags),
                         consumer_group=consumer_group,
                         error=str(exc),
                         error_type=type(exc).__name__,
@@ -306,7 +334,7 @@ class RocketMQEventBus:
                     logger.info(
                         "eventbus_consumer_receive_recovered",
                         transport="rocketmq",
-                        event_name=event_name,
+                        event_names=list(tags),
                         consumer_group=consumer_group,
                         failures=receive_failures,
                     )
@@ -320,9 +348,8 @@ class RocketMQEventBus:
                         self._handle_with_semaphore(
                             semaphore,
                             msg,
-                            event_name,
                             consumer_group,
-                            handler,
+                            handlers,
                             consumer,
                             loop,
                         )
@@ -337,7 +364,7 @@ class RocketMQEventBus:
                         logger.warning(
                             "eventbus_consume_batch_error",
                             transport="rocketmq",
-                            event_name=event_name,
+                            event_names=list(tags),
                             consumer_group=consumer_group,
                             error=str(result),
                             error_type=type(result).__name__,
@@ -347,23 +374,45 @@ class RocketMQEventBus:
         finally:
             await loop.run_in_executor(self._executor, consumer.shutdown)
 
+    def _resolve_handler(
+        self, msg: Any, handlers: dict[str, EventHandler]
+    ) -> tuple[str | None, EventHandler | None]:
+        """按消息 tag 命中同组 handler；tag 缺失时仅在单订阅场景回退。"""
+        tag = getattr(msg, "tag", None)
+        if not isinstance(tag, str):
+            tag = ""
+        handler = handlers.get(tag)
+        if handler is None and len(handlers) == 1:
+            tag, handler = next(iter(handlers.items()))
+            return tag, handler
+        return (tag or None), handler
+
     async def _handle_with_semaphore(
         self,
         semaphore: asyncio.Semaphore,
         msg: Any,
-        event_name: str,
         consumer_group: str,
-        handler: EventHandler,
+        handlers: dict[str, EventHandler],
         consumer: Any,
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         # 信号量内执行单条处理；parallelism=1 时退化为逐条串行 await
         async with semaphore:
+            event_name, handler = self._resolve_handler(msg, handlers)
+            if handler is None or event_name is None:
+                logger.warning(
+                    "eventbus_consume_unregistered_tag",
+                    transport="rocketmq",
+                    consumer_group=consumer_group,
+                    message_tag=event_name,
+                )
+                await loop.run_in_executor(self._executor, consumer.ack, msg)
+                return
             await self._handle_message(
                 msg, event_name, consumer_group, handler, consumer, loop
             )
 
-    def _start_consumer(self, event_name: str, consumer_group: str):
+    def _start_consumer(self, tags: tuple[str, ...], consumer_group: str):
         from rocketmq import (
             ClientConfiguration,
             Credentials,
@@ -372,10 +421,12 @@ class RocketMQEventBus:
         )
 
         conf = ClientConfiguration(self._endpoints, Credentials(), request_timeout=5)
+        # tag 过滤表达式：同一消费组一次订阅全部事件 tag（tag1 || tag2 ...）
+        expression = " || ".join(tags) if tags else "*"
         consumer = SimpleConsumer(
             conf,
             consumer_group,
-            subscription={self._topic: FilterExpression(event_name)},
+            subscription={self._topic: FilterExpression(expression)},
         )
         consumer.startup()
         return consumer

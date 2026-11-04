@@ -22,8 +22,9 @@ from app.config import settings
 from app.mcp.client import MCPClient
 from app.mcp.errors import MCPError, MCPPermissionDeniedError, MCPTimeoutError
 from app.mcp.gateway import MCPGateway
-from app.mcp.real_transport import RealMCPTransport, _LIST_SHAPE_TOOLS
+from app.mcp.real_transport import RealMCPTransport, _extract_payload
 from app.mcp.validate import MCPConfigError, validate_real_mcp_config
+from common.mcp.contract import typed_result
 
 
 def test_validate_real_mcp_skips_when_mock(monkeypatch):
@@ -52,23 +53,31 @@ def test_validate_real_mcp_ok_with_url(monkeypatch):
     validate_real_mcp_config()
 
 
-def test_list_shape_tools_contract():
-    """list 形状工具静态集合与网关 10 工具契约对齐。
+def test_no_static_shape_mirror():
+    """T35：客户端不得再维护「哪些工具返回 list」的静态镜像。"""
+    import inspect
 
-    mcp 1.30 FastMCP 对 list 返回值按「每元素一个 TextContent」编码，客户端无法
-    区分 list/dict；本集合必须与网关 TOOL_SPECS 中「返回 list 的工具」一致。
-    网关新增 list 工具时须同步更新这里，否则被误解析为 dict/空。
-    """
-    expected = {
-        ("rag_kb", "search_regulations"),
-        ("rag_kb", "search_response_templates"),
-        ("business_ticket", "query_history_tickets"),
-        ("business_ticket", "query_history_complaints"),
-        ("call_qc", "query_call_asr"),
-        ("call_qc", "query_qc_violations"),
-        ("call_qc", "query_qc_alerts"),
-    }
-    assert set(_LIST_SHAPE_TOOLS) == expected
+    import app.mcp.real_transport as rt
+
+    assert not hasattr(rt, "_LIST_SHAPE_TOOLS")
+    assert "_LIST_SHAPE_TOOLS" not in inspect.getsource(rt)
+
+
+def test_extract_payload_requires_shape_metadata():
+    """响应缺少 shape 元数据即契约违约，明确报错而非猜测形状。"""
+    class _NoMeta:
+        structuredContent = None
+
+    with pytest.raises(MCPError, match="shape metadata"):
+        _extract_payload(_NoMeta(), "rag_kb", "search_regulations")
+
+
+def test_extract_payload_rejects_mismatched_shape():
+    class _BadShape:
+        structuredContent = {"shape": "list", "payload": {"a": 1}}
+
+    with pytest.raises(MCPError, match="invalid gateway response shape"):
+        _extract_payload(_BadShape(), "rag_kb", "search_regulations")
 
 
 # ── Batch 5：RealMCPTransport 经 MCP SDK client 连独立 mcp-gateway ──
@@ -91,37 +100,39 @@ def _build_stub_gateway_app():
 
     mcp = FastMCP(name="stub-mcp-gateway", stateless_http=True)
 
-    async def rag_search(query: str, top_k: int = 5, ctx: Context = None) -> list:
-        return [{"doc_id": "REG-1", "content_snippet": query[:10], "trace": _meta(ctx, "trace_id")}]
+    async def rag_search(query: str, top_k: int = 5, ctx: Context = None) -> dict:
+        return typed_result([
+            {"doc_id": "REG-1", "content_snippet": query[:10], "trace": _meta(ctx, "trace_id")}
+        ])
 
     async def case_info(case_id: str, ctx: Context = None) -> dict:
-        return {
+        return typed_result({
             "case_id": case_id,
             "customer_name": "张三",
             "phone": "13800138000",  # 桩网关故意不脱敏，检验 Agent 第二道
             "trace": _meta(ctx, "trace_id"),
             "sess": _meta(ctx, "session_id"),
-        }
+        })
 
-    async def call_asr(case_id: str, ctx: Context = None) -> list:
-        return [
+    async def call_asr(case_id: str, ctx: Context = None) -> dict:
+        return typed_result([
             {"turn_id": 1, "speaker": "agent", "content": "你好"},
             {"turn_id": 2, "speaker": "user", "content": "投诉"},
-        ]
+        ])
 
     async def write_session(
         session_id: str, task_status: str = "", verdict: str = "",
         case_id: str = "", complaint_id: str = "", ctx: Context = None,
     ) -> dict:
-        return {"success": True, "persisted": True, "session_id": session_id,
-                "task_status": task_status}
+        return typed_result({"success": True, "persisted": True, "session_id": session_id,
+                             "task_status": task_status})
 
     async def boom(ctx: Context = None) -> dict:
         raise RuntimeError("downstream boom")
 
     async def slow(ctx: Context = None) -> dict:
         await asyncio.sleep(1.0)
-        return {"ok": True}
+        return typed_result({"ok": True})
 
     for fn, name in (
         (rag_search, "rag_kb.search_regulations"),

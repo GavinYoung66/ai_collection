@@ -6,8 +6,8 @@ Usage:
   python scripts/event_replay.py --event-id evt_xxx
   python scripts/event_replay.py --since 2026-09-27T00:00:00Z --until 2026-09-27T23:59:59Z
 
-DLQ topic naming: ``%DLQ%{consumer_group}``. Default group can be overridden
-with ``--consumer-group``.
+DLQ topic naming: ``%DLQ%{consumer_group}``. 消费组按服务共享（``gid_{svc}``），
+因此 DLQ 也按服务收敛；可用 ``--consumer-group`` 覆盖。
 
 T09（批次3评审 R-001/S-001）后本脚本仅保留 CLI 参数面，重放逻辑统一委托给
 ``RocketMQEventBus.replay_dlq`` 单一实现，避免与库内方法双实现漂移
@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--until", help="ISO8601 upper bound (inclusive)")
     parser.add_argument(
         "--consumer-group",
-        default=os.getenv("EVENT_REPLAY_GROUP", "gid_qc_etl_task_done"),
+        default=os.getenv("EVENT_REPLAY_GROUP", "gid_qc"),
         help="Consumer group whose %%DLQ%% topic to read",
     )
     parser.add_argument(

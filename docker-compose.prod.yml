@@ -1,0 +1,612 @@
+# 生产部署基线（T36 / tasks 8.4）
+#
+# 用法（生产主机）：
+#   docker compose -f docker-compose.prod.yml up -d --build
+#   查看状态：docker compose -f docker-compose.prod.yml ps
+#   停止：    docker compose -f docker-compose.prod.yml down
+#
+# 与 dev 编排（docker-compose.yml + docker-compose.dev.yml）的差异：
+#   1. 独立完整栈：基础设施 + 真实业务镜像，不依赖 dev override；
+#   2. 不含代码卷挂载、不含 uvicorn --reload，镜像即交付物；
+#   3. RocketMQ 主从：rocketmq-broker（SYNC_MASTER）+ rocketmq-broker-slave（SLAVE），
+#      消息落命名卷 rocketmq_store_master / rocketmq_store_slave（不留在容器可写层）；
+#   4. 端口收敛：仅 mcp-gateway（Agent 入口）与 complaint-service（外部业务 HTTP 入口）
+#      发布宿主机端口，其余服务与全部基础设施只走容器内网（expose），不再裸暴露 PG/Redis/
+#      Milvus/ES/MinIO/etcd/RocketMQ 端口；
+#   5. 密钥与口令一律由经 sops 解密的根 .env 注入，本文件不内置默认口令。
+#
+# 前置：
+#   - 根 `.env` 必须由 sops 解密后提供，并含 `ENV=prod`（本文件同时显式设置 ENV=prod，
+#     用于强制认证开启与占位密钥 fail-fast）以及 PG_PASSWORD / MINIO_* / JWT_SECRET /
+#     AES_KEY 等生产值；
+#   - 首次启动前准备 `models/bge-m3` 与 `models/bge-reranker-large`（embedding/rerank 只读挂载）；
+#   - complaint-service 开启 PG checkpointer 时需先执行 `make migrate`
+#     （0015_langgraph_checkpoint_tables），否则启动自动降级 MemorySaver。
+#
+# 刻意不含：call-service / case-service / review-service（T24 已定为 health 空壳，仅 dev profile
+# 使用）、prometheus / grafana（本地观测栈，生产监控由平台侧提供）、rag-dict-mock（dev 冒烟专用）。
+
+services:
+  # ============================ 基础设施（仅内网） ============================
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ai_collection
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?must set PG_PASSWORD in .env}
+      POSTGRES_DB: ai_collection
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./scripts/seed/init_pg.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    expose: ["5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_collection"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 2gb --maxmemory-policy allkeys-lru --appendonly yes
+    volumes:
+      - redis_data:/data
+    expose: ["6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.16
+    restart: unless-stopped
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
+    volumes:
+      - etcd_data:/etcd
+    expose: ["2379"]
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls=http://0.0.0.0:2379 --data-dir /etcd
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?must set MINIO_ACCESS_KEY in .env}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?must set MINIO_SECRET_KEY in .env}
+    command: minio server /data
+    volumes:
+      - minio_data:/data
+    expose: ["9000"]
+
+  milvus:
+    image: milvusdb/milvus:v2.4.13
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      # 生产 MinIO 口令由 .env 注入，Milvus 必须持有同一组凭据
+      MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:?must set MINIO_ACCESS_KEY in .env}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:?must set MINIO_SECRET_KEY in .env}
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
+    depends_on:
+      - etcd
+      - minio
+    volumes:
+      - milvus_data:/var/lib/milvus
+    expose: ["19530", "9091"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  elasticsearch:
+    image: ai_collection/elasticsearch-ik:8.11.3
+    restart: unless-stopped
+    build:
+      context: ./deploy/elasticsearch
+    # ES snapshot 仓库白名单路径：entrypoint(eswrapper) 会剥去首参后透传 -E 参数（db-backup D6）
+    command: ["eswrapper", "-Epath.repo=/usr/share/elasticsearch/backup"]
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+      # ES fs snapshot 仓库（db-backup 3.3）；生产应挂到持久备份盘
+      - ./backups/es:/usr/share/elasticsearch/backup
+    expose: ["9200"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  ocr-service:
+    restart: unless-stopped
+    build: ./deploy/ocr
+    expose: ["8200"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8200/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  # ============================ RocketMQ 5.x 主从 ============================
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.3.2
+    restart: unless-stopped
+    command: sh mqnamesrv
+    expose: ["9876"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/9876'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # 命名卷首次创建归 root，rocketmq 镜像以 uid 5000 运行；先 chown 再起 broker。
+  rocketmq-store-init:
+    image: apache/rocketmq:5.3.2
+    user: root
+    restart: "no"
+    entrypoint: ["bash", "-c"]
+    command:
+      - "chown -R 5000:5000 /store-master /store-slave && echo 'rocketmq store volumes ready'"
+    volumes:
+      - rocketmq_store_master:/store-master
+      - rocketmq_store_slave:/store-slave
+
+  rocketmq-broker:
+    image: apache/rocketmq:5.3.2
+    restart: unless-stopped
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+    volumes:
+      - ./deploy/rocketmq/broker-prod.conf:/home/rocketmq/rocketmq-5.3.2/conf/broker.conf:ro
+      - rocketmq_store_master:/home/rocketmq/store
+    depends_on:
+      rocketmq-namesrv:
+        condition: service_healthy
+      rocketmq-store-init:
+        condition: service_completed_successfully
+    command: sh mqbroker -n rocketmq-namesrv:9876 -c /home/rocketmq/rocketmq-5.3.2/conf/broker.conf
+    expose: ["10909", "10911", "10912"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/10911'"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 40s
+
+  rocketmq-broker-slave:
+    image: apache/rocketmq:5.3.2
+    restart: unless-stopped
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+    volumes:
+      - ./deploy/rocketmq/broker-slave.conf:/home/rocketmq/rocketmq-5.3.2/conf/broker.conf:ro
+      - rocketmq_store_slave:/home/rocketmq/store
+    depends_on:
+      rocketmq-namesrv:
+        condition: service_healthy
+      rocketmq-broker:
+        condition: service_healthy
+      rocketmq-store-init:
+        condition: service_completed_successfully
+    command: sh mqbroker -n rocketmq-namesrv:9876 -c /home/rocketmq/rocketmq-5.3.2/conf/broker.conf
+    expose: ["10909", "10911", "10912"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/10911'"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 40s
+
+  rocketmq-proxy:
+    image: apache/rocketmq:5.3.2
+    restart: unless-stopped
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+    volumes:
+      - ./deploy/rocketmq/rmq-proxy.json:/home/rocketmq/rocketmq-5.3.2/conf/rmq-proxy.json:ro
+    depends_on:
+      rocketmq-broker:
+        condition: service_healthy
+      # 从库不阻塞 Proxy 启动：从库故障时应降级服务而不是整体不可用
+      rocketmq-broker-slave:
+        condition: service_started
+      rocketmq-namesrv:
+        condition: service_healthy
+    command: sh mqproxy -pc /home/rocketmq/rocketmq-5.3.2/conf/rmq-proxy.json
+    expose: ["8080", "8081"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/8081'"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+
+  # 冷启动创建业务 Topic，避免 Proxy 路由缺失导致首条 publish/consume 失败
+  rocketmq-init-topics:
+    image: apache/rocketmq:5.3.2
+    restart: "no"
+    depends_on:
+      rocketmq-broker:
+        condition: service_healthy
+      # 从库掉线不阻塞建 Topic；主库负责首建，从库上线后随注册同步
+      rocketmq-broker-slave:
+        condition: service_started
+      rocketmq-namesrv:
+        condition: service_healthy
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        set -e
+        cd /home/rocketmq/rocketmq-5.3.2
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          if sh bin/mqadmin updateTopic -n rocketmq-namesrv:9876 -t csmp_business_events -c DefaultCluster -a +message.type=NORMAL; then
+            echo "rocketmq-init: topic csmp_business_events ready (NORMAL)"
+            exit 0
+          fi
+          sleep 3
+        done
+        echo "rocketmq-init: failed to create csmp_business_events" >&2
+        exit 1
+
+  # ============================ 检索链路（真实镜像） ============================
+  embedding:
+    restart: unless-stopped
+    build:
+      context: ./deploy/embedding
+      dockerfile: Dockerfile
+    environment:
+      # 模型只读挂载；镜像内不打包权重
+      BGE_M3_PATH: /models/bge-m3
+    volumes:
+      - ./models:/models:ro
+    expose: ["8100"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8100/health', timeout=3).status==200 else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+
+  rerank-service:
+    restart: unless-stopped
+    build:
+      context: ./deploy/rerank
+      dockerfile: Dockerfile
+    environment:
+      BGE_RERANK_PATH: /models/bge-reranker-large
+    volumes:
+      - ./models:/models:ro
+    expose: ["8101"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8101/health', timeout=3).status==200 else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+
+  # ============================ 业务服务 ============================
+  data-platform:
+    build:
+      context: .
+      dockerfile: services/data-platform/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ENV: prod
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      # 最小闭环事件（etl.task.done/qc.check.completed）与 qc-service 同实例同库；禁止 0 号库
+      QC_REDIS_DB: "3"
+      EVENT_BUS: ${EVENT_BUS:-rocketmq}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
+      COMPLAINT_SERVICE_URL: "http://complaint-service:8000/api/v1"
+      QC_SERVICE_URL: "http://qc-service:8000/api/v1"
+    expose: ["8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  rag-service:
+    build:
+      context: .
+      dockerfile: services/rag-service/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ENV: prod
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      MILVUS_HOST: milvus
+      MILVUS_PORT: "19530"
+      ES_HOST: elasticsearch
+      ES_PORT: "9200"
+      EMBEDDING_SERVICE_URL: http://embedding:8100
+      RERANK_SERVICE_URL: http://rerank-service:8101
+      KB_SUMMARY_ENABLED: "true"
+      KB_SUMMARY_ES_BOOST: "1.0"
+      KB_SUMMARY_MAX_LEN: "200"
+      KB_ASR_OPENING_TRIM_ENABLED: "false"
+      KB_LLM_ANSWER_ENABLED: ${KB_LLM_ANSWER_ENABLED:-true}
+      LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-30}
+      # 凭据由根 .env（sops 解密）注入，此处仅透传
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      LANGSMITH_ENABLED: ${LANGSMITH_ENABLED:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-ai_collection}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_TRACE_URL_TEMPLATE: ${LANGSMITH_TRACE_URL_TEMPLATE:-}
+      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL_DOCKER:-http://host.docker.internal:3000}
+      KB_IMAGE_EXTRACT_ENABLED: ${KB_IMAGE_EXTRACT_ENABLED:-true}
+      KB_TABLE_EXTRACT_ENABLED: ${KB_TABLE_EXTRACT_ENABLED:-false}
+      SKIP_ES_INIT: "0"
+      SKIP_MIGRATE: "0"
+      EVENT_BUS: ${EVENT_BUS:-rocketmq}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
+      # 镜像内模板位于 /app/conf（Dockerfile COPY services/rag-service/conf/ ./conf/）
+      PROMPT_TEMPLATES_DIR: /app/conf
+    expose: ["8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      milvus: { condition: service_healthy }
+      elasticsearch: { condition: service_healthy }
+      embedding: { condition: service_healthy }
+      rerank-service: { condition: service_healthy }
+      ocr-service: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  qc-service:
+    build:
+      context: .
+      dockerfile: services/qc-service/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ENV: prod
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      # 模板在镜像内 /app/app/prompt/templates
+      PROMPT_TEMPLATES_DIR: /app/app/prompt/templates
+      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL_DOCKER:-http://host.docker.internal:3000}
+      QC_RAG_SENSITIVE_BASE: http://rag-service:8000
+      QC_RAG_INITIAL_TIMEOUT: "3"
+      QC_RAG_HOURLY_CRON: "0 * * * *"
+      QC_DP_BASE: http://data-platform:8000
+      QC_DP_SESSION_PATH: /api/v1/data/sessions/{session_id}/qc-source
+      QC_DP_PENDING_QC_PATH: /api/v1/data/sessions:pending-qc
+      QC_DP_TIMEOUT: "5"
+      QC_LLM_MODEL: ${QC_LLM_MODEL:-deepseek-flash}
+      QC_LLM_TIMEOUT: "20"
+      QC_LLM_RETRY: "3"
+      QC_LLM_DEGRADE_AFTER: "3"
+      QC_DEDUP_WINDOW_MS: "30000"
+      QC_AUTO_START_ON_ENDED: "true"
+      QC_AUTO_COMPLEMENT_AFTER_ETL: "true"
+      QC_TEXT_READY_RETRY_SEC: "30"
+      QC_TEXT_READY_RETRY_MAX: "20"
+      QC_ALERT_LEVEL_MIN: high
+      QC_BATCH_MAX: "100"
+      QC_MOCK_LLM: "false"
+      QC_DEFAULT_ACTIVE_RULES_VERSION: v1.0
+      QC_R14_RAG_ENABLED: "true"
+      QC_REDIS_DB: "3"
+      EVENT_BUS: ${EVENT_BUS:-rocketmq}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
+    expose: ["8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      data-platform: { condition: service_started }
+      rag-service: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  # 独立 MCP 网关：对 Agent 暴露 MCP 协议（/mcp streamable-http）。
+  # 唯一对外发布的服务之一（宿主机 9009 → 容器 9000，9000 已被 minio 占用）。
+  mcp-gateway:
+    build:
+      context: .
+      dockerfile: services/mcp-gateway/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ENV: prod
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      MCP_GATEWAY_SERVICE_NAME: ${MCP_GATEWAY_SERVICE_NAME:-csmp}
+      # ENV=prod 下 auth_required 恒为 true；api key 由 .env 注入
+      MCP_GATEWAY_ENABLE_AUTH: ${MCP_GATEWAY_ENABLE_AUTH:-true}
+      MCP_GATEWAY_AUTH_API_KEY: ${MCP_GATEWAY_AUTH_API_KEY:-}
+      MCP_GATEWAY_RAG_SERVICE_URL: ${MCP_GATEWAY_RAG_SERVICE_URL:-http://rag-service:8000}
+      MCP_GATEWAY_DATA_PLATFORM_URL: ${MCP_GATEWAY_DATA_PLATFORM_URL:-http://data-platform:8000}
+      MCP_GATEWAY_QC_SERVICE_URL: ${MCP_GATEWAY_QC_SERVICE_URL:-http://qc-service:8000}
+    ports: ["9009:9000"]
+    depends_on:
+      rag-service: { condition: service_healthy }
+      qc-service: { condition: service_healthy }
+      data-platform: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  # 外部业务 HTTP 入口（唯一发布的业务服务端口）。
+  complaint-service:
+    build:
+      context: .
+      dockerfile: services/complaint-service/Dockerfile
+    restart: unless-stopped
+    env_file: services/complaint-service/config/prod.env
+    environment:
+      ENV: prod
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB: "6"
+      # 模板在镜像内 /app/app/prompt/templates
+      PROMPT_TEMPLATES_DIR: /app/app/prompt/templates
+      MCP_GATEWAY_MODE: standalone
+      MCP_GATEWAY_URL: ${MCP_GATEWAY_URL:-http://mcp-gateway:9000}
+      RAG_SERVICE_URL: ${RAG_SERVICE_URL:-http://rag-service:8000}
+      DATA_PLATFORM_URL: ${DATA_PLATFORM_URL:-http://data-platform:8000}
+      QC_SERVICE_URL: ${QC_SERVICE_URL:-http://qc-service:8000}
+      # 生产关闭 Mock（真实 MCP + 真实 LLM）
+      USE_MOCK_MCP: "false"
+      USE_MOCK_LLM: "false"
+      EVENT_BUS: ${EVENT_BUS:-rocketmq}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
+      EVENT_BUS_SVC: ${EVENT_BUS_SVC:-cs}
+      SIM_AUTO_REVIEW: "false"
+      LANGSMITH_ENABLED: ${LANGSMITH_ENABLED:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-ai_collection}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_TRACE_URL_TEMPLATE: ${LANGSMITH_TRACE_URL_TEMPLATE:-}
+      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL_DOCKER:-http://host.docker.internal:3000}
+    ports: ["8006:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rag-service: { condition: service_started }
+      mcp-gateway: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  # 常驻循环与事件订阅独立进程（T25）；HTTP 进程不承载后台循环。
+  complaint-worker:
+    build:
+      context: .
+      dockerfile: services/complaint-service/Dockerfile
+    restart: unless-stopped
+    env_file: services/complaint-service/config/prod.env
+    command: ["python", "-m", "app.worker"]
+    environment:
+      ENV: prod
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB: "6"
+      PROMPT_TEMPLATES_DIR: /app/app/prompt/templates
+      MCP_GATEWAY_MODE: standalone
+      MCP_GATEWAY_URL: ${MCP_GATEWAY_URL:-http://mcp-gateway:9000}
+      RAG_SERVICE_URL: ${RAG_SERVICE_URL:-http://rag-service:8000}
+      DATA_PLATFORM_URL: ${DATA_PLATFORM_URL:-http://data-platform:8000}
+      QC_SERVICE_URL: ${QC_SERVICE_URL:-http://qc-service:8000}
+      USE_MOCK_MCP: "false"
+      USE_MOCK_LLM: "false"
+      EVENT_BUS: ${EVENT_BUS:-rocketmq}
+      ROCKETMQ_NAMESRV: ${ROCKETMQ_NAMESRV:-rocketmq-namesrv:9876}
+      ROCKETMQ_PROXY: ${ROCKETMQ_PROXY:-rocketmq-proxy:8081}
+      EVENT_BUS_SVC: ${EVENT_BUS_SVC:-cs}
+      SIM_AUTO_REVIEW: "false"
+      LANGSMITH_ENABLED: ${LANGSMITH_ENABLED:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-ai_collection}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_TRACE_URL_TEMPLATE: ${LANGSMITH_TRACE_URL_TEMPLATE:-}
+      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL_DOCKER:-http://host.docker.internal:3000}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rag-service: { condition: service_started }
+      mcp-gateway: { condition: service_started }
+    healthcheck:
+      # 无 HTTP 端点：以模块可导入且进程存活作为健康信号。
+      test: ["CMD-SHELL", "python -c 'import app.worker'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  pg_data:
+  redis_data:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  es_data:
+  rocketmq_store_master:
+  rocketmq_store_slave:
