@@ -3,6 +3,10 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+import structlog
+
+logger = structlog.get_logger()
+
 
 def build_evidence_refs(
     *id_lists: Iterable[Any],
@@ -33,7 +37,9 @@ def _as_mapping(obj: Any) -> dict[str, Any]:
     if hasattr(obj, "model_dump"):
         try:
             return obj.model_dump(mode="json")
-        except Exception:
+        except Exception as e:
+            # W4/9.6：静默吞异常留痕（debug 级：业务允许忽略的降级路径）
+            logger.debug("evidence_refs_model_dump_failed", error_type=type(e).__name__, exc_info=True)
             return {}
     return {}
 

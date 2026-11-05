@@ -855,6 +855,10 @@ class ComplaintService:
             if snap and snap.values:
                 final = dict(snap.values)
         except Exception:  # noqa: BLE001
+            # T71：快照读取失败降级为空 final——影响产出完整性，值得暴露
+            logger.warning(
+                "snapshot_read_failed_use_empty_final", exc_info=True
+            )
             final = {}
 
         if interrupt_err is not None or graph_error is not None:

@@ -120,7 +120,13 @@ async def lifespan(app: FastAPI):
         # 这不是降级），取反会误报 postgres，让监控以为断点已持久化。
         app.state.checkpointer_kind = checkpointer_kind()
         app.state.pg_degraded = is_checkpointer_degraded()
-    except Exception:  # noqa: BLE001 — 降级启动，不阻断服务
+    except Exception as exc:  # noqa: BLE001 — 降级启动，不阻断服务
+        # T71：checkpointer 降级到 memory——持久化语义丢失，值得暴露
+        logger.warning(
+            "checkpointer_init_degraded_to_memory",
+            error=str(exc),
+            exc_info=True,
+        )
         app.state.checkpointer = None
         app.state.checkpointer_kind = "memory"
         app.state.pg_degraded = True
@@ -130,7 +136,9 @@ async def lifespan(app: FastAPI):
     try:
         if not await _probe_mcp_gateway():
             app.state.mcp_degraded = True
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # T71：MCP 探活异常按降级处理——health 假绿风险，值得暴露
+        logger.warning("mcp_probe_failed_mark_degraded", exc_info=True)
         app.state.mcp_degraded = True
 
     yield

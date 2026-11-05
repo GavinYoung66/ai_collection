@@ -31,7 +31,10 @@ _SCAN_EXCLUDE_DIRS = {
 # "except Exception:  # noqa 注释 + 换行 pass" 形态（行尾注释被 \s* 吞掉前
 # 换行已断开匹配），13+ 处带 noqa 注释的静默 pass 成为守卫盲区。现允许
 # except 行尾携带注释（#[^\n]*），其余语义不变。
-_SILENT_PASS = re.compile(r"except Exception:\s*(?:#[^\n]*)?\n\s*pass\b")
+# 批次修复 W5 强化：静默形态扩展覆盖 `continue`（asset_extractor 曾以
+# "except Exception: continue" 绕过守卫）；return 固定值形态由人工评审覆盖，
+# 不纳入正则（误报面过大）。
+_SILENT_PASS = re.compile(r"except Exception:\s*(?:#[^\n]*)?\n\s*(?:pass|continue)\b")
 
 
 def _spy_logger(monkeypatch, target_mod) -> Mock:

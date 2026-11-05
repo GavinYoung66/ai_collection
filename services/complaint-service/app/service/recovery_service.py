@@ -94,7 +94,14 @@ class RecoveryService:
             state = json.loads(raw)
             state["model_degraded"] = True
             return True, None
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            # T71：恢复 JSON 损坏 → fallback 不可用，降级语义值得暴露
+            logger.warning(
+                "recovery_fallback_json_corrupted",
+                session_id=session_id,
+                error=str(exc),
+                exc_info=True,
+            )
             return False, "pending_review"
 
     def cleanup_stale(self, sessions: dict[str, dict]) -> list[str]:

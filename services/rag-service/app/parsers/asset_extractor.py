@@ -161,7 +161,14 @@ class AssetExtractor:
                             binary, mime = _scale_image(pix.tobytes("png"))
                             assets.append({"type": "image", "page": page_no, "binary": binary, "mime": mime})
                         except Exception:
-                            continue  # 单张失败跳过
+                            # T72：单张位图失败跳过（允许忽略），不静默——留 debug 定位
+                            logger.debug(
+                                "asset_bitmap_extract_failed",
+                                source=str(file_path),
+                                page=page_no,
+                                exc_info=True,
+                            )
+                            continue
                     # 2) 矢量图经渲染接口转位图（仅渲染绘制区域，保守启发式防整页文本重复）
                     try:
                         drawings = page.get_drawings()
@@ -177,6 +184,13 @@ class AssetExtractor:
                                 binary, mime = _scale_image(pix.tobytes("png"))
                                 assets.append({"type": "image", "page": page_no, "binary": binary, "mime": mime})
                     except Exception:
+                        # T72：矢量图渲染失败跳过本页（允许忽略），不静默
+                        logger.debug(
+                            "asset_vector_render_failed",
+                            source=str(file_path),
+                            page=page_no,
+                            exc_info=True,
+                        )
                         continue
         # 3) 内嵌表格
         if extract_tables:
@@ -214,6 +228,12 @@ class AssetExtractor:
                     binary, mime = _scale_image(raw)
                     assets.append({"type": "image", "page": 0, "binary": binary, "mime": mime})
                 except Exception:
+                    # T72：单张 docx 图片失败跳过（允许忽略），不静默
+                    logger.debug(
+                        "asset_docx_image_extract_failed",
+                        source=str(file_path),
+                        exc_info=True,
+                    )
                     continue
             # 浮动/环绕图等不在 inline_shapes 中，补扫 word/media（与上一步按 blob 去重）
             try:
@@ -238,8 +258,13 @@ class AssetExtractor:
                                 error_type=type(e).__name__,
                             )
                             continue
-            except (OSError, zipfile.BadZipFile):
-                pass
+            except (OSError, zipfile.BadZipFile) as e:
+                # W4/批8同族：docx 打开失败（损坏/不可读）不中断提取，留痕不静默
+                logger.debug(
+                    "docx_open_failed",
+                    error_type=type(e).__name__,
+                    exc_info=True,
+                )
         if table_extract_enabled():
             # 表格：doc.tables（DOCX 无页码概念，page=0）
             for table in doc.tables:
@@ -277,6 +302,13 @@ class AssetExtractor:
                             assets.append(
                                 self._build_table_asset(i, rows, location=slide_title or None)
                             )
-                except Exception:
+                except Exception as e:
+                    # W4/批8同族：单 shape 资产提取失败跳过该 shape，留痕不静默
+                    logger.debug(
+                        "pptx_shape_asset_skipped",
+                        page=i,
+                        error_type=type(e).__name__,
+                        exc_info=True,
+                    )
                     continue
         return assets

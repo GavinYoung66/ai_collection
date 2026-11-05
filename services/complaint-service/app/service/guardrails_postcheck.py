@@ -15,7 +15,11 @@ import re
 from enum import Enum
 from typing import Any, Callable, Optional
 
+import structlog
+
 from common.guardrails import postcheck_text
+
+logger = structlog.get_logger()
 
 # 合法 verdict 四值（与 app.models.state.VerdictType 对齐，不含 normal）
 _VALID_VERDICTS = {
@@ -160,7 +164,9 @@ def postcheck(
             try:
                 current = dict(retry_fn())
                 continue
-            except Exception:
+            except Exception as e:
+                # W4/9.6：静默吞异常留痕（debug 级：重试失败即走兜底，业务允许忽略）
+                logger.debug("guardrails_retry_failed", attempt=attempt, error_type=type(e).__name__, exc_info=True)
                 break
         break
 
