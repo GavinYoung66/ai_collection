@@ -302,8 +302,16 @@ def test_real_transport_does_not_reference_inprocess_bridges():
 
 
 def test_gateway_health_check_probes_gateway(monkeypatch, stub_gateway_base):
-    """真路径同步 health_check：HTTP GET 网关 /health，4 server 状态一致。"""
+    """真路径同步 health_check：HTTP GET 网关 /health，4 server 状态一致。
+
+    本用例桩网关只能绑 127.0.0.1，而 T85 SSRF 单源无条件拒回环（防护本身正确，
+    本地地址字面量全部被阻断，无法换绑绕开）——此处窄域 shim 掉探活点的出站校验，
+    生产代码零改动；SSRF 单源行为由 mcp-gateway test_t85_ssrf_single_source 独立覆盖。
+    """
     monkeypatch.setattr(settings, "USE_MOCK_MCP", False)
+    monkeypatch.setattr(
+        "app.mcp.gateway.check_outbound_url", lambda url, **kwargs: None
+    )
     gw = MCPGateway(gateway_url=stub_gateway_base)
     health = gw.health_check()
     assert set(health) == {"rag_kb", "business_ticket", "data_platform", "call_qc"}

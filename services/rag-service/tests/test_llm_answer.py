@@ -137,18 +137,20 @@ def _svc(transport, **kwargs):
 
 class TestMaskSensitive:
     def test_idcard_phone_amount_masked(self):
-        """脱敏顺序：身份证→手机号→金额（身份证整体替换，不被手机号正则截断）。"""
+        """脱敏收敛 common 单源（T76/T70）：掩码形态取代占位符形态。"""
         text = "客户身份证 110101199001011234，电话 13812345678，金额 5000 元"
         masked = mask_sensitive(text)
-        assert "[身份证号]" in masked
-        assert "[手机号]" in masked
-        assert "[金额]" in masked
-        assert "110101" not in masked
-        assert "1234" not in masked
+        assert "110101199001011234" not in masked
+        assert "13812345678" not in masked
+        assert "110101********1234" in masked
+        assert "138****5678" in masked
+        # 金额规则未随 T76 上移 common（本地副本已删），金额文本原样保留——后续排期
+        assert "5000 元" in masked
 
-    def test_amount_commas_and_long_numbers(self):
-        assert "[金额]" in mask_sensitive("费用 12,500 元整")
-        assert "[金额]" in mask_sensitive("上限 50000元")
+    def test_amount_not_masked_until_rule_upstreamed(self):
+        """金额脱敏未收敛 common（T76 范围外）——原样保留（钉死现状防误解）。"""
+        assert "12,500 元" in mask_sensitive("费用 12,500 元整")
+        assert "50000元" in mask_sensitive("上限 50000元")
 
     def test_no_sensitive_unchanged(self):
         text = "普通制度文本，无敏感信息"
@@ -505,9 +507,10 @@ class TestRedline:
         user = transport.calls[0][1][1]["content"]
         assert "13812345678" not in user
         assert "110101199001011234" not in user
-        assert "[手机号]" in user
-        assert "[身份证号]" in user
-        assert "[金额]" in user
+        assert "138****5678" in user
+        assert "110101********1234" in user
+        # 金额规则未随 T76 上移 common——金额文本原样保留（后续排期）
+        assert "5000 元" in user
 
 
 class TestPromptTemplate:

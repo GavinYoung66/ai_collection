@@ -1,6 +1,7 @@
 """FastAPI 依赖注入 + 统一响应助手。"""
 import os
 import tempfile
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -16,6 +17,7 @@ from app.settings import settings
 from common.db.session import async_session_factory
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
+from common.security.rbac import verify_token
 from common.trace.middleware import get_trace_id
 from app.services.asr_client import ASRClient
 from app.services.llm_service import LLMService
@@ -67,6 +69,37 @@ async def get_redis() -> Redis:
     return _redis_client
 
 
+# T77：会话身份绑定（owner 归属）内存 store——session_id → (owner, bound_at)。
+# owner 为内存 store 追加字段，无持久化 schema 变更（design 2.3.2）；
+# 匿名会话 TTL 缩短（1h 过期自动失效），登录 owner 绑定 24h。
+_SESSION_OWNERS: dict[str, tuple[str, float]] = {}
+_OWNER_TTL_SECONDS = 24 * 3600.0
+_ANON_SESSION_TTL_SECONDS = 3600.0
+
+
+def _verified_sub(request: Request) -> str | None:
+    """验签后的 sub（T68 同款验签模式）；匿名/伪造 token 返回 None。"""
+    auth = request.headers.get("authorization") or ""
+    if auth.startswith("Bearer "):
+        payload = verify_token(auth[len("Bearer "):].strip())
+        if payload and payload.get("sub"):
+            return str(payload["sub"])
+    return None
+
+
+def _owner_of(sid: str) -> str | None:
+    """读取 owner 绑定（含 TTL 过期清理：匿名 1h / 登录 24h）。"""
+    entry = _SESSION_OWNERS.get(sid)
+    if entry is None:
+        return None
+    owner, bound_at = entry
+    ttl = _ANON_SESSION_TTL_SECONDS if owner == "anon" else _OWNER_TTL_SECONDS
+    if time.time() - bound_at > ttl:
+        _SESSION_OWNERS.pop(sid, None)
+        return None
+    return owner
+
+
 def generate_session_id() -> str:
     """生成 ULID 字符串作为会话 ID（时间有序、26 字符 base32）。"""
     return str(ulid.new())
@@ -76,11 +109,26 @@ def get_session_id(request: Request) -> str:
     """读取请求头 X-Session-Id；缺失则生成新 ULID。
 
     - 显式截断至 64 字符上限，与 kb_search_logs.session_id VARCHAR(64) 对齐。
+    - T77：登录态会话与 payload.sub 绑定（owner 归属）——显式提供的 session_id
+      已绑定其他用户时拒绝（B 用户带 A 的 session_id 读不到 A 的历史）；
+      匿名会话保持 ULID 弱保护并缩短 TTL（1h，内存条目过期自动失效）。
     """
     raw = request.headers.get("X-Session-Id")
-    if raw:
-        return raw.strip()[:64]
-    return generate_session_id()
+    sid = raw.strip()[:64] if raw else generate_session_id()
+    sub = _verified_sub(request)
+    if sub:
+        owner = _owner_of(sid)
+        if owner is None or owner == "anon":
+            _SESSION_OWNERS[sid] = (sub, time.time())  # 首次绑定/匿名升级为登录
+        elif owner != sub:
+            raise BizException(
+                ErrorCode.A2002, "session 归属校验失败（owner 不匹配）"
+            )
+    elif raw:
+        # 匿名显式 session_id：登记弱保护条目（TTL 1h 缩短）
+        if _owner_of(sid) is None:
+            _SESSION_OWNERS[sid] = ("anon", time.time())
+    return sid
 
 
 def get_milvus_client() -> MilvusClient:
@@ -224,6 +272,10 @@ def success_response(data, message: str = "success") -> dict:
     }
 
 
+# T78：上传流式分块大小——分块读取累计计数，超限提前中断（防内存 DoS）
+_UPLOAD_CHUNK_SIZE = 1024 * 1024
+
+
 async def save_upload_to_staging(file: UploadFile, doc_id: uuid.UUID) -> Path:
     """保存上传文件到异步入库 staging 目录（后台任务结束后删除）。"""
     suffix = Path(file.filename or "").suffix
@@ -247,13 +299,21 @@ async def save_upload_to_staging(file: UploadFile, doc_id: uuid.UUID) -> Path:
     staging_dir.mkdir(parents=True, exist_ok=True)
     dest = staging_dir / f"{doc_id}{suffix}"
 
-    content = await file.read()
-    if len(content) > max_size:
-        raise BizException(
-            ErrorCode.B0001,
-            f"上传文件超过大小上限 {max_size // (1024 * 1024)}MB",
-        )
-    dest.write_bytes(content)
+    # T78：流式分块读取累计计数——超限提前中断（MUST NOT 全量读入内存后再校验）
+    written = 0
+    try:
+        with dest.open("wb") as out:
+            while chunk := await file.read(_UPLOAD_CHUNK_SIZE):
+                written += len(chunk)
+                if written > max_size:
+                    raise BizException(
+                        ErrorCode.B0001,
+                        f"上传文件超过大小上限 {max_size // (1024 * 1024)}MB",
+                    )
+                out.write(chunk)
+    except Exception:
+        dest.unlink(missing_ok=True)  # 部分写入残留清理
+        raise
     return dest
 
 
@@ -292,27 +352,31 @@ async def save_upload_file(file: UploadFile) -> Path:
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     try:
-        content = await file.read()
-        if len(content) > max_size:
-            logger.info(
-                "upload_size_check_rejected",
-                filename=filename,
-                max_size=max_size,
-                actual_size=len(content),
-                check_source="read_bytes",
-            )
-            raise BizException(
-                ErrorCode.B0001,
-                f"上传文件超过大小上限 {max_size // (1024 * 1024)}MB",
-            )
+        # T78：流式分块读取累计计数——超限提前中断（MUST NOT 全量读入内存后再校验）
+        written = 0
+        with open(tmp.name, "wb") as out:
+            while chunk := await file.read(_UPLOAD_CHUNK_SIZE):
+                written += len(chunk)
+                if written > max_size:
+                    logger.info(
+                        "upload_size_check_rejected",
+                        filename=filename,
+                        max_size=max_size,
+                        actual_size=written,
+                        check_source="streaming_read",
+                    )
+                    raise BizException(
+                        ErrorCode.B0001,
+                        f"上传文件超过大小上限 {max_size // (1024 * 1024)}MB",
+                    )
+                out.write(chunk)
+        tmp.close()
         logger.info(
             "upload_size_check_passed",
             filename=filename,
             max_size=max_size,
-            actual_size=len(content),
+            actual_size=written,
         )
-        tmp.write(content)
-        tmp.close()
     except Exception:
         tmp.close()
         os.unlink(tmp.name)

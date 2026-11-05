@@ -16,6 +16,7 @@ import structlog
 
 from app.config import settings
 from app.mcp.client import MCPClient
+from common.security.ssrf import check_outbound_url
 
 logger = structlog.get_logger()
 
@@ -109,8 +110,13 @@ class MCPGateway:
             return dict(self._health)
 
         try:
-            resp = httpx.get(f"{base}/health", timeout=3.0)
-            if resp.status_code == 200:
+            probe_url = f"{base}/health"
+            # T85：出站校验——失败记 error 降级 unavailable（不中断主流程）
+            reason = check_outbound_url(probe_url)
+            if reason is not None:
+                logger.error("outbound_url_rejected", url=probe_url, reason=reason)
+                status = "unavailable"
+            elif (resp := httpx.get(probe_url, timeout=3.0)).status_code == 200:
                 status = "healthy"
             elif resp.status_code in (401, 403):
                 status = "degraded"
