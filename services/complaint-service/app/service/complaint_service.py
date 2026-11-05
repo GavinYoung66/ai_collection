@@ -30,6 +30,7 @@ from app.service.rate_limiter import rate_limiter
 from app.service.security import prepare_agent_log
 from app.service.session_service import session_service
 from common.utils.spawn import spawn_tracked
+from common.utils.time_parse import parse_epoch_or_datetime
 
 logger = structlog.get_logger()
 
@@ -1059,10 +1060,16 @@ class ComplaintService:
         events = list(rec.get("trace_events") or [])
 
         def _sort_key(e: dict) -> tuple:
-            ts = e.get("started_at")
-            if hasattr(ts, "timestamp"):
-                return (ts.timestamp(), e.get("name") or "")
-            return (str(ts or ""), e.get("name") or "")
+            # W3/9.5：时间解析单源收敛（spec §6.2）——naive 按 Asia/Shanghai
+            # 解释，消除 .timestamp() 依赖进程本地时区的隐式行为；
+            # None/非法值排最后（不影响可解析条目相对顺序）
+            try:
+                aware = parse_epoch_or_datetime(e.get("started_at"))
+            except ValueError:
+                aware = None
+            if aware is None:
+                return (float("inf"), e.get("name") or "")
+            return (aware.timestamp(), e.get("name") or "")
 
         events_sorted = sorted(events, key=_sort_key)
         return {

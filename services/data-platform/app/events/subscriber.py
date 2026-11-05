@@ -484,17 +484,22 @@ class QcCheckSubscriber:
                 )
             await self.handle_envelope(envelope)
 
-        await bus.subscribe(CHANNEL_QC_CHECK_COMPLETED, "dp", _qc_handler)
-        # 消费组短名 dp → gid_dp（服务级共享消费组，tag 过滤区分事件）
-        await bus.subscribe(CHANNEL_COMPLAINT_RESULT_READY, "dp", _result_ready_handler)
+        # T84：subscribe 循环纳入 try/finally 关停闭环——subscribe 期间取消
+        # 也回收 consumer 线程与 producer（此前仅 while 阶段取消才 aclose）。
         try:
+            await bus.subscribe(CHANNEL_QC_CHECK_COMPLETED, "dp", _qc_handler)
+            # 消费组短名 dp → gid_dp（服务级共享消费组，tag 过滤区分事件）
+            await bus.subscribe(
+                CHANNEL_COMPLAINT_RESULT_READY, "dp", _result_ready_handler
+            )
             while True:
                 await asyncio.sleep(3600)
         except asyncio.CancelledError:
+            raise
+        finally:
             close = getattr(bus, "aclose", None)
             if close is not None:
                 await close()
-            raise
 
     async def listen_forever(self, redis: Any | None = None) -> None:
         while True:

@@ -4,7 +4,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+import structlog
+
 from app.service.security import mask_before_persist
+from common.utils.time_parse import BUSINESS_TZ, parse_naive_or_aware
+
+logger = structlog.get_logger()
 
 _CATEGORY_RANK = {
     "MCP": 0,
@@ -16,13 +21,18 @@ _CATEGORY_RANK = {
 
 
 def _ts_key(started_at: Any) -> float:
-    if isinstance(started_at, datetime):
-        return started_at.timestamp()
+    """T82：时间线排序键——naive 统一绑业务时区（Asia/Shanghai，time_parse 单源）。
+
+    消除按进程本地时区 ``.timestamp()`` 造成的判责证据时间线 8 小时错位；
+    None / 非法时间值排最后（不影响可解析条目的相对顺序）。
+    """
     if started_at is None:
         return float("inf")
     try:
-        return datetime.fromisoformat(str(started_at).replace("Z", "+00:00")).timestamp()
-    except Exception:
+        return parse_naive_or_aware(started_at, default_tz=BUSINESS_TZ).timestamp()
+    except Exception as e:
+        # W4/9.6：静默吞异常留痕（debug 级：非法时间值排最后，业务允许忽略）
+        logger.debug("ordered_evidence_ts_parse_failed", error_type=type(e).__name__, exc_info=True)
         return float("inf")
 
 

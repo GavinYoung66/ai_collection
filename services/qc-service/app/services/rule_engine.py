@@ -4,12 +4,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from app.integrations.qc_session import QCSession, QcTurn, map_speaker
 from app.seeds.qc_rules_v1 import V1_SEED
 from app.services.ac_filter import WordHit
+from common.utils.time_parse import parse_naive_or_aware
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 RULES_IN_ROUND = (
@@ -134,14 +136,14 @@ def _snapshot(session: Any) -> Mapping[str, Any] | None:
 
 
 def _parse_dt(value: Any) -> datetime | None:
+    """T81：收敛至 time_parse 单源（naive=Shanghai 业务时区约定）。
+
+    保留函数名与既有调用点零改动；非法 ISO 串抛 ValueError（与现状
+    fromisoformat 同源行为）；aware 统一转 Shanghai 时区表示（时刻不变）。
+    """
     if value is None or value == "":
         return None
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=_SHANGHAI)
+    dt = parse_naive_or_aware(value, default_tz=_SHANGHAI)
     return dt.astimezone(_SHANGHAI)
 
 
@@ -367,10 +369,22 @@ class RuleEngine:
         ptp = snap.get("ptp_amount")
         if due is None or ptp is None:
             return [], True
-        due_f = float(due)
-        if due_f == 0:
+        try:
+            # T66：金额比较用 Decimal(str(x)) 归一——消除 float 二进制近似
+            # 造成的 20% 偏差误判；T83：ptp 非法值（非数值字符串）视为缺失
+            # 跳过，MUST NOT 中断整条规则链（上游捕获会放大为 A2001 全量失败）
+            due_d = Decimal(str(due))
+            ptp_d = Decimal(str(ptp))
+        except (InvalidOperation, TypeError, ValueError):
             return [], True
-        if abs(float(ptp) - due_f) / due_f > 0.20:
+        # W1/9.6：NaN/Infinity 等非有限值同样视为缺失跳过——Decimal("nan")
+        # 解析合法但比较抛 InvalidOperation 中断规则链；Decimal("Infinity")
+        # 会恒触发 20% 偏差误命中 R08
+        if not (due_d.is_finite() and ptp_d.is_finite()):
+            return [], True
+        if due_d == 0:
+            return [], True
+        if abs(ptp_d - due_d) / due_d > Decimal("0.20"):
             turn = turns[0] if turns else None
             return [self._hit("R08", spec, turn, speaker="agent", text=str(ptp))], False
         return [], False
@@ -464,8 +478,19 @@ class RuleEngine:
         if due is None and days is None:
             return [], True
         hits: list[WordHit] = []
-        due_norm = None if due is None else str(int(float(due)))
-        days_norm = None if days is None else str(int(days))
+
+        def _norm_int(raw: Any) -> str | None:
+            # W7/9.1：与 _r08 同口径——Decimal(str(x)) 归一 + 非有限值视为
+            # 缺失（float("nan")/inf 会在 int(float(x)) 处抛 ValueError/
+            # OverflowError 中断规则链）
+            try:
+                d = Decimal(str(raw))
+            except (InvalidOperation, TypeError, ValueError):
+                return None
+            return str(int(d)) if d.is_finite() else None
+
+        due_norm = _norm_int(due) if due is not None else None
+        days_norm = _norm_int(days) if days is not None else None
         for turn in turns:
             if turn["speaker"] != "agent":
                 continue
