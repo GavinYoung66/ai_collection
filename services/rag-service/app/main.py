@@ -10,6 +10,7 @@ from common.config.logging import setup_logging
 from common.errors.handlers import register_exception_handlers
 from common.observability.metrics import mount_metrics
 from common.trace.middleware import TraceMiddleware
+from common.utils.spawn import spawn_tracked
 from app.api.health import router as health_router, probe_health
 from app.api.documents import router as documents_router
 from app.api.search import router as search_router
@@ -227,7 +228,8 @@ async def _resume_backfill_pending() -> None:
                     for c in chunks
                 ]
             # DB session 已随 async with 退出关闭；补索引仅用 ES + Redis
-            asyncio.create_task(backfill_es_index_task(es, redis, es_docs, uid))
+            # T53：spawn_tracked 强引用持有，防补索引任务 GC 逃逸后 pending 残留
+            spawn_tracked(backfill_es_index_task(es, redis, es_docs, uid))
         except Exception as e:
             logger.warning(
                 "backfill_resume_item_failed", doc_id=doc_id_str, error=str(e)
