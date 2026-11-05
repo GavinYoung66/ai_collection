@@ -362,16 +362,31 @@ async def _sweep_stale_ingest_jobs() -> None:
 
 
 async def shutdown():
-    """幂等关闭全局客户端（embed/rerank/milvus/es/redis）。
+    """幂等关闭全局客户端（embed/rerank/milvus/es/redis + T60 三组）。
 
     - 各客户端 close 已实现幂等；单点失败仅 warning，不影响其余关闭。
+    - T60 shutdown 资源清单（`资源名 → 释放入口`）：
+      # _es_client → await _es_client.close()
+      # _embed_client → await _embed_client.close()
+      # _rerank_client → await _rerank_client.close()
+      # _milvus_client → await _milvus_client.close()
+      # _redis_client → await _redis_client.aclose()
+      # _ocr_client → await _ocr_client.close()（T60 新增）
+      # _asr_client → await _asr_client.aclose()（T60 新增：provider 惰性单例）
+      # llm_shared_client → await aclose_shared_client()（T60 新增：LLM 通道共享 client）
+      # _rewrite_service → await _rewrite_service.close()（W4 新增：自建 httpx client）
+      # llm_provider → await provider.aclose()/close()（W4 新增：经 LLMService.aclose）
+      # db_engine → await engine.dispose()（T58：W5 补登，此前清单漏项）
     """
     from app.api.deps import (
+        _asr_client,
         _embed_client,
         _es_client,
         _milvus_client,
+        _ocr_client,
         _redis_client,
         _rerank_client,
+        _rewrite_service,
     )
 
     if _es_client is not None:
@@ -399,6 +414,38 @@ async def shutdown():
             await _redis_client.aclose()
         except Exception as e:
             logger.warning("shutdown_redis_close_failed", error=str(e))
+    # T60：OCR client（close 幂等，关内部 httpx client）
+    if _ocr_client is not None:
+        try:
+            await _ocr_client.close()
+        except Exception as e:
+            logger.warning("shutdown_ocr_close_failed", error=str(e))
+    # T60：ASR client（aclose 幂等，关 provider 惰性单例的 httpx client）
+    if _asr_client is not None:
+        try:
+            await _asr_client.aclose()
+        except Exception as e:
+            logger.warning("shutdown_asr_close_failed", error=str(e))
+    # T60：LLM 通道共享 httpx client（invoke_llm → transport，旧 loop 残留一并防御关闭）
+    try:
+        from common.llm.transport import aclose_shared_client
+
+        await aclose_shared_client()
+    except Exception as e:
+        logger.warning("shutdown_llm_shared_client_close_failed", error=str(e))
+    # W4：RewriteService 惰性单例的自建 httpx client（此前只建不释）
+    if _rewrite_service is not None:
+        try:
+            await _rewrite_service.close()
+        except Exception as e:
+            logger.warning("shutdown_rewrite_service_close_failed", error=str(e))
+    # T58：释放 SQLAlchemy engine 连接池（PG 连接归零，SIGTERM 后池不悬挂）
+    try:
+        from common.db.session import engine
+
+        await engine.dispose()
+    except Exception as e:
+        logger.warning("shutdown_engine_dispose_failed", error=str(e))
     _unwire_resilience_hooks()
 
 

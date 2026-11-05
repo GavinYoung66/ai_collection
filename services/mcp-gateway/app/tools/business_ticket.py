@@ -36,6 +36,10 @@ class BusinessTicketToolset:
     def __init__(self, base_url: str) -> None:
         self._http = BridgeHttpClient(base_url)
 
+    async def aclose(self) -> None:
+        """T59：连接池关闭出口（BridgeHttpClient 既有形态，lifespan shutdown 接线）。"""
+        await self._http.aclose()
+
     async def call_tool(
         self,
         tool: str,

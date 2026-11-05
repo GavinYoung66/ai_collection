@@ -280,19 +280,44 @@ async def _shutdown(tasks: list[asyncio.Task], eventbus_task: asyncio.Task | Non
 
     unwire_resilience_hooks()
 
+    # T57：关闭共享 LLM HTTP client（worker 进程跑 invoke_llm 研判，按 loop
+    # 隔离的 client 在关停时回收；失败不阻断关停）
+    try:
+        from common.llm.transport import aclose_shared_client
+
+        await aclose_shared_client()
+    except Exception:  # noqa: BLE001 — 关闭失败不阻断 shutdown
+        logger.warning("worker_llm_shared_client_aclose_failed", exc_info=True)
+
+    # W4：关闭 resilience 共享 Redis 连接池（rate_limit/idempotency 共用）。
+    try:
+        from common.resilience._redis import aclose_redis
+
+        await aclose_redis()
+    except Exception:  # noqa: BLE001 — 关池失败不阻断 shutdown
+        logger.warning("worker_resilience_redis_aclose_failed", exc_info=True)
+
+    # T58：释放 SQLAlchemy engine 连接池（PG 连接归零）。
+    try:
+        from common.db.session import engine
+
+        await engine.dispose()
+    except Exception:  # noqa: BLE001 — 关池失败不阻断 shutdown
+        logger.warning("worker_engine_dispose_failed", exc_info=True)
+
     try:
         from app.api.deps import get_mcp_client
 
         await get_mcp_client().aclose()
     except Exception:  # noqa: BLE001 — 关闭失败不阻断 shutdown
-        pass
+        logger.warning("worker_mcp_client_aclose_failed", exc_info=True)
 
     try:
         from app.graph.checkpointer import shutdown_checkpointer
 
         await shutdown_checkpointer()
     except Exception:  # noqa: BLE001 — 关池失败不阻断 shutdown
-        pass
+        logger.warning("worker_checkpointer_shutdown_failed", exc_info=True)
 
 
 def _install_stop_handlers(stop: asyncio.Event) -> None:

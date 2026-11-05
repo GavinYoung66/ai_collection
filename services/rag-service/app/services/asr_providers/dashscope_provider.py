@@ -49,6 +49,12 @@ class DashScopeASRProvider(ASRProvider):
             self._client = httpx.AsyncClient()
         return self._client
 
+    async def aclose(self) -> None:
+        """T60：关闭内部 httpx client（异步幂等，shutdown 清单登记项）。"""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
+
     @staticmethod
     def _resolve_api_key() -> str:
         """解析 DashScope ASR 所需 Key（对齐已配置的千问 DashScope Key）。

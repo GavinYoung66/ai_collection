@@ -1,6 +1,7 @@
 """FastAPI 依赖：DB session、Redis DB 3、QC settings、active qc_rules 快照。"""
 from __future__ import annotations
 
+import structlog
 from typing import Any, TypedDict
 
 from fastapi import Depends
@@ -8,6 +9,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import QcSettings, qc_settings
+from app.integrations.dp_client import DpClient
 from app.integrations.rag_client import RagClient
 from app.repositories.alert_repo import AlertRepo
 from app.repositories.job_store import QcJobStore
@@ -18,8 +20,11 @@ from app.seeds.qc_rules_v1 import V1_SEED
 from common.config.settings import settings as platform_settings
 from common.db.session import get_session  # noqa: F401  — Depends 复用，不重写
 
+logger = structlog.get_logger()
+
 _redis_client: Redis | None = None
 _rag_client: RagClient | None = None
+_dp_client: DpClient | None = None
 
 
 class QcRulesSnapshot(TypedDict):
@@ -75,6 +80,39 @@ def get_rag_client() -> RagClient:
 def reset_rag_client() -> None:
     global _rag_client
     _rag_client = None
+
+
+def get_dp_client() -> DpClient:
+    """T50：DpClient lifespan 级单例（仿 RagClient 模式）。
+
+    MUST NOT 每请求新建——每次新建都会遗留一个未关闭的 httpx 连接池
+    （fd 泄漏源，N 次调用 fd 线性上涨）。
+    """
+    global _dp_client
+    if _dp_client is None:
+        _dp_client = DpClient()
+    return _dp_client
+
+
+def reset_dp_client() -> None:
+    """同步复位（供测试注入新实例）。"""
+    global _dp_client
+    _dp_client = None
+
+
+async def aclose_dp_client() -> None:
+    """关闭 DpClient 单例（lifespan shutdown 清单登记项，T50）。
+
+    aclose 异常 warning 不中断关停；关闭后置 None，测试 reset 语义一致。
+    """
+    global _dp_client
+    if _dp_client is None:
+        return
+    client, _dp_client = _dp_client, None
+    try:
+        await client.aclose()
+    except Exception as exc:  # noqa: BLE001 — 关停路径单点失败不中断其余关闭
+        logger.warning("qc_dp_client_aclose_failed", error=str(exc))
 
 
 async def get_job_store(redis=Depends(get_redis)) -> QcJobStore:

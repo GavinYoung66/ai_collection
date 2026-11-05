@@ -15,6 +15,9 @@ import weakref
 from typing import Any, Optional
 
 import httpx
+import structlog
+
+logger = structlog.get_logger()
 
 # 最近一次 ``post_chat_completions`` 成功响应中的 ``usage``（供编排层 token 埋点透传）。
 # 口径：成功拿到 dict body 时写入 ``body.get("usage")``（无 usage 字段即 None）；
@@ -44,10 +47,36 @@ def _get_shared_client() -> httpx.AsyncClient:
 
 
 async def aclose_shared_client() -> None:
-    """显式关闭当前事件循环的共享 client（服务 shutdown 钩子调用，幂等）。"""
-    client = _shared_clients.pop(asyncio.get_running_loop(), None)
+    """显式关闭共享 LLM HTTP client（服务 shutdown 钩子调用，幂等，不抛）。
+
+    T57：除当前 loop 的 client 外，对其他（旧）事件循环残留的 client 做
+    防御性 best-effort 关闭——旧 loop 的 client 无人管理时会悬挂连接池至
+    进程退出。关闭失败记 warning，不阻断关停。
+    """
+    try:
+        current = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    client = _shared_clients.pop(current, None)
     if client is not None and not client.is_closed:
-        await client.aclose()
+        try:
+            await client.aclose()
+        except Exception as exc:  # noqa: BLE001 — best-effort，不阻断关停
+            logger.warning("llm_shared_client_close_failed", error=str(exc))
+    # 防御性关闭其他 loop 的残留 client（弱键字典：loop 被 GC 后条目自动消失，
+    # 仍存活者逐个关闭）
+    for loop in [lp for lp in list(_shared_clients.keys()) if lp is not current]:
+        leftover = _shared_clients.pop(loop, None)
+        if leftover is None or leftover.is_closed:
+            continue
+        try:
+            await leftover.aclose()
+        except Exception as exc:  # noqa: BLE001 — best-effort，不阻断关停
+            logger.warning(
+                "llm_shared_client_stale_close_failed",
+                loop_id=id(loop),
+                error=str(exc),
+            )
 
 
 async def post_json(

@@ -1,6 +1,7 @@
 """QC Service FastAPI 入口。业务路由前缀 /api/v1；GET /health 挂服务根。"""
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 import structlog
@@ -52,10 +53,14 @@ async def wire_resilience_redis() -> None:
     configure_redis(await qc_get_redis())
 
 
-def _unwire_resilience_redis() -> None:
+async def _unwire_resilience_redis() -> None:
     from app.deps import reset_redis as reset_qc_redis
+    from common.resilience._redis import aclose_redis
     from common.resilience._redis import reset_redis
 
+    # W4：resilience 注入的客户端即 qc deps 的 Redis 连接池——先真实关闭，
+    # 再清引用（仅 reset 会把连接池留到进程退出）。
+    await aclose_redis()
     reset_redis()
     reset_qc_redis()
 
@@ -93,11 +98,31 @@ async def lifespan(_app: FastAPI):
         for task in tasks:
             try:
                 await task
+            except asyncio.CancelledError:
+                # T61：CancelledError 是 BaseException 子类，except Exception 捕
+                # 不住——不显式吞掉则 cancel 后关停中断、非 exit 0（对齐
+                # complaint-service worker._shutdown 的 suppress 形态）
+                pass
             except Exception:
                 # T40：后台任务终止异常 MUST NOT 静默丢弃——留 warning + 异常栈。
                 logger.warning("qc_background_task_failed_on_shutdown", exc_info=True)
         _unwire_resilience_hooks()
-        _unwire_resilience_redis()
+        await _unwire_resilience_redis()
+        # ── shutdown 资源清单（批 5 逐项登记，`资源名 → 释放入口`）──
+        # _dp_client → await aclose_dp_client()（T50：DpClient lifespan 级单例）
+        # llm_shared_client → await aclose_shared_client()（T57：共享 LLM HTTP client）
+        # db_engine → await engine.dispose()（T58：PG 连接池归零）
+        # redis_client → await aclose_redis()（W4：resilience/deps 共享 Redis 连接池）
+        from app.deps import aclose_dp_client
+        from common.db.session import engine
+        from common.llm.transport import aclose_shared_client
+
+        await aclose_dp_client()
+        await aclose_shared_client()
+        try:
+            await engine.dispose()
+        except Exception as exc:  # noqa: BLE001 — 关停单点失败不中断
+            logger.warning("qc_engine_dispose_failed", error=str(exc))
 
 
 app = FastAPI(title="QC Service", version="1.0.0", lifespan=lifespan)

@@ -38,6 +38,15 @@ async def lifespan(fastapi_app: FastAPI) -> AsyncGenerator[None]:
     async with mcp_server.mcp.session_manager.run():
         # Batch 2/3：下游 HTTP 连接池在此初始化/清理
         yield
+        # ── shutdown 资源清单（T59 逐项登记，`资源名 → 释放入口`）──
+        # toolsets(rag_kb/business_ticket/data_platform/call_qc_asr) → aclose_toolsets()
+        # qc_mcp_client._dp_client → aclose_dp_client()（共享 DP 快照客户端）
+        # 连接池关闭失败 warning 不中断关停（逐项 best-effort）
+        from app.qc_mcp_client import aclose_dp_client
+        from app.tools import aclose_toolsets
+
+        await aclose_toolsets()
+        await aclose_dp_client()
 
 
 app = FastAPI(title="mcp-gateway", version="0.1.0", lifespan=lifespan)

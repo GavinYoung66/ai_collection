@@ -89,7 +89,10 @@ class BatchBody(BaseModel):
 
 
 def get_dp_client() -> DpClient:
-    return DpClient()
+    # T50：转发 deps 单例 getter——MUST NOT 每请求新建（fd 泄漏源）
+    from app.deps import get_dp_client as _singleton_dp_client
+
+    return _singleton_dp_client()
 
 
 def get_llm_reviewer() -> LLMReviewer:

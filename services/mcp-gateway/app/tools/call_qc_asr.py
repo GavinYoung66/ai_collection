@@ -32,6 +32,10 @@ class CallQcAsrToolset:
     def __init__(self, data_platform_url: str) -> None:
         self._dp = BridgeHttpClient(data_platform_url)
 
+    async def aclose(self) -> None:
+        """T59：连接池关闭出口（BridgeHttpClient 既有形态，lifespan shutdown 接线）。"""
+        await self._dp.aclose()
+
     async def call_tool(
         self,
         tool: str,

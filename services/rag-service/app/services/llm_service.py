@@ -78,6 +78,29 @@ class LLMService:
         )
         self._words_cache: tuple[set[str], float] | None = None
 
+    async def aclose(self) -> None:
+        """T60/W4：关闭 LLM 通道全部 HTTP 连接（异步幂等，不抛）。
+
+        - 共享通道：invoke_llm 走 common.llm.transport 按 loop 隔离的共享
+          client，转调其关闭（旧 loop 残留一并防御关闭）；
+        - W4 补齐：``_resolve_llm`` 解析出的 provider 实例（DashScope/
+          DeepSeek/local_openai）各自持有自建 httpx client，此前从未释放——
+          按 aclose/close 出口探测，逐个 best-effort 关闭，单点失败不阻断。
+        """
+        if self._resolved is not None:
+            provider = self._resolved[2]
+            for attr in ("aclose", "close"):
+                closer = getattr(provider, attr, None)
+                if callable(closer):
+                    try:
+                        await closer()
+                    except Exception:
+                        logger.warning("llm_provider_aclose_failed", exc_info=True)
+                    break
+        from common.llm.transport import aclose_shared_client
+
+        await aclose_shared_client()
+
     async def _resolve_llm(self) -> tuple[str, list[str], object]:
         if self._transport is not None:
             model = (self._model or settings.LLM_MODEL or "qwen-plus").strip() or "qwen-plus"
