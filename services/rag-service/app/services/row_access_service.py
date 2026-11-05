@@ -63,6 +63,8 @@ class RowAccessService:
     def __init__(self, path: str | Path | None = None):
         self._matrix: dict[tuple, list[str]] = {}
         self._has_three_tuple: bool = False
+        # T67：矩阵加载失败标志——fail-closed，查找降级为匿名白名单而非全量放行
+        self._degraded: bool = False
         self.load(path or _DEFAULT_MATRIX_PATH)
 
     def load(self, path: str | Path) -> None:
@@ -70,7 +72,10 @@ class RowAccessService:
 
         Schema: ``{"(role, dept)": [category list]}``，键解析为 ``(role, dept)`` 元组。
         支持三元组键 ``(tenant_id, role, dept)``（V2 tenant_id bypass）。
-        文件缺失/解析失败 → 空矩阵，所有查找走保底全量放行。
+
+        T67：文件缺失/解析失败/空矩阵 → fail-closed 降级——登录态查找降为
+        ``KB_ANONYMOUS_CATEGORIES`` 白名单（权限不放大）；每次加载失败均记
+        error（不允许记一次后静默）。
         """
         p = Path(path)
         if not p.exists():
@@ -86,7 +91,7 @@ class RowAccessService:
             return
 
         if not data or not isinstance(data, dict):
-            logger.warning("row_access_matrix_empty", path=str(p))
+            logger.error("row_access_matrix_empty", path=str(p))
             self._reset()
             return
 
@@ -107,6 +112,7 @@ class RowAccessService:
 
         self._matrix = matrix
         self._has_three_tuple = has_three
+        self._degraded = False
         logger.info(
             "row_access_matrix_loaded",
             path=str(p),
@@ -115,9 +121,10 @@ class RowAccessService:
         )
 
     def _reset(self) -> None:
-        """置空矩阵；所有查找将走保底全量放行。"""
+        """置空矩阵并标记降级（T67 fail-closed）：查找降级为匿名白名单。"""
         self._matrix = {}
         self._has_three_tuple = False
+        self._degraded = True
 
     @staticmethod
     def _parse_key(key_str: str) -> tuple:
@@ -138,7 +145,12 @@ class RowAccessService:
             2. (role, dept)
             3. (role, "default")
             4. (default, default) —— 保底全量放行 4 类
+
+        T67：矩阵失效（加载失败/为空）时降级为 ``KB_ANONYMOUS_CATEGORIES``
+        白名单（fail-closed，权限不放大）；矩阵正常时保持既有优先级链。
         """
+        if self._degraded:
+            return anonymous_allowed_categories()
         # 1. 三元组（V2 tenant_id bypass）
         if tenant_id and self._has_three_tuple:
             key = (tenant_id, role, dept)

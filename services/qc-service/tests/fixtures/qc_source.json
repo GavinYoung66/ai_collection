@@ -1,8 +1,8 @@
 {
   "text_ready": true,
   "call_status": "completed",
-  "session_id": "sess_fixture_001",
-  "case_id": "case_fixture_001",
+  "session_id": "sess-fixture-001",
+  "case_id": "case_fixture-001",
   "call_id": "22222222-3333-4444-5555-666666666666",
   "call_ended": true,
   "agent_type": "ai",

@@ -51,7 +51,7 @@ def verify_token(token: str) -> dict | None:
     try:
         # verify_aud=False：token 携带 aud 时不得被 PyJWT 内置校验误拒；
         # aud/iss 校验统一由 verify_token_with_reason 手动负责。
-        return jwt.decode(
+        payload = jwt.decode(
             token,
             settings.JWT_SECRET,
             algorithms=[settings.JWT_ALGORITHM],
@@ -59,6 +59,10 @@ def verify_token(token: str) -> dict | None:
         )
     except InvalidTokenError:
         return None
+    # T69：令牌类型隔离——无 type 的历史 token 与 refresh token 均不得作为访问凭证
+    if payload.get("type") != "access":
+        return None
+    return payload
 
 
 def verify_token_with_reason(token: str) -> tuple[dict | None, str | None]:
@@ -69,6 +73,8 @@ def verify_token_with_reason(token: str) -> tuple[dict | None, str | None]:
 
     验签/过期由 PyJWT 统一处理，iss/aud 手动校验以便区分两种不匹配；
     JWT_ISSUER/JWT_AUDIENCE 为空字符串时跳过对应校验（零回归）。
+    T69：iss/aud 校验后追加令牌类型校验——type 非 "access"（含缺失的历史
+    token 与 refresh token）一律拒绝，防止 refresh token 被用作访问凭证。
     """
     try:
         # 关闭 PyJWT 内置 aud 自动校验，由本函数手动区分 issuer/audience 不匹配；
@@ -97,5 +103,8 @@ def verify_token_with_reason(token: str) -> tuple[dict | None, str | None]:
             matched = actual_aud == expected_aud
         if not matched:
             return None, "audience mismatch"
+
+    if payload.get("type") != "access":
+        return None, "invalid token type"
 
     return payload, None

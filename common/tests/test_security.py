@@ -58,11 +58,12 @@ class TestMask:
         assert mask_name("王") == "王"
 
     def test_mask_text_multiple_types(self):
-        text = "手机13812341234身份证110101199001011234卡6225756123456789"
+        # T70：银行卡须 Luhn 通过才掩码——测试数据换为 Luhn 通过的卡号
+        text = "手机13812341234身份证110101199001011234卡4111111111111111"
         masked = mask_text(text)
         assert "13812341234" not in masked
         assert "110101199001011234" not in masked
-        assert "6225756123456789" not in masked
+        assert "4111111111111111" not in masked
         assert "138****1234" in masked
 
 
