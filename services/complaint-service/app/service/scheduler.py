@@ -7,21 +7,52 @@ apscheduler stub（本批可调用 job 函数，不真起调度）：
 """
 from __future__ import annotations
 
-import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from common.utils.time_parse import parse_epoch_or_datetime, parse_naive_or_aware
 
-def cleanup_archived_90d(session_store: dict | None = None) -> int:
-    """清理 90 天前已归档会话。返回清理数。"""
+
+def cleanup_archived_90d(
+    session_store: dict | None = None, *, clock: Any = None
+) -> int:
+    """清理 90 天前已归档会话。返回清理数。
+
+    T52：时间域统一（time_parse 单源）——``updated_at`` 的 aware/naive
+    datetime、ISO 串、float epoch 旧数据一律收敛 aware 后与 90 天窗比较；
+    缺 ``updated_at`` 的 archived 记录**保守跳过**（MUST NOT 以默认 0 参与
+    比较——``rec.get("updated_at", 0)`` 的语义反转会把无时间戳记录立即误删）。
+    ``clock`` 可注入（默认 aware UTC now；float epoch 注入归一，测试钉边界用）。
+    """
     if session_store is None:
         return 0
-    cutoff = time.time() - 90 * 86400
+    if clock is None:
+        now = datetime.now(timezone.utc)
+    else:
+        now = clock()
+        if isinstance(now, (int, float)):
+            now = datetime.fromtimestamp(float(now), tz=timezone.utc)
+        else:
+            now = parse_naive_or_aware(now)
+    cutoff = now - timedelta(days=90)
     removed = 0
     for sid in list(session_store.keys()):
         rec = session_store[sid]
-        if rec.get("task_status") == "archived" and rec.get("updated_at", 0) < cutoff:
-            del session_store[sid]
-            removed += 1
+        if rec.get("task_status") != "archived":
+            continue
+        updated = rec.get("updated_at")
+        if updated is None:
+            # 保守跳过：无时间戳不删（T52 语义反转修复，spec §4.5）
+            continue
+        try:
+            updated_dt = parse_epoch_or_datetime(updated)
+        except ValueError:
+            continue
+        if updated_dt is None or updated_dt >= cutoff:
+            # >= cutoff（含 90 天整）：窗内不删（严格小于才清理，与原语义一致）
+            continue
+        del session_store[sid]
+        removed += 1
     return removed
 
 

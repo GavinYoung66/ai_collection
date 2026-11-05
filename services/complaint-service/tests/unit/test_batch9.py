@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import os
-import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -221,7 +221,7 @@ class TestRecovery:
     def test_stale_cleanup(self):
         r = RecoveryService()
         sessions = {"s1": {"task_status": "pending",
-                           "updated_at": time.time() - 25 * 3600}}
+                           "updated_at": datetime.now(timezone.utc) - timedelta(hours=25)}}
         assert cleanup_stale_24h(recovery_service=r, session_store=sessions) == ["s1"]
 
 
