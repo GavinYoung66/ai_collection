@@ -51,6 +51,9 @@ class WhisperASRProvider(ASRProvider):
                     self._model = model
 
         def _run() -> str:
+            # model 在上方任一 None 分支已抛 RuntimeError，到达此处必非 None；
+            # assert 供 mypy 收窄 union-attr（运行时不可达）
+            assert model is not None
             try:
                 segments, _ = model.transcribe(audio_bytes)
                 return "".join(seg.text for seg in segments)

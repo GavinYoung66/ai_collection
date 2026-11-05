@@ -13,7 +13,7 @@ from redis.asyncio import Redis
 import structlog
 import yaml
 
-from app.services.asr_providers import ASRFactory
+from app.services.asr_providers import ASRFactory, ASRProvider
 from app.settings import settings
 
 logger = structlog.get_logger()
@@ -50,7 +50,7 @@ class ASRClient:
         # T60：provider 惰性单例——每次转写新建 provider 会让其内部 httpx
         # client 悬挂（无关闭出口）；熔断为模块级 BreakerRegistry 共享，
         # 单例持有不影响 fail_max 跨实例累计语义。
-        self._provider = None
+        self._provider: ASRProvider | None = None
 
     async def aclose(self) -> None:
         """T60：关闭持有的 provider 及其内部 httpx client（异步幂等）。

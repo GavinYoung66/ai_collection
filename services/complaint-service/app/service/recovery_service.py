@@ -131,6 +131,9 @@ class RecoveryService:
             except ValueError:
                 # 非法时间戳保守跳过：不崩、不误标（T51）
                 continue
+            if updated_dt is None:
+                # None（如缺 updated_at）保守跳过：MUST NOT 参与时间比较（T51 语义）
+                continue
             if (now - updated_dt).total_seconds() > STALE_HOURS * 3600:
                 rec["task_status"] = "pending_review"
                 cleaned.append(sid)

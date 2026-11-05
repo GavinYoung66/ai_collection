@@ -12,7 +12,6 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
 
 from app.call_log_sink import TempFileCallLogSink
 

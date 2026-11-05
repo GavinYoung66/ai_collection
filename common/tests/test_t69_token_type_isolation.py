@@ -12,7 +12,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import jwt as pyjwt
-import pytest
 
 from common.config.settings import settings
 from common.security.rbac import (

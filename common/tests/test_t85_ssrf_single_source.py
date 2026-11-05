@@ -8,7 +8,6 @@
 """
 from __future__ import annotations
 
-import pytest
 
 from common.security.ssrf import check_outbound_url
 

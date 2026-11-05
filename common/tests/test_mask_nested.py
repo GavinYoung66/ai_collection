@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-import pytest
 
 from common.config.logging import _MASK_DEPTH_LIMIT, _mask_processor, mask_nested
 

@@ -15,7 +15,6 @@ import types
 import pytest
 
 from app.services.asr_providers.whisper_provider import (
-    _MODEL_LOCK,
     WhisperASRProvider,
 )
 

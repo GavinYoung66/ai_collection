@@ -16,13 +16,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.services.rule_engine import RuleEngine, _parse_dt, _SHANGHAI
+from app.services.rule_engine import RuleEngine, _parse_dt
 from common.utils.time_parse import parse_naive_or_aware
 
 

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from app.events import publisher as publisher_mod
 from app.events.publisher import EventPublisher
@@ -65,7 +64,6 @@ class TestT73FallbackNoResidualState:
     def test_sync_publish_loop_fallback_no_task_residual(self, monkeypatch):
         """无事件循环环境（同步上下文）连续 publish：fallback 一次性用完即弃，
         不在模块级 _bus_publish_tasks 留任务残留。"""
-        import asyncio
 
         monkeypatch.setenv("EVENT_BUS", "rocketmq")  # 预设，防 _go 内改环境
         monkeypatch.setenv("EVENT_BUS_SVC", "cs")
@@ -86,7 +84,7 @@ class TestT73FallbackNoResidualState:
         monkeypatch.setenv("EVENT_BUS_SVC", "cs")
         monkeypatch.setattr(
             "common.eventbus.factory.get_event_bus",
-            Mock_side_effect:=__import__("unittest.mock", fromlist=["Mock"]).Mock(
+            __import__("unittest.mock", fromlist=["Mock"]).Mock(
                 side_effect=RuntimeError("no rocketmq locally")
             ),
         )

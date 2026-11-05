@@ -149,7 +149,7 @@ class TestGraphResumeTracked:
         started_b = asyncio.Event()
 
         async def fake_resume_b(self, cid, sid):
-            lock = cs_mod._resume_lock(cid)
+            cs_mod._resume_lock(cid)
             started_b.set()
             await asyncio.sleep(60)
 

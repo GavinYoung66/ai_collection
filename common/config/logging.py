@@ -4,6 +4,7 @@
 银行卡号三类 PII 在同一实现内维护，禁止各服务另立正则。
 """
 import logging
+from typing import Any
 
 import structlog
 
@@ -33,7 +34,7 @@ def _mask_str(text: str) -> str:
         return text
 
 
-def mask_nested(value, depth: int = 0, _seen: set[int] | None = None):
+def mask_nested(value, depth: int = 0, _seen: set[int] | None = None) -> Any:
     """递归脱敏：dict 逐 key+value / list·tuple·set 逐元素下钻，字符串叶子应用 mask_text。
 
     T49 单一实现：structlog ``_mask_processor`` 与 call_log_sink 落盘统一经此
@@ -90,8 +91,8 @@ def mask_nested(value, depth: int = 0, _seen: set[int] | None = None):
             return _CIRCULAR_PLACEHOLDER
         _seen.add(vid)
         try:
-            masked = {mask_nested(v, depth + 1, _seen) for v in value}
-            return frozenset(masked) if isinstance(value, frozenset) else masked
+            masked_set = {mask_nested(v, depth + 1, _seen) for v in value}
+            return frozenset(masked_set) if isinstance(value, frozenset) else masked_set
         finally:
             _seen.discard(vid)
     return value

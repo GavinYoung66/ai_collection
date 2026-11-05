@@ -9,7 +9,6 @@ allowed_hosts=None 时跳过 host 白名单比对（仅做安全阻断，供无�
 from __future__ import annotations
 
 import ipaddress
-from typing import Any
 from urllib.parse import urlsplit
 
 # 云厂商元数据专用主机名：即使加入白名单也必须拒绝

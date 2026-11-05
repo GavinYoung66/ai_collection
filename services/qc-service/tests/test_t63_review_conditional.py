@@ -17,9 +17,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.models.qc import QcRecord
 from app.services.review_service import ReviewService
-from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
 
 
