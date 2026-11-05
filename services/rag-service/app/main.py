@@ -244,6 +244,12 @@ async def lifespan(_app: FastAPI):
     startup/shutdown 保持独立函数形态，便于单测直接调用（TestClient 会撞
     signal.signal 主线程限制，见 tests/test_main.py）。
     """
+    # T48：JWT/AES 密钥为默认占位值时立即失败（fail-fast，对齐 qc-service 形态；
+    # 生产必须由 KMS/密钥系统注入——以占位密钥运行的实例升级后拒启，见灰度说明）
+    from common.config.settings import settings as platform_settings
+    from common.config.settings import validate_required_secrets
+
+    validate_required_secrets(platform_settings)
     await startup()
     yield
     await shutdown()
