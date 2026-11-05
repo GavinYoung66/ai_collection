@@ -287,33 +287,48 @@ class SessionService:
         if rec is None:
             return False
 
+        from sqlalchemy.exc import IntegrityError
+
         try:
-            from sqlalchemy import select
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
 
             from app.models.complaint_session import ComplaintSession
             from common.db.session import async_session_factory
 
             async with async_session_factory() as db:
-                found = await db.execute(
-                    select(ComplaintSession.id)
-                    .where(ComplaintSession.session_id == session_id)
-                    .limit(1)
+                # T54 原子幂等：唯一键 session_id 上 ON CONFLICT DO NOTHING 把
+                # 「检查-插入」合并为单条语句（对齐 _persist_complaint_row 的
+                # T10 已验证形态）；并发双请求不再触发 IntegrityError 误报降级。
+                stmt = (
+                    pg_insert(ComplaintSession)
+                    .values(
+                        session_id=session_id,
+                        trace_id=trace_id or session_id,
+                        complaint_id=uuid.UUID(str(rec["complaint_id"])),
+                        complaint_text=rec.get("complaint_text") or "",
+                        task_status=rec["task_status"].value,
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=[ComplaintSession.session_id]
+                    )
                 )
-                if found.scalar_one_or_none() is not None:
-                    self._mark_persist_ok()
-                    return True
-
-                row = ComplaintSession(
-                    session_id=session_id,
-                    trace_id=trace_id or session_id,
-                    complaint_id=uuid.UUID(str(rec["complaint_id"])),
-                    complaint_text=rec.get("complaint_text") or "",
-                    task_status=rec["task_status"].value,
-                )
-                db.add(row)
+                await db.execute(stmt)
                 await db.commit()
             self._mark_persist_ok()
             return True
+        except IntegrityError as e:
+            # 并发窗口兜底：另一请求已插入并提交 → 视为已持久化（幂等 True），
+            # 不置降级——误报会让 /health 长期显示 degraded。
+            # W1 收窄：仅 unique_violation（pgcode 23505）视为幂等成功；
+            # FK/CHECK 等其余 IntegrityError 属真实写入失败，不得吞成 True，
+            # 转走下方同型 fail-open 降级分支留痕。
+            if getattr(getattr(e, "orig", None), "pgcode", None) == "23505":
+                self._mark_persist_ok()
+                return True
+            self._persist_degraded = True
+            logger.warning("session_persist_failed", op="ensure",
+                           session_id=session_id, error=str(e))
+            return False
         except Exception as e:  # noqa: BLE001 — fail-open
             self._persist_degraded = True
             logger.warning("session_persist_failed", op="ensure",

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import structlog
 import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
@@ -37,6 +38,8 @@ from app.services.rule_engine import RuleEngine
 from app.services.scoring_service import ScoreResult, ScoringService
 from common.errors.codes import ERROR_MESSAGES, ErrorCode
 from common.trace.middleware import get_trace_id
+
+logger = structlog.get_logger()
 
 SUSPECTED_RULE_IDS = frozenset({"R11", "R12", "R13"})
 CODE_OK = "0"
@@ -259,10 +262,20 @@ class OfflineQcService:
                 await self.job_store.set_running(qc.session_id)
             emit_check_started(session_id=qc.session_id, call_id=qc.call_id)
             result = await self._pipeline(qc, rule_pack=rule_pack)
-        except Exception:
+        except Exception as exc:
+            # T55：异常必须留痕（error + 完整栈），运维可区分"部分成功"与"崩溃"；
+            # message 写异常类型摘要（类型名 + 截断原因，不含敏感 payload）
+            logger.error(
+                "qc_pipeline_failed",
+                session_id=qc.session_id,
+                case_id=qc.case_id,
+                call_id=qc.call_id,
+                error=str(exc),
+                exc_info=True,
+            )
             return QcRunResult(
                 code=ErrorCode.A2001.value,
-                message=ErrorCode.A2001.value,
+                message=f"{type(exc).__name__}: {str(exc)[:200]}",
                 qc_status="PARTIAL",
                 inserted=False,
                 session_id=qc.session_id,

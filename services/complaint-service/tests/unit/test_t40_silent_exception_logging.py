@@ -27,7 +27,11 @@ _SCAN_EXCLUDE_DIRS = {
     ".git", "__pycache__", ".venv", "venv", "node_modules",
     "openspec", "requirements_document", ".trae", "baseline",
 }
-_SILENT_PASS = re.compile(r"except Exception:\s*\n\s*pass\b")
+# W6 强化：此前正则 `except Exception:\s*\n\s*pass` 无法匹配
+# "except Exception:  # noqa 注释 + 换行 pass" 形态（行尾注释被 \s* 吞掉前
+# 换行已断开匹配），13+ 处带 noqa 注释的静默 pass 成为守卫盲区。现允许
+# except 行尾携带注释（#[^\n]*），其余语义不变。
+_SILENT_PASS = re.compile(r"except Exception:\s*(?:#[^\n]*)?\n\s*pass\b")
 
 
 def _spy_logger(monkeypatch, target_mod) -> Mock:

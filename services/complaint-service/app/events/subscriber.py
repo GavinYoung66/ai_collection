@@ -51,7 +51,7 @@ async def _claim_event_id(event_id: str) -> bool:
             _seen_event_ids.add(event_id)
             return False
     except Exception:  # noqa: BLE001 — Redis 不可用时退化为进程内去重
-        pass
+        logger.warning("redis_dedupe_failed", event_id=event_id, exc_info=True)
     _seen_event_ids.add(event_id)
     return True
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+import structlog
 from fastapi import APIRouter, Body, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
@@ -48,6 +49,8 @@ from app.service.session_service import session_service
 from common.errors.codes import ErrorCode
 from common.utils.ip import get_client_ip
 
+logger = structlog.get_logger()
+
 # 含 PII：生产 / 显式开启认证时，全部 complaints 接口要求 JWT 且角色受限
 router = APIRouter(
     prefix="/complaints",
@@ -67,8 +70,8 @@ async def _flush_session(rec: dict) -> None:
         return
     try:
         await session_service.aflush_session(sid)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:  # noqa: BLE001 — fail-open：持久化问题不影响 API 响应
+        logger.warning("session_flush_failed", session_id=sid, exc_info=True)
 
 
 @router.post("")

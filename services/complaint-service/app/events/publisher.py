@@ -72,8 +72,8 @@ class EventPublisher:
             self._events.append(EventRecord(topic=topic, payload=payload))
         try:
             logger.info(topic, **payload)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 — 事件流日志失败不阻断投递
+            logger.warning("bus_event_log_failed", topic=topic, exc_info=True)
         # Hooks 双轨：不上 csmp_business_events；业务 CHANNELS 上 EventBus
         if topic.startswith(_HOOK_PREFIX):
             return

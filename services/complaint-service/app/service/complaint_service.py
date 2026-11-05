@@ -287,8 +287,9 @@ class ComplaintService:
             # 连接失败/约束违反等：显式回滚未提交事务，禁止留半截行
             try:
                 await db.rollback()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001 — 回滚失败不阻断主异常上抛
+                logger.warning("complaint_persist_rollback_failed", case_id=case_id,
+                               exc_info=True)
             logger.exception("complaint_persist_failed", case_id=case_id, error=str(e))
             raise ComplaintPersistError(f"投诉工单落库失败: {e}") from e
 
@@ -893,16 +894,30 @@ class ComplaintService:
             )
             for entry in mcp_new:
                 run_events.append(mcp_entry_to_event(entry))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001 — T56：不中断主流程，但必须留痕
+            logger.warning(
+                "audit_event_collect_failed",
+                source="mcp",
+                session_id=sid,
+                trace_id=trace_id,
+                error=str(exc),
+                exc_info=True,
+            )
         try:
             llm_new = filter_new_logs(
                 llm.call_log, start_index=llm_i0, session_id=sid, trace_id=trace_id,
             )
             for entry in llm_new:
                 run_events.append(llm_entry_to_event(entry))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001 — T56：不中断主流程，但必须留痕
+            logger.warning(
+                "audit_event_collect_failed",
+                source="llm",
+                session_id=sid,
+                trace_id=trace_id,
+                error=str(exc),
+                exc_info=True,
+            )
 
         if not any(e.get("category") == "Agent" for e in run_events):
             status = "success"
