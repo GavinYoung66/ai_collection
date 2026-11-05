@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.qc import QcRecord, QcReview
@@ -13,6 +13,39 @@ from app.models.qc import QcRecord, QcReview
 class ReviewRepo:
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    async def mark_reviewed_conditional(
+        self,
+        qc_record_id: UUID | str,
+        *,
+        qc_status: str,
+        deduction_total: int,
+        compliance_score: int,
+        qc_result: str | None,
+    ) -> int:
+        """T63：条件更新原子迁移 qc_status（WHERE 旧状态=PENDING_REVIEW）。
+
+        返回 rowcount：0 表示并发下他方已复核（或状态非待复核），调用方抛 A2007。
+        MUST NOT 引入 SELECT FOR UPDATE（避免与 insert_review 事务边界纠缠，design D3.3）。
+        """
+        rid = (
+            qc_record_id
+            if isinstance(qc_record_id, UUID)
+            else UUID(str(qc_record_id))
+        )
+        stmt = (
+            update(QcRecord)
+            .where(QcRecord.id == rid, QcRecord.qc_status == "PENDING_REVIEW")
+            .values(
+                qc_status=qc_status,
+                deduction_total=deduction_total,
+                compliance_score=compliance_score,
+                grade=None,
+                qc_result=qc_result,
+            )
+        )
+        result = await self.session.execute(stmt)
+        return int(getattr(result, "rowcount", 0) or 0)
 
     async def get_record(self, qc_record_id: UUID | str) -> QcRecord | None:
         try:

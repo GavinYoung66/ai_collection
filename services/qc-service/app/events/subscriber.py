@@ -294,18 +294,21 @@ class QcEventSubscriber:
                 await self.handle_envelope(envelope)
             return _handler
 
-        for channel in SUBSCRIBE_CHANNELS:
-            await bus.subscribe(channel, "qc", await _make_handler(channel))
-
-        # Keep the listen task alive while bus background tasks run.
+        # T84：subscribe 循环纳入 try/finally 关停闭环——subscribe 期间取消
+        # 也回收 consumer 线程与 producer（此前仅 while 阶段取消才 aclose）。
         try:
+            for channel in SUBSCRIBE_CHANNELS:
+                await bus.subscribe(channel, "qc", await _make_handler(channel))
+
+            # Keep the listen task alive while bus background tasks run.
             while True:
                 await asyncio.sleep(3600)
         except asyncio.CancelledError:
+            raise
+        finally:
             close = getattr(bus, "aclose", None)
             if close is not None:
                 await close()
-            raise
 
     async def listen_forever(self, redis: Any | None = None) -> None:
         while True:
@@ -327,6 +330,17 @@ def skip_background_tasks() -> bool:
     return bool(_os.environ.get("PYTEST_CURRENT_TEST"))
 
 
+def _provide_dp_client() -> DpClient:
+    """W4：后台订阅的 DP 客户端走 lifespan 级单例（app.deps.get_dp_client）。
+
+    此前此处每进程自建 ``DpClient()`` 且从不 aclose——连接池留到进程退出。
+    改走单例后由 qc main shutdown 清单的 ``aclose_dp_client()`` 统一释放。
+    """
+    from app.deps import get_dp_client
+
+    return get_dp_client()
+
+
 async def start_background_tasks() -> list[asyncio.Task[Any]]:
     """启动 WordLoader + 订阅。失败只记日志，不抛给 FastAPI。"""
     if skip_background_tasks():
@@ -341,7 +355,7 @@ async def start_background_tasks() -> list[asyncio.Task[Any]]:
         except Exception:
             logger.exception("startup WordLoader.load_once failed; keep empty/old AC")
         subscriber = QcEventSubscriber(
-            dp=DpClient(),
+            dp=_provide_dp_client(),
             word_loader=loader,
             job_store=job_store,
         )

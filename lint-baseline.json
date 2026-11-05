@@ -4,9 +4,6 @@
     "common/eventbus/rocketmq.py": {
       "union-attr": 10
     },
-    "common/mcp/reliability.py": {
-      "misc": 3
-    },
     "common/security/authn.py": {
       "union-attr": 4
     },
@@ -25,15 +22,11 @@
     "common/tests/test_t13_time_guard_timezone.py": {
       "func-returns-value": 1
     },
-    "common/utils/retry.py": {
-      "misc": 1
-    },
     "services/complaint-service/app/api/routes/complaints.py": {
       "arg-type": 3,
       "union-attr": 1
     },
     "services/complaint-service/app/graph/checkpointer.py": {
-      "arg-type": 1,
       "attr-defined": 2
     },
     "services/complaint-service/app/graph/nodes/evidence_call_qc.py": {
@@ -55,7 +48,7 @@
       "assignment": 3,
       "attr-defined": 1,
       "misc": 1,
-      "union-attr": 3,
+      "union-attr": 2,
       "valid-type": 1
     },
     "services/complaint-service/app/service/degrade_llm.py": {
@@ -79,6 +72,9 @@
     },
     "services/complaint-service/app/service/review_service.py": {
       "union-attr": 1
+    },
+    "services/data-platform/app/core/redis.py": {
+      "arg-type": 13
     },
     "services/data-platform/app/events/subscriber.py": {
       "attr-defined": 1
@@ -144,7 +140,7 @@
       "assignment": 9
     },
     "services/qc-service/app/services/review_service.py": {
-      "arg-type": 3,
+      "arg-type": 7,
       "assignment": 5
     },
     "services/qc-service/app/services/rule_engine.py": {
@@ -198,22 +194,10 @@
     "common/db/models/user.py": {
       "F401": 5
     },
-    "common/llm/circuit_breaker.py": {
-      "F401": 2
-    },
-    "common/mcp/reliability.py": {
-      "F841": 1
-    },
     "common/tests/test_config.py": {
       "F401": 3
     },
-    "common/tests/test_errors.py": {
-      "F401": 1
-    },
     "common/utils/ip.py": {
-      "F401": 1
-    },
-    "common/utils/semaphore.py": {
       "F401": 1
     },
     "migrations/env.py": {
@@ -247,16 +231,10 @@
     "scripts/seed/seed_users.py": {
       "F401": 1
     },
-    "services/complaint-service/app/llm/provider.py": {
-      "F841": 1
-    },
     "services/complaint-service/app/models/complaint_agent_log.py": {
       "F401": 1
     },
     "services/complaint-service/app/models/complaint_session.py": {
-      "F401": 1
-    },
-    "services/complaint-service/app/service/callback_service.py": {
       "F401": 1
     },
     "services/complaint-service/app/service/degrade_mcp.py": {
@@ -350,7 +328,7 @@
     }
   },
   "totals": {
-    "mypy": 187,
-    "ruff": 135
+    "mypy": 198,
+    "ruff": 128
   }
 }

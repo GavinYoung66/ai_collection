@@ -503,6 +503,12 @@ class SearchService:
         # T21：匿名（jwt_payload=None）请求必须过滤，不受 KB_ROW_LEVEL_ENABLED 约束；
         # 否则 payload=None 会放行受限文档（历史 fail-open 漏洞）。
         anonymous = jwt_payload is None
+        if not anonymous and settings.KB_ROW_LEVEL_ENABLED and self._row_access_svc is None:
+            # T67：行级权限已启用但服务未注入——显式拒绝（不静默降级为匿名白名单）
+            raise BizException(
+                ErrorCode.A3005,
+                "行级权限已启用（KB_ROW_LEVEL_ENABLED=true）但行级服务未注入，请求被拒绝",
+            )
         if anonymous or (
             settings.KB_ROW_LEVEL_ENABLED and self._row_access_svc is not None
         ):

@@ -87,6 +87,10 @@ class Settings(BaseSettings):
     # API Key 对应的身份角色默认值（API Key 本身不带 role，统一赋予此角色）。
     API_KEY_ROLE: str = "admin"
 
+    # T68：代理头信任开关——仅在可信内网 LB/网关之后开启。默认 false 时
+    # get_client_ip 一律回退 ASGI client（直连场景零回归，X-Real-IP/XFF 不被采信）。
+    TRUST_PROXY_HEADERS: bool = False
+
     # LLM 可靠性（平台级：common/llm 跨服务共享的熔断阈值，业务参数不放这里）
     LLM_CIRCUIT_BREAKER_THRESHOLD: int = 3
     LLM_CIRCUIT_BREAKER_RECOVERY: int = 60

@@ -280,7 +280,7 @@ _PII_PAYLOAD = {
     "customer_name": "张三",
     "records": [
         {"content": "客户手机号13800138000请回拨", "remark": "身份证110101199001011234留档"},
-        {"bank": "卡号6222021234567890123已核实"},
+        {"bank": "卡号4111111111111111已核实"},
     ],
     "nested": [{"contacts": [{"name": "欧阳修"}]}],
     "clean": "无敏感信息",
@@ -299,7 +299,7 @@ async def test_5_3_dispatch_strips_all_plaintext_pii(isolate, monkeypatch):
     # 四类明文 PII 全部不得出现在出口
     assert "13800138000" not in blob
     assert "110101199001011234" not in blob
-    assert "6222021234567890123" not in blob
+    assert "4111111111111111" not in blob
     assert "张三" not in blob
     assert "欧阳修" not in blob
     # 脱敏后形态可核验
@@ -317,7 +317,8 @@ def test_5_3_sanitize_recursive_unit():
     clean = pii.sanitize(_PII_PAYLOAD)
     assert pii.contains_pii(clean) is False
     blob = json.dumps(clean, ensure_ascii=False)
-    for plaintext in ("13800138000", "110101199001011234", "6222021234567890123", "张三", "欧阳修"):
+    # T70：银行卡脱敏带 Luhn 校验，测试卡号须为 Luhn 合法形态才会被掩码
+    for plaintext in ("13800138000", "110101199001011234", "4111111111111111", "张三", "欧阳修"):
         assert plaintext not in blob
 
 
@@ -524,10 +525,12 @@ async def test_6_1_enabled_valid_jwt_passes(isolate, monkeypatch):
     monkeypatch.setattr(gw_settings, "ENABLE_AUTH", True)
     monkeypatch.setattr(common_settings, "API_KEYS", "")
     # HS256 JWT：用 common settings 同一密钥签名（iss/aud 未配置 → 跳过校验）
+    # T69：verify_token_with_reason 校验 type=access，测试 token 必须携带 access 类型声明
     token = pyjwt.encode(
         {
             "sub": "user-batch4",
             "role": "admin",
+            "type": "access",
             "exp": datetime.now(dt_tz.utc).timestamp() + 3600,
         },
         common_settings.JWT_SECRET,

@@ -13,7 +13,7 @@ from redis.asyncio import Redis
 import structlog
 import yaml
 
-from app.services.asr_providers import ASRFactory
+from app.services.asr_providers import ASRFactory, ASRProvider
 from app.settings import settings
 
 logger = structlog.get_logger()
@@ -47,6 +47,19 @@ class ASRClient:
 
     def __init__(self, redis: Redis | None = None):
         self._redis = redis  # 保留构造签名；熔断不在本层
+        # T60：provider 惰性单例——每次转写新建 provider 会让其内部 httpx
+        # client 悬挂（无关闭出口）；熔断为模块级 BreakerRegistry 共享，
+        # 单例持有不影响 fail_max 跨实例累计语义。
+        self._provider: ASRProvider | None = None
+
+    async def aclose(self) -> None:
+        """T60：关闭持有的 provider 及其内部 httpx client（异步幂等）。
+
+        shutdown 清单登记项；重复调用安全（provider 置 None 后为 no-op）。
+        """
+        if self._provider is not None:
+            provider, self._provider = self._provider, None
+            await provider.aclose()
 
     @staticmethod
     def _extract_format(filename: str) -> str:
@@ -322,7 +335,9 @@ class ASRClient:
         audio_bytes = self._trim_silence(file_bytes, fmt)
         segments = self._split_segments(audio_bytes, fmt)
 
-        provider = ASRFactory.create()
+        if self._provider is None:
+            self._provider = ASRFactory.create()
+        provider = self._provider
         texts: list[str] = []
         for seg in segments:
             text = await provider.transcribe(seg, fmt)

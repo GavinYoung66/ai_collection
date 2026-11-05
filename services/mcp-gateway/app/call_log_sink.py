@@ -16,6 +16,8 @@ import json
 from pathlib import Path
 from typing import Any, Optional, Protocol, runtime_checkable
 
+from common.config.logging import mask_nested
+
 
 @runtime_checkable
 class CallLogSink(Protocol):
@@ -47,7 +49,9 @@ class TempFileCallLogSink:
     def write(self, channel: str, entry: dict[str, Any]) -> None:
         if self._fh is None:
             raise RuntimeError("call_log sink is closed")
-        row = {"channel": channel, **_jsonable(entry)}
+        # T49：落盘前经 common 递归脱敏（与 structlog 处理链同一实现），
+        # 嵌套 params 中的 PII 不明文落盘
+        row = {"channel": channel, **_jsonable(mask_nested(entry))}
         self._fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
         self._fh.flush()
 

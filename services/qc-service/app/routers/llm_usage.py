@@ -19,6 +19,7 @@ from app.repositories.llm_usage_repo import LlmUsageRepo
 from common.db.session import get_session
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
+from common.utils.time_parse import BUSINESS_TZ, parse_naive_or_aware
 
 router = APIRouter(prefix="/api/v1/llm-usage", tags=["llm-usage"])
 
@@ -31,8 +32,14 @@ async def get_llm_usage_repo(session: AsyncSession = Depends(get_session)) -> Ll
 
 
 def _as_utc(value: datetime) -> datetime:
-    """SQLAlchemy tz-aware 比较所需：naive 时间按 UTC 解释。"""
-    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    """SQLAlchemy tz-aware 比较所需。
+
+    T81：naive 约定统一为 naive=Shanghai（time_parse 单源）——原 naive=UTC
+    解释废弃（与业务时区约定冲突，查询窗口边界错位 8 小时）；返回 UTC 表示
+    供 tz-aware 比较（时刻语义正确，仅时区表示转换）。
+    """
+    aware = parse_naive_or_aware(value, default_tz=BUSINESS_TZ)
+    return aware.astimezone(timezone.utc)
 
 
 def _resolve_window(start: datetime | None, end: datetime | None) -> tuple[datetime, datetime]:

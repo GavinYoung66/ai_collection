@@ -5,7 +5,9 @@ from fastapi.testclient import TestClient
 
 from app.events.resilience import clear_emitted, emitted, on_resilience_event
 from app.services import rate_limit
+from common.config.settings import settings
 from common.resilience import hooks
+from common.security.rbac import create_token
 from common.trace.middleware import TraceMiddleware
 
 
@@ -44,8 +46,11 @@ def fake_redis(monkeypatch):
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
     """最小化测试 app：仅挂载限流依赖 + 429 handler + 追踪中间件，不触碰业务接口。"""
+    # T68：代理头仅在 TRUST_PROXY_HEADERS=true 时被采信——对齐网关真实部署拓扑
+    #（nginx 已 proxy_set_header X-Real-IP），否则本环境 request.client 为 None 落 anonymous。
+    monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", True)
     app = FastAPI()
     app.add_middleware(TraceMiddleware)
     rate_limit.register_rate_limit_handler(app)
@@ -66,7 +71,8 @@ class TestRateLimiter:
             resp = client.get("/test")
             assert resp.status_code == 200
             assert resp.json() == {"ok": True}
-        assert fake_redis.store["rag:ratelimit:test_bucket:10.0.0.1"] == 2
+        # T68：匿名身份落 ip: 命名空间（fixture 注入 X-Real-IP 且 TRUST_PROXY_HEADERS=true）
+        assert fake_redis.store["rag:ratelimit:test_bucket:ip:10.0.0.1"] == 2
 
     def test_over_limit_emits_hit_with_trace_id(self, client, fake_redis):
         """超限发 rag.rate_limit.hit，payload 含请求 trace_id。"""
@@ -82,7 +88,7 @@ class TestRateLimiter:
             hits = [payload for name, payload in emitted if name == "rag.rate_limit.hit"]
             assert hits
             assert hits[0]["trace_id"] == "trace-rag-rl"
-            assert hits[0]["key"] == "rag:ratelimit:test_bucket:10.0.0.1"
+            assert hits[0]["key"] == "rag:ratelimit:test_bucket:ip:10.0.0.1"
             assert hits[0]["reason"] == "rate_limited"
         finally:
             hooks.set_publisher(None)
@@ -102,18 +108,24 @@ class TestRateLimiter:
         assert body["trace_id"]
 
     def test_user_dimension_isolation(self, client, fake_redis):
-        """不同 X-User-Id 独立计数，互不影响。"""
+        """不同 token 身份（uid: 命名空间）独立计数，互不影响。
+
+        T68：X-User-Id 请求头不再是限流维度（伪造可膨胀 key 空间）；
+        身份隔离改由验签后的 sub（uid: 命名空间）承担。
+        """
+        tok_a = create_token({"sub": "user_a", "role": "admin"})
+        tok_b = create_token({"sub": "user_b", "role": "admin"})
         # user_a 连续 3 次：2 次放行 + 1 次 429
-        assert client.get("/test", headers={"X-User-Id": "user_a"}).status_code == 200
-        assert client.get("/test", headers={"X-User-Id": "user_a"}).status_code == 200
-        assert client.get("/test", headers={"X-User-Id": "user_a"}).status_code == 429
+        assert client.get("/test", headers={"Authorization": f"Bearer {tok_a}"}).status_code == 200
+        assert client.get("/test", headers={"Authorization": f"Bearer {tok_a}"}).status_code == 200
+        assert client.get("/test", headers={"Authorization": f"Bearer {tok_a}"}).status_code == 429
         # user_b 独立计数，不受 user_a 达阈值影响
-        assert client.get("/test", headers={"X-User-Id": "user_b"}).status_code == 200
-        assert client.get("/test", headers={"X-User-Id": "user_b"}).status_code == 200
-        assert client.get("/test", headers={"X-User-Id": "user_b"}).status_code == 429
-        # 计数键按用户隔离
-        assert fake_redis.store["rag:ratelimit:test_bucket:user_a"] == 3
-        assert fake_redis.store["rag:ratelimit:test_bucket:user_b"] == 3
+        assert client.get("/test", headers={"Authorization": f"Bearer {tok_b}"}).status_code == 200
+        assert client.get("/test", headers={"Authorization": f"Bearer {tok_b}"}).status_code == 200
+        assert client.get("/test", headers={"Authorization": f"Bearer {tok_b}"}).status_code == 429
+        # 计数键按身份隔离（uid: 命名空间）
+        assert fake_redis.store["rag:ratelimit:test_bucket:uid:user_a"] == 3
+        assert fake_redis.store["rag:ratelimit:test_bucket:uid:user_b"] == 3
 
     def test_redis_failure_passes(self, client, monkeypatch):
         """Redis 故障静默放行，不返回 500。"""

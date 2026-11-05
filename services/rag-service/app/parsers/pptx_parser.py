@@ -102,6 +102,8 @@ class PptxParser(DocumentParser):
             return text, []
         try:
             assets = await AssetExtractor().extract(file_path)
-        except Exception:
+        except Exception:  # noqa: BLE001
+            # T72：pptx 资产全量提取失败——正文保留但资产整体丢弃，值得暴露
+            logger.warning("pptx_assets_extract_failed_all_dropped", exc_info=True)
             assets = []
         return text, assets

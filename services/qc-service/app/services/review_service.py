@@ -69,6 +69,18 @@ class ReviewService:
         record.qc_status = "REVIEWED"
         self._finalize_reviewed(record, action=action, revised_deduction=deduction_to_write)
         if self.repo is not None:
+            # T63：条件更新原子迁移（WHERE qc_status='PENDING_REVIEW'）——并发复核
+            # 恰好一个成功；rowcount=0 说明他方已复核（或状态非待复核），抛 A2007。
+            # MUST NOT 引入 SELECT FOR UPDATE（避免与 insert_review 事务边界纠缠）。
+            rowcount = await self.repo.mark_reviewed_conditional(
+                record.id,
+                qc_status="REVIEWED",
+                deduction_total=record.deduction_total,
+                compliance_score=record.compliance_score,
+                qc_result=record.qc_result,
+            )
+            if rowcount == 0:
+                raise BizException(ErrorCode.A2007)
             await self.repo.insert_review(
                 qc_record_id=record.id,
                 action=action,

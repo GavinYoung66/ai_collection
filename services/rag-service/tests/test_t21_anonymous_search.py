@@ -253,6 +253,9 @@ class TestAnonymousRouteCacheLeak:
         )
 
         embed = MockEmbed()
-        resp = await search_api.hybrid_search(req, **_route_args(embed))
+        args = _route_args(embed)
+        # T67：行级权限开启的登录场景必须注入行级服务（未注入将显式拒绝）
+        args["row_access_svc"] = RowAccessService()
+        resp = await search_api.hybrid_search(req, **args)
         assert embed.calls == 1
         assert resp["data"]["results"][0]["doc_id"] != "anon-only"

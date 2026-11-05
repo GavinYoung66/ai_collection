@@ -29,6 +29,7 @@ from app.vectorstore.milvus_client import MilvusClient
 from app.settings import settings
 from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
+from common.utils.spawn import spawn_tracked
 
 logger = structlog.get_logger()
 
@@ -129,8 +130,8 @@ def schedule_background_ingest(
     category: str,
     summary: str | None,
 ) -> None:
-    """异步入库：在运行中的事件循环上调度后台任务。"""
-    asyncio.create_task(
+    """异步入库：在运行中的事件循环上调度后台任务（强引用持有防 GC 逃逸）。"""
+    spawn_tracked(
         run_background_ingest_job(doc_id, file_path, filename, category, summary)
     )
 
@@ -498,7 +499,8 @@ class IngestService:
                 await self.doc_repo.update_status(doc_id, "active")
                 await self.doc_repo.clear_ingest_progress(doc_id)
                 await self.doc_repo.db.commit()
-                asyncio.create_task(self._backfill_es_index(es_docs, doc_id))
+                # T53：spawn_tracked 强引用持有，防补索引任务 GC 逃逸
+                spawn_tracked(self._backfill_es_index(es_docs, doc_id))
                 return {
                     "doc_id": str(doc_id),
                     "chunks_count": len(chunks),
@@ -784,7 +786,8 @@ class IngestService:
                     chunks=len(chunks),
                     error=str(e),
                 )
-                asyncio.create_task(self._backfill_es_index(es_docs, doc_id))
+                # T53：spawn_tracked 强引用持有，防补索引任务 GC 逃逸
+                spawn_tracked(self._backfill_es_index(es_docs, doc_id))
                 return {
                     "doc_id": str(doc_id),
                     "chunks_count": len(chunks),

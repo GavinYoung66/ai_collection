@@ -15,6 +15,7 @@ from app.models.qc import QcRecord
 from app.repositories.job_store import QcJobStore, wait_retry_key
 from app.routers.check import get_dp_client, get_llm_reviewer, get_quality_repo
 from app.services.llm_reviewer import LLMReviewer
+from common.config.settings import settings as platform_settings
 from common.db.session import get_session
 from common.errors.codes import ERROR_MESSAGES
 from tests.test_job_store import MemoryRedis
@@ -552,6 +553,7 @@ class TestReplayRaw:
         assert resp.status_code != 429
 
     def test_rate_limit_hit_payload_includes_trace_id(self):
+
         from app.events.resilience import clear_emitted, emitted
         from app.main import wire_resilience_hooks
 
@@ -593,7 +595,8 @@ class TestReplayRaw:
         anon = SimpleNamespace(headers={}, client=None)
         assert _raw_rate_user(anon) == "anon"
 
-    def test_rate_limit_without_user_header_uses_client_ip_key(self):
+    def test_rate_limit_without_user_header_uses_client_ip_key(self, monkeypatch):
+        monkeypatch.setattr(platform_settings, "TRUST_PROXY_HEADERS", True)
         from app.events.resilience import clear_emitted, emitted
         from app.main import wire_resilience_hooks
 

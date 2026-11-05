@@ -93,7 +93,13 @@ class ModeService:
             ai_human = self._consistency.get_ai_human_rate()
             cross = self._consistency.get_cross_rate()
             return ai_human >= AI_HUMAN_THRESHOLD and cross >= CROSS_THRESHOLD
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            # T71：一致性判定失败按未就绪处理——降级语义值得暴露
+            logger.warning(
+                "consistency_check_failed_treat_not_ready",
+                error=str(exc),
+                exc_info=True,
+            )
             return False
 
     def switch(self, mode: str, signers: list[str],

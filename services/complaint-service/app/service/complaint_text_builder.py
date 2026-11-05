@@ -1,6 +1,7 @@
 """投诉侧按 case_id 反查并组装差异化 complaint_text（tasks 5.1 / 5.2）。"""
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
@@ -9,6 +10,7 @@ from sqlalchemy import text
 
 from common.complaint_text import FALLBACK_COMPLAINT_TEXT, build_complaint_text
 from common.db.session import async_session_factory
+from common.security.ssrf import check_outbound_url
 
 from app.config import settings
 
@@ -32,7 +34,16 @@ async def _fetch_snapshot_ctx(case_id: str) -> tuple[str, str, str]:
     base = (getattr(settings, "DATA_PLATFORM_URL", "") or "").rstrip("/")
     if not base:
         return "", "客户", "未知"
+    # T85：出站校验（IP/元数据阻断）+ path 参数白名单（同 7.5 口径）——
+    # 校验失败记 error 走既有降级语义，不中断主流程
+    if not re.fullmatch(r"[A-Za-z0-9*-]{1,64}", case_id or ""):
+        logger.error("outbound_path_param_rejected", case_id=case_id)
+        return "", "客户", "未知"
     url = f"{base}/api/v1/data/snapshot/{case_id}"
+    reason = check_outbound_url(url)
+    if reason is not None:
+        logger.error("outbound_url_rejected", url=url, reason=reason)
+        return "", "客户", "未知"
     try:
         timeout = float(getattr(settings, "BRIDGE_HTTP_TIMEOUT", 5.0))
         async with httpx.AsyncClient(timeout=timeout) as client:

@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import structlog
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
@@ -20,6 +21,8 @@ from app.tools.business_ticket import BusinessTicketToolset, _default_case_fixtu
 from app.tools.call_qc_asr import CallQcAsrToolset
 from app.tools.data_platform import DataPlatformToolset
 from app.tools.rag_kb import RagKbToolset
+
+logger = structlog.get_logger()
 
 # (params, *, trace_id) → list | dict
 ToolFn = Callable[..., Awaitable[Any]]
@@ -166,6 +169,27 @@ async def _empty_list_fallback(
     return []
 
 
+# T59：build_tool_routes 装配的 toolset 实例登记（lifespan shutdown 统一关闭）
+_TOOLSETS: list[Any] = []
+
+
+async def aclose_toolsets() -> None:
+    """T59：逐个关闭已登记 toolset 的下游连接池（lifespan shutdown 清单登记项）。
+
+    单点失败 warning 不中断其余关闭（对齐 rag shutdown 骨架形态）。
+    """
+    for toolset in _TOOLSETS:
+        try:
+            await toolset.aclose()
+        except Exception as exc:  # noqa: BLE001 — 关停单点失败不中断
+            logger.warning(
+                "mcp_toolset_aclose_failed",
+                toolset=type(toolset).__name__,
+                error=str(exc),
+            )
+    _TOOLSETS.clear()
+
+
 async def _case_fixture_fallback(
     params: dict, *, trace_id: str = "", error: BaseException | None = None  # noqa: ARG001 — 兜底签名统一
 ) -> dict:
@@ -179,6 +203,14 @@ def build_tool_routes() -> dict[str, dict[str, ToolRoute]]:
     business_ticket = BusinessTicketToolset(settings.DATA_PLATFORM_URL)
     data_platform = DataPlatformToolset(settings.DATA_PLATFORM_URL)
     call_qc_asr = CallQcAsrToolset(settings.DATA_PLATFORM_URL)
+    # T59/S2：登记实例供 lifespan shutdown 统一关闭连接池。幂等保护——
+    # 本模块底部已有模块级 TOOL_ROUTES 单例装配过一次；若 build_tool_routes
+    # 被二次调用（历史用例/误用），旧实例尚未 aclose 就被覆盖会泄漏连接池，
+    # 且 _TOOLSETS 重复登记会让 shutdown 重复关闭。先清空再登记，旧实例
+    # 交由调用方（或下一次 aclose_toolsets）处理——生产路径仅装配一次，
+    # 此保护只为防御性消除隐式约束。
+    _TOOLSETS.clear()
+    _TOOLSETS.extend([rag_kb, business_ticket, data_platform, call_qc_asr])
 
     async def _remote(tool: str, params: dict, *, trace_id: str = "") -> list[dict[str, Any]]:
         return await call_qc_remote(tool, params, trace_id=trace_id)

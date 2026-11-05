@@ -4,18 +4,21 @@
 """
 from __future__ import annotations
 
-from typing import Any
+import asyncio
 
+import structlog
 from redis.asyncio import Redis
 
 from app.core.config import dp_settings
 from common.config.settings import settings as platform_settings
 
+logger = structlog.get_logger()
+
 _redis_client: Redis | None = None
 
 
 def build_redis() -> Redis:
-    kwargs: dict[str, Any] = {
+    kwargs: dict[str, object] = {
         "host": platform_settings.REDIS_HOST,
         "port": platform_settings.REDIS_PORT,
         "db": dp_settings.QC_REDIS_DB,
@@ -36,3 +39,25 @@ async def get_redis() -> Redis:
 def reset_redis() -> None:
     global _redis_client
     _redis_client = None
+
+
+async def aclose_redis() -> None:
+    """关闭缓存的 Redis 客户端并恢复懒创建（W4：dp shutdown 清单登记项）。
+
+    best-effort：关闭失败仅留 warning 不阻断关停；测试注入替身无关闭
+    出口时静默通过。
+    """
+    global _redis_client
+    client, _redis_client = _redis_client, None
+    if client is None:
+        return
+    closer = getattr(client, "aclose", None) or getattr(client, "close", None)
+    if closer is None:
+        return
+    try:
+        result = closer()
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception:
+        # T40：shutdown 释放失败不静默——留 warning，不阻断关停
+        logger.warning("dp_redis_aclose_failed", exc_info=True)

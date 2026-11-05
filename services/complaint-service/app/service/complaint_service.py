@@ -29,6 +29,8 @@ from app.service.graph_lock import (
 from app.service.rate_limiter import rate_limiter
 from app.service.security import prepare_agent_log
 from app.service.session_service import session_service
+from common.utils.spawn import spawn_tracked
+from common.utils.time_parse import parse_epoch_or_datetime
 
 logger = structlog.get_logger()
 
@@ -67,6 +69,10 @@ _resume_locks: dict[str, asyncio.Lock] = {}
 #   ③ 安全论证依赖"取锁与入队之间无 await"这一隐含约束，易被后人破坏。
 # 显式计数把该前提变成代码，且不依赖解释器实现。
 _resume_lock_refs: dict[str, int] = {}
+# W3：任务→锁句柄关联——记录各 Task 经 `_resume_lock` 取得的 (cid, lock)。
+# done 回调兜底释放前按句柄同一性校验（`_resume_locks[cid] is lock`），防止
+# A 的迟到回调误减 B 重建登记的引用计数；同时保留 A 自身泄漏登记的兜底回收。
+_resume_task_locks: dict[asyncio.Task, list[tuple[str, asyncio.Lock]]] = {}
 
 
 def _resume_lock(complaint_id: str) -> asyncio.Lock:
@@ -76,6 +82,10 @@ def _resume_lock(complaint_id: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _resume_locks[complaint_id] = lock
     _resume_lock_refs[complaint_id] = _resume_lock_refs.get(complaint_id, 0) + 1
+    # W3：记录当前任务取得的锁句柄，供其 done 回调精确兜底释放
+    task = asyncio.current_task()
+    if task is not None:
+        _resume_task_locks.setdefault(task, []).append((complaint_id, lock))
     return lock
 
 
@@ -88,9 +98,31 @@ def _release_resume_lock(complaint_id: str, lock: asyncio.Lock) -> None:
     refs = _resume_lock_refs.get(complaint_id, 0) - 1
     if refs > 0:
         _resume_lock_refs[complaint_id] = refs
-        return
-    _resume_lock_refs.pop(complaint_id, None)
-    _resume_locks.pop(complaint_id, None)
+    else:
+        _resume_lock_refs.pop(complaint_id, None)
+        _resume_locks.pop(complaint_id, None)
+    # W3：正常配对释放时同步移除本任务的句柄关联（done 回调将 no-op）
+    task = asyncio.current_task()
+    if task is not None:
+        entries = _resume_task_locks.get(task)
+        if entries:
+            try:
+                entries.remove((complaint_id, lock))
+            except ValueError:
+                pass
+            if not entries:
+                _resume_task_locks.pop(task, None)
+
+
+def _defensive_release_task_locks(done_task: asyncio.Task) -> None:
+    """W3：done 回调兜底释放——仅释放本任务自己登记、且当前登记仍是同一把
+    锁的引用。同 cid 的 A 迟到回调不得误减/误收 B 重建的锁引用；先 pop
+    任务关联，回调重复投递亦幂等。模块级函数以便单测直测。
+    """
+    entries = _resume_task_locks.pop(done_task, None) or []
+    for cid, lock in entries:
+        if _resume_locks.get(cid) is lock:
+            _release_resume_lock(cid, lock)
 
 
 async def _get_graph_checkpointer():
@@ -256,8 +288,9 @@ class ComplaintService:
             # 连接失败/约束违反等：显式回滚未提交事务，禁止留半截行
             try:
                 await db.rollback()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001 — 回滚失败不阻断主异常上抛
+                logger.warning("complaint_persist_rollback_failed", case_id=case_id,
+                               exc_info=True)
             logger.exception("complaint_persist_failed", case_id=case_id, error=str(e))
             raise ComplaintPersistError(f"投诉工单落库失败: {e}") from e
 
@@ -823,6 +856,10 @@ class ComplaintService:
             if snap and snap.values:
                 final = dict(snap.values)
         except Exception:  # noqa: BLE001
+            # T71：快照读取失败降级为空 final——影响产出完整性，值得暴露
+            logger.warning(
+                "snapshot_read_failed_use_empty_final", exc_info=True
+            )
             final = {}
 
         if interrupt_err is not None or graph_error is not None:
@@ -862,16 +899,30 @@ class ComplaintService:
             )
             for entry in mcp_new:
                 run_events.append(mcp_entry_to_event(entry))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001 — T56：不中断主流程，但必须留痕
+            logger.warning(
+                "audit_event_collect_failed",
+                source="mcp",
+                session_id=sid,
+                trace_id=trace_id,
+                error=str(exc),
+                exc_info=True,
+            )
         try:
             llm_new = filter_new_logs(
                 llm.call_log, start_index=llm_i0, session_id=sid, trace_id=trace_id,
             )
             for entry in llm_new:
                 run_events.append(llm_entry_to_event(entry))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001 — T56：不中断主流程，但必须留痕
+            logger.warning(
+                "audit_event_collect_failed",
+                source="llm",
+                session_id=sid,
+                trace_id=trace_id,
+                error=str(exc),
+                exc_info=True,
+            )
 
         if not any(e.get("category") == "Agent" for e in run_events):
             status = "success"
@@ -1009,10 +1060,16 @@ class ComplaintService:
         events = list(rec.get("trace_events") or [])
 
         def _sort_key(e: dict) -> tuple:
-            ts = e.get("started_at")
-            if hasattr(ts, "timestamp"):
-                return (ts.timestamp(), e.get("name") or "")
-            return (str(ts or ""), e.get("name") or "")
+            # W3/9.5：时间解析单源收敛（spec §6.2）——naive 按 Asia/Shanghai
+            # 解释，消除 .timestamp() 依赖进程本地时区的隐式行为；
+            # None/非法值排最后（不影响可解析条目相对顺序）
+            try:
+                aware = parse_epoch_or_datetime(e.get("started_at"))
+            except ValueError:
+                aware = None
+            if aware is None:
+                return (float("inf"), e.get("name") or "")
+            return (aware.timestamp(), e.get("name") or "")
 
         events_sorted = sorted(events, key=_sort_key)
         return {
@@ -1057,16 +1114,27 @@ class ComplaintService:
         return rec
 
     def _schedule_graph_resume(self, complaint_id: str, session_id: str | None) -> None:
-        """调度图恢复为后台任务（非阻塞）。不阻塞 review 路由响应。"""
+        """调度图恢复为后台任务（非阻塞）。不阻塞 review 路由响应。
+
+        T47：spawn_tracked 强引用持有任务防 GC 逃逸——裸 create_task 的任务
+        被静默回收时 `_resume_graph_thread` 内 finally 的配对释放不执行，
+        `_resume_lock_refs[complaint_id]` 永久泄漏、两个登记 dict 随工单量
+        无界增长。done 回调再防御性幂等释放一次：仅释放本任务自己经
+        `_resume_lock` 取得、且当前登记仍是同一把锁的引用（W3 句柄同一性
+        校验；正常路径 finally 已归零回收，此处 no-op），既兜底任务中断
+        路径的泄漏，又不误伤后来者对同 cid 的新登记。
+        """
         if not session_id:
             return
-        import asyncio
+        coro = self._resume_graph_thread(complaint_id, session_id)
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._resume_graph_thread(complaint_id, session_id))
+            task = spawn_tracked(coro)
         except RuntimeError:
+            coro.close()  # spawn 失败路径关闭未消费协程，避免 never-awaited 警告
             # 无事件循环（如同步单测）：跳过图恢复，不阻塞
             logger.warning("no_event_loop_for_graph_resume", complaint_id=complaint_id)
+            return
+        task.add_done_callback(_defensive_release_task_locks)
 
     async def _resume_graph_thread(self, complaint_id: str, session_id: str) -> None:
         """review approve 后恢复图线程 → sample_backflow → write_session。

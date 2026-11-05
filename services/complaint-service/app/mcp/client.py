@@ -196,7 +196,7 @@ class MCPClient:
 
             emit_call_log("mcp", entry)
         except Exception:  # noqa: BLE001 — 审计上报失败不阻断业务调用
-            pass
+            logger.warning("mcp_call_log_emit_failed", exc_info=True)
 
     @staticmethod
     def _summary(params: Any) -> Any:

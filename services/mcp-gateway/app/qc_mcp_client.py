@@ -39,6 +39,22 @@ def _get_dp_client() -> BridgeHttpClient:
     return _dp_client
 
 
+async def aclose_dp_client() -> None:
+    """T59：进程内共享 data-platform 快照客户端的连接池关闭出口。
+
+    lifespan shutdown 清单登记项：pop 后 aclose、置 None（幂等）；
+    失败 warning 不中断关停。
+    """
+    global _dp_client
+    if _dp_client is None:
+        return
+    client, _dp_client = _dp_client, None
+    try:
+        await client.aclose()
+    except Exception as exc:  # noqa: BLE001 — 关停单点失败不中断
+        logger.warning("qc_mcp_dp_client_aclose_failed", error=str(exc))
+
+
 async def call_qc_remote(
     tool: str,
     params: dict,

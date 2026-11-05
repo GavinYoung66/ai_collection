@@ -568,8 +568,10 @@ def check_hash_unique(calls: list[dict]) -> list[str]:
 
 
 def check_distribution(calls: list[dict], count: int) -> list[str]:
-    """自检：分布 60/25/15 ±5pp。"""
+    """自检：分布 60/25/15 ±5pp。T86：count=0 防御（无 calls 无分布可查，不除零）。"""
     errors = []
+    if count <= 0:
+        return errors
     n_compliant = sum(1 for c in calls if c["scenario"] == SCN_COMPLIANT)
     n_anomaly = sum(1 for c in calls if c["scenario"] == SCN_ANOMALY)
     n_violation = sum(1 for c in calls if c["scenario"] == SCN_VIOLATION)

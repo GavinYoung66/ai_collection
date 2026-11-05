@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -10,6 +11,8 @@ import httpx
 
 from app.core.config import qc_settings
 from app.integrations.qc_session import QCSession, map_qc_source, unwrap_envelope
+from common.errors.codes import ErrorCode
+from common.errors.exceptions import BizException
 from common.llm.reliability import call_with_retry
 from common.resilience.breaker import BreakerState, CircuitBreaker, make_mcp_breaker_key
 from common.trace.middleware import get_trace_id
@@ -19,6 +22,9 @@ PENDING_BREAKER_FAILURES = 3
 _PENDING_BREAKER_KEY = make_mcp_breaker_key("qc", "data_platform")
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 logger = logging.getLogger(__name__)
+
+# T79：URL path 参数白名单（spec §6.6）——session_id 仅允许字母/数字/*/-
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9*-]{1,64}$")
 
 
 class DpClient:
@@ -57,6 +63,11 @@ class DpClient:
         return self._client
 
     def qc_source_url(self, session_id: str) -> str:
+        # T79：path 参数白名单校验——防路径注入/拼接污染，不合法抛 A2002
+        if not _SESSION_ID_RE.match(session_id or ""):
+            raise BizException(
+                ErrorCode.A2002, f"非法 session_id: {session_id!r}"
+            )
         path = self._session_path.format(session_id=session_id)
         if not path.startswith("/"):
             path = "/" + path

@@ -9,12 +9,17 @@ import asyncio
 import os
 import threading
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
 
 logger = structlog.get_logger()
+
+# T74：事件缓冲上限——bounded 环形缓冲，消除生产内存线性泄漏；
+# 单测断言仍可依赖最近 500 条（list_events 语义不变）。
+_EVENTS_BUFFER_MAXLEN = 500
 
 # 业务频道目录（跨服务 → EventBus）：
 # 4 主频道 + 扩展 topic + result.ready。韧性事件（csmp.*）不上业务 Topic。
@@ -62,7 +67,9 @@ class EventRecord:
 class EventPublisher:
     """双轨 publisher：业务上总线；hooks 仅进程内 + structlog。"""
 
-    _events: list[EventRecord] = field(default_factory=list)
+    _events: deque[EventRecord] = field(
+        default_factory=lambda: deque(maxlen=_EVENTS_BUFFER_MAXLEN)
+    )
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def publish(self, topic: str, payload: dict[str, Any]) -> None:
@@ -72,8 +79,8 @@ class EventPublisher:
             self._events.append(EventRecord(topic=topic, payload=payload))
         try:
             logger.info(topic, **payload)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 — 事件流日志失败不阻断投递
+            logger.warning("bus_event_log_failed", topic=topic, exc_info=True)
         # Hooks 双轨：不上 csmp_business_events；业务 CHANNELS 上 EventBus
         if topic.startswith(_HOOK_PREFIX):
             return
@@ -119,6 +126,9 @@ class EventPublisher:
             _bus_publish_tasks.add(task)
             task.add_done_callback(_bus_publish_tasks.discard)
         except RuntimeError:
+            # T73：无事件循环 fallback——asyncio.run 每次新建临时 loop，一次性用完
+            # 即弃。仅限脚本/单测场景：生产常驻进程请勿依赖此分支（get_event_bus
+            # 返回单例 bus，其 producer 绑定首个 loop，跨 loop 复用会挂起）。
             try:
                 asyncio.run(_go())
             except Exception as exc:  # noqa: BLE001

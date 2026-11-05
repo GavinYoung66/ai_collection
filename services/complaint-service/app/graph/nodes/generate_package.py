@@ -101,7 +101,9 @@ async def generate_package_node(state: ComplaintSessionState) -> dict:
         from app.utils.evidence_helper import _collect_all_evidence
 
         evidence_blob = str(_collect_all_evidence(state.model_dump()))[:2500]
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # T71：evidence 收集为 best-effort 增强，失败允许忽略
+        logger.debug("evidence_collect_failed_best_effort", exc_info=True)
         evidence_blob = ""
     rag_text = f"{rag_text}\n{state.complaint_text}\n{evidence_blob}"[:5000]
     _ok, sanitized = postcheck(pkg_dict, rag_doc_ids=rag_doc_ids, rag_text=rag_text)
@@ -109,7 +111,10 @@ async def generate_package_node(state: ComplaintSessionState) -> dict:
         fields = set(JudgmentPackage.model_fields.keys())
         package = JudgmentPackage(**{k: v for k, v in sanitized.items() if k in fields})
     except Exception:
-        logger.warning("generate_package_postcheck_rebuild_failed", ok=_ok)
+        # T71：补 exc_info——重建失败需完整栈定位字段形态问题
+        logger.warning(
+            "generate_package_postcheck_rebuild_failed", ok=_ok, exc_info=True
+        )
 
     result: dict = {
         "judgment_package": package,

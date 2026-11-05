@@ -21,3 +21,10 @@ class ASRProvider(ABC):
             识别出的文本字符串。
         """
         ...
+    async def aclose(self) -> None:
+        """T60：连接池/资源关闭出口（幂等，默认 no-op）。
+
+        持有 httpx client 的实现（如 DashScope）覆写本方法关闭内部连接池；
+        无外部资源的实现保持默认空实现即可。
+        """
+        return None

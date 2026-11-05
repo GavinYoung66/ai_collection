@@ -33,7 +33,7 @@ class TestQcSourceMapping:
         assert "dial_history_24h" not in mapped
         assert mapped["case_snapshot"]["ptp_amount"] is None
         assert mapped["case_snapshot"]["standard_answer_hit"] is None
-        assert mapped["session_id"] == "sess_fixture_001"
+        assert mapped["session_id"] == "sess-fixture-001"
         assert mapped["agent_type"] == "ai"
         assert mapped["call_id"] == "22222222-3333-4444-5555-666666666666"
         assert mapped["turns"][0]["speaker"] == "agent"
@@ -99,7 +99,7 @@ class TestDpQcSourceClient:
     def test_timeout_default_is_5s(self):
         client = DpClient()
         assert client._timeout == 5
-        assert client.qc_source_url("sess_x").endswith("/api/v1/data/sessions/sess_x/qc-source")
+        assert client.qc_source_url("sess-x").endswith("/api/v1/data/sessions/sess-x/qc-source")
         assert "/api/v1" not in qc_settings.QC_DP_BASE
 
     def test_no_inbound_callback_surface(self):
@@ -112,12 +112,12 @@ class TestDpQcSourceClient:
     async def test_get_qc_source_maps_fixture(self):
         def handler(request: httpx.Request) -> httpx.Response:
             assert request.method == "GET"
-            assert request.url.path == "/api/v1/data/sessions/sess_fixture_001/qc-source"
+            assert request.url.path == "/api/v1/data/sessions/sess-fixture-001/qc-source"
             return httpx.Response(200, json=_envelope(_fixture()))
 
         http = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
         client = DpClient(base_url="http://data-platform:8001", retry_delay=0, client=http)
-        session = await client.get_qc_source("sess_fixture_001")
+        session = await client.get_qc_source("sess-fixture-001")
         mapped = session.to_mapped_dict()
         assert "result" in mapped
         assert mapped["result"] is None
@@ -134,7 +134,7 @@ class TestDpQcSourceClient:
         http = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
         client = DpClient(base_url="http://data-platform:8001", retry_delay=0, client=http)
         with pytest.raises(httpx.ConnectTimeout):
-            await client.get_qc_source("sess_timeout")
+            await client.get_qc_source("sess-timeout")
         assert hits["n"] == DP_RETRY_ATTEMPTS
 
 
@@ -142,9 +142,9 @@ class TestPendingQc:
     def test_parse_session_ids_only(self):
         client = DpClient()
         ids = client.parse_pending_qc(
-            _envelope({"etl_date": "2026-09-09", "session_ids": ["sess_001", "sess_002"]})
+            _envelope({"etl_date": "2026-09-09", "session_ids": ["sess-001", "sess-002"]})
         )
-        assert ids == ["sess_001", "sess_002"]
+        assert ids == ["sess-001", "sess-002"]
 
     @pytest.mark.asyncio
     async def test_complement_fetches_qc_source_per_id(self):
@@ -158,7 +158,7 @@ class TestPendingQc:
                 assert request.url.params.get("limit") == "100"
                 return httpx.Response(
                     200,
-                    json=_envelope({"etl_date": "2026-09-09", "session_ids": ["sess_a", "sess_b"]}),
+                    json=_envelope({"etl_date": "2026-09-09", "session_ids": ["sess-a", "sess-b"]}),
                 )
             seen["source"].append(path)
             payload = deepcopy(_fixture())
@@ -168,7 +168,7 @@ class TestPendingQc:
         http = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
         client = DpClient(base_url="http://data-platform:8001", retry_delay=0, client=http)
         sessions = await client.complement_pending_qc(etl_date="2026-09-09", limit=100)
-        assert [item.session_id for item in sessions] == ["sess_a", "sess_b"]
+        assert [item.session_id for item in sessions] == ["sess-a", "sess-b"]
         assert seen["pending"] == 1
         assert len(seen["source"]) == 2
         assert all("qc-source" in path for path in seen["source"])
@@ -208,11 +208,11 @@ class TestPendingQc:
                 return httpx.Response(
                     200,
                     json=_envelope(
-                        {"etl_date": "2026-09-09", "session_ids": ["sess_ok", "sess_fail", "sess_later"]}
+                        {"etl_date": "2026-09-09", "session_ids": ["sess-ok", "sess-fail", "sess-later"]}
                     ),
                 )
             seen["source"].append(path)
-            if path.split("/")[-2] == "sess_fail":
+            if path.split("/")[-2] == "sess-fail":
                 raise httpx.ConnectError("qc-source failed")
             payload = deepcopy(_fixture())
             payload["session_id"] = path.split("/")[-2]
@@ -221,7 +221,7 @@ class TestPendingQc:
         http = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
         client = DpClient(base_url="http://data-platform:8001", retry_delay=0, client=http)
         sessions = await client.complement_pending_qc(etl_date="2026-09-09")
-        assert [item.session_id for item in sessions] == ["sess_ok", "sess_later"]
-        assert "sess_fail" not in [item.session_id for item in sessions]
-        fail_hits = [path for path in seen["source"] if "sess_fail" in path]
+        assert [item.session_id for item in sessions] == ["sess-ok", "sess-later"]
+        assert "sess-fail" not in [item.session_id for item in sessions]
+        fail_hits = [path for path in seen["source"] if "sess-fail" in path]
         assert len(fail_hits) == DP_RETRY_ATTEMPTS

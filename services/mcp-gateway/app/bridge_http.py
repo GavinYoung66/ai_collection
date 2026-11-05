@@ -10,15 +10,14 @@
 """
 from __future__ import annotations
 
-import ipaddress
 from typing import Any, Optional
-from urllib.parse import urlsplit
 
 import httpx
 import structlog
 
 from app.config import settings
 from app.mcp_errors import MCPError, MCPTimeoutError
+from common.security.ssrf import check_outbound_url
 
 logger = structlog.get_logger()
 
@@ -26,22 +25,6 @@ logger = structlog.get_logger()
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 # T22：主机默认白名单（与 config.BRIDGE_ALLOWED_HOSTS 默认值保持一致）
 _DEFAULT_ALLOWED_HOSTS = ("rag-service", "data-platform", "qc-service")
-# 云厂商元数据专用主机名：即使加入白名单也必须拒绝
-_METADATA_HOSTNAMES = frozenset({
-    "metadata",
-    "metadata.google.internal",
-    "metadata.google.com",
-    "instance-data",
-    "metadata.tencentyun.com",
-    "metadata.aws.internal",
-})
-# 云厂商元数据 IP：部分不属于 RFC1918，需显式拒绝
-_METADATA_IPS = frozenset({
-    "169.254.169.254",
-    "100.100.100.200",
-    "100.100.100.201",
-    "fd00:ec2::254",
-})
 
 
 def _split_csv(raw: Any) -> list[str]:
@@ -65,74 +48,23 @@ def allowed_hosts() -> set[str]:
     return {v.lower() for v in _split_csv(raw)}
 
 
-def _blocked_ip_reason(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
-    """返回 IP 被拒绝的原因；公网地址返回 None。"""
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        # IPv4-mapped IPv6（::ffff:169.254.169.254）按映射后的 IPv4 判定
-        ip = ip.ipv4_mapped
-    if str(ip) in _METADATA_IPS:
-        return "cloud metadata address"
-    if ip.is_loopback:
-        return "loopback address"
-    if ip.is_link_local:
-        return "link-local address"
-    if ip.is_unspecified:
-        return "unspecified address"
-    if ip.is_multicast:
-        return "multicast address"
-    if ip.is_reserved:
-        return "reserved address"
-    if ip.is_private:
-        return "private network address"
-    return None
-
 
 def validate_outbound_url(url: str, path: str) -> None:
-    """出站前校验目标 URL（T22 SSRF 防护）。
+    """出站前校验目标 URL（T22 SSRF 防护；T85 校验逻辑上移 common 单源）。
 
     - 协议 MUST 命中 ``BRIDGE_ALLOWED_SCHEMES``（默认 http/https）；
     - 主机 MUST 命中 ``BRIDGE_ALLOWED_HOSTS``（默认 docker network 服务名）；
     - IP 字面量形式的回环/内网/链路本地/保留/云元数据地址一律拒绝，
       即使被显式加入主机白名单；
-    - 拒绝时记录 ``bridge_url_rejected`` 告警并不发起连接。
+    - 拒绝时记录 ``bridge_url_rejected`` 告警并不发起连接（转发层职责）。
     """
-    try:
-        parsed = urlsplit(url)
-        parsed.port  # 触发非法端口校验
-    except ValueError as e:
-        _reject(url, path, f"invalid url: {e}")
-        return
-
-    scheme = parsed.scheme.lower()
-    if scheme not in allowed_schemes():
-        _reject(url, path, f"scheme not allowed: {scheme or '<empty>'}")
-        return
-
-    if parsed.username or parsed.password:
-        _reject(url, path, "userinfo not allowed")
-        return
-
-    host = (parsed.hostname or "").lower()
-    if not host:
-        _reject(url, path, "missing host")
-        return
-
-    if host in _METADATA_HOSTNAMES:
-        _reject(url, path, "cloud metadata hostname")
-        return
-
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        ip = None
-    if ip is not None:
-        reason = _blocked_ip_reason(ip)
-        if reason is not None:
-            _reject(url, path, reason)
-            return
-
-    if host not in allowed_hosts():
-        _reject(url, path, f"host not in allowlist: {host}")
+    reason = check_outbound_url(
+        url,
+        allowed_hosts=allowed_hosts(),
+        allowed_schemes=allowed_schemes(),
+    )
+    if reason is not None:
+        _reject(url, path, reason)
 
 
 def _reject(url: str, path: str, reason: str) -> None:

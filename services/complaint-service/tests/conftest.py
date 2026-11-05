@@ -3,6 +3,7 @@
 把服务根加入 sys.path；单测默认强制 Mock，避免本机 .env 的 USE_MOCK_*=false
 误打真 LLM/MCP（真实路径用例自行 monkeypatch）。
 """
+import logging
 import os
 import sys
 import tempfile
@@ -106,7 +107,9 @@ async def _dispose_pg_engine():
 
         await engine.dispose()
     except Exception:  # noqa: BLE001 — 未用 PG 的用例无需处理
-        pass
+        logging.getLogger(__name__).warning(
+            "test_engine_dispose_failed", exc_info=True
+        )
 
 
 @pytest.fixture(autouse=True)

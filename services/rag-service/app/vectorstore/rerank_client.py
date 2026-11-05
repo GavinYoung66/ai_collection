@@ -43,7 +43,9 @@ class RerankClient:
     async def is_degraded(self) -> bool:
         try:
             return self._open_blocks_calls()
-        except Exception:
+        except Exception as e:
+            # W4/9.6：静默吞异常留痕（debug 级：探测失败按未降级处理，业务允许忽略）
+            logger.debug("rerank_breaker_probe_failed", error_type=type(e).__name__, exc_info=True)
             return False
 
     async def rerank(

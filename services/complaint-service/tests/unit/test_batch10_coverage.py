@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -279,7 +280,7 @@ class TestScheduler:
     def test_stale_cleanup_delegates(self):
         r = RecoveryService()
         sessions = {"s1": {"task_status": "pending",
-                           "updated_at": __import__("time").time() - 25 * 3600}}
+                           "updated_at": datetime.now(timezone.utc) - timedelta(hours=25)}}
         assert cleanup_stale_24h(r, sessions) == ["s1"]
         assert cleanup_stale_24h(None, None) == []
 

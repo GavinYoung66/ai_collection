@@ -7,7 +7,7 @@
 - 并发上限：`LLM_MAX_CONCURRENCY` 信号量包住 invoke_llm（超限等待，不降级）。
 """
 import asyncio
-import re
+
 import time
 from uuid import uuid4
 
@@ -22,6 +22,7 @@ from common.llm.reliability import (
     LLMRateLimitError,
     invoke_llm,
 )
+from common.security.mask import mask_text
 from common.resilience.timeout import Timeout
 from common.trace.langfuse_gate import LangfuseRun
 from common.trace.middleware import get_trace_id
@@ -30,23 +31,14 @@ logger = structlog.get_logger()
 
 _WORDS_TTL = 300  # 敏感词集缓存 TTL（秒）
 
-# 脱敏规则（注入 prompt 前替换为占位符，对齐 03_db_vector_spec【强制8】）
-_PHONE_RE = re.compile(r"1[3-9]\d{9}")
-_IDCARD_RE = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
-_AMOUNT_RE = re.compile(r"(?<!\d)\d+(?:,\d{3})*(?:\.\d+)?(?!\d)\s*(?:元|万|千|百|块|人民币|rmb|RMB)")
-
-
 def mask_sensitive(text: str) -> str:
-    """敏感字段脱敏：手机号/身份证/金额 → 占位符（供参数注入 prompt）。
+    """敏感字段脱敏：收敛至 common.security.mask 单源（T76，T70 统一正则）。
 
-    顺序：身份证（18 位，最长）→ 手机号（11 位）→ 金额。
-    必须先替换身份证，否则手机号正则会把身份证中段（如 1990010112）截断，
-    导致身份证规则失配而泄露。
+    原本地正则副本（无边界手机号，违反 T19 单一事实源约定）已删除；行为差异
+    由 7.4 统一正则一并解决（掩码形态取代占位符形态，含拼接手机号/15 位身份
+    证/银行卡 Luhn）；MUST NOT 另立正则副本。
     """
-    t = _IDCARD_RE.sub("[身份证号]", text)
-    t = _PHONE_RE.sub("[手机号]", t)
-    t = _AMOUNT_RE.sub("[金额]", t)
-    return t
+    return mask_text(text)
 
 
 class LLMService:
@@ -77,6 +69,29 @@ class LLMService:
             max_concurrency if max_concurrency is not None else settings.LLM_MAX_CONCURRENCY
         )
         self._words_cache: tuple[set[str], float] | None = None
+
+    async def aclose(self) -> None:
+        """T60/W4：关闭 LLM 通道全部 HTTP 连接（异步幂等，不抛）。
+
+        - 共享通道：invoke_llm 走 common.llm.transport 按 loop 隔离的共享
+          client，转调其关闭（旧 loop 残留一并防御关闭）；
+        - W4 补齐：``_resolve_llm`` 解析出的 provider 实例（DashScope/
+          DeepSeek/local_openai）各自持有自建 httpx client，此前从未释放——
+          按 aclose/close 出口探测，逐个 best-effort 关闭，单点失败不阻断。
+        """
+        if self._resolved is not None:
+            provider = self._resolved[2]
+            for attr in ("aclose", "close"):
+                closer = getattr(provider, attr, None)
+                if callable(closer):
+                    try:
+                        await closer()
+                    except Exception:
+                        logger.warning("llm_provider_aclose_failed", exc_info=True)
+                    break
+        from common.llm.transport import aclose_shared_client
+
+        await aclose_shared_client()
 
     async def _resolve_llm(self) -> tuple[str, list[str], object]:
         if self._transport is not None:

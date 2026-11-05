@@ -7,6 +7,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 import httpx
+import structlog
 from fastapi import FastAPI
 
 from common.config.logging import setup_logging
@@ -23,6 +24,8 @@ from app.bootstrap import unwire_resilience_hooks as _unwire_resilience_hooks
 from app.config import settings
 
 setup_logging(env=getattr(settings, "ENV", "dev"), level=getattr(settings, "LOG_LEVEL", None))
+
+logger = structlog.get_logger()
 
 
 async def _probe_mcp_gateway() -> bool:
@@ -117,7 +120,13 @@ async def lifespan(app: FastAPI):
         # 这不是降级），取反会误报 postgres，让监控以为断点已持久化。
         app.state.checkpointer_kind = checkpointer_kind()
         app.state.pg_degraded = is_checkpointer_degraded()
-    except Exception:  # noqa: BLE001 — 降级启动，不阻断服务
+    except Exception as exc:  # noqa: BLE001 — 降级启动，不阻断服务
+        # T71：checkpointer 降级到 memory——持久化语义丢失，值得暴露
+        logger.warning(
+            "checkpointer_init_degraded_to_memory",
+            error=str(exc),
+            exc_info=True,
+        )
         app.state.checkpointer = None
         app.state.checkpointer_kind = "memory"
         app.state.pg_degraded = True
@@ -127,7 +136,9 @@ async def lifespan(app: FastAPI):
     try:
         if not await _probe_mcp_gateway():
             app.state.mcp_degraded = True
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # T71：MCP 探活异常按降级处理——health 假绿风险，值得暴露
+        logger.warning("mcp_probe_failed_mark_degraded", exc_info=True)
         app.state.mcp_degraded = True
 
     yield
@@ -142,14 +153,36 @@ async def lifespan(app: FastAPI):
 
         await get_mcp_client().aclose()
     except Exception:  # noqa: BLE001 — 关闭失败不阻断 shutdown
-        pass
+        logger.warning("mcp_client_aclose_failed", exc_info=True)
     # 关闭 checkpointer 连接池（worker 进程关停时会先停掉在途任务）。
     try:
         from app.graph.checkpointer import shutdown_checkpointer
 
         await shutdown_checkpointer()
     except Exception:  # noqa: BLE001 — 关池失败不阻断 shutdown
-        pass
+        logger.warning("checkpointer_shutdown_failed", exc_info=True)
+    # T57：关闭共享 LLM HTTP client（transport 按 loop 隔离，旧 loop 残留
+    # 由 aclose 内部防御性 best-effort 关闭；失败不阻断关停）。
+    try:
+        from common.llm.transport import aclose_shared_client
+
+        await aclose_shared_client()
+    except Exception:  # noqa: BLE001 — 关闭失败不阻断 shutdown
+        logger.warning("llm_shared_client_aclose_failed", exc_info=True)
+    # W4：关闭 resilience 共享 Redis 连接池（rate_limit/idempotency 共用）。
+    try:
+        from common.resilience._redis import aclose_redis
+
+        await aclose_redis()
+    except Exception:  # noqa: BLE001 — 关池失败不阻断 shutdown
+        logger.warning("resilience_redis_aclose_failed", exc_info=True)
+    # T58：释放 SQLAlchemy engine 连接池（PG 连接归零）。
+    try:
+        from common.db.session import engine
+
+        await engine.dispose()
+    except Exception:  # noqa: BLE001 — 关池失败不阻断 shutdown
+        logger.warning("engine_dispose_failed", exc_info=True)
 
 
 app = FastAPI(title="complaint-service", version="1.0.0", lifespan=lifespan)

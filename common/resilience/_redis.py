@@ -6,9 +6,15 @@
 """
 from __future__ import annotations
 
+import asyncio
+
+import structlog
+
 from redis.asyncio import Redis
 
 from common.config.settings import settings
+
+logger = structlog.get_logger()
 
 _client: Redis | None = None
 
@@ -20,9 +26,33 @@ def configure_redis(client: Redis | None) -> None:
 
 
 def reset_redis() -> None:
-    """清除注入/缓存的客户端，恢复懒创建（测试隔离用）。"""
+    """清除注入/缓存的客户端，恢复懒创建（测试隔离用，不关闭连接）。"""
     global _client
     _client = None
+
+
+async def aclose_redis() -> None:
+    """关闭当前缓存的 Redis 客户端并恢复懒创建（W4：shutdown 清单登记项）。
+
+    - best-effort：注入的测试替身可能无 aclose/close（fakeredis 等），
+      以 getattr 探测，无可关闭出口或关闭失败均静默通过，不阻断关停；
+    - 语义与 ``reset_redis`` 的差别：本函数真实释放底层连接池，仅用于
+      宿主服务 lifespan shutdown；测试隔离请继续用 reset_redis。
+    """
+    global _client
+    client, _client = _client, None
+    if client is None:
+        return
+    closer = getattr(client, "aclose", None) or getattr(client, "close", None)
+    if closer is None:
+        return
+    try:
+        result = closer()
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception:
+        # T40：shutdown 释放失败不静默——留 warning，不阻断关停
+        logger.warning("resilience_redis_aclose_failed", exc_info=True)
 
 
 def get_redis() -> Redis:

@@ -14,7 +14,21 @@ def _make_upload_file(content: bytes, size: int | None = None, filename: str = "
     f.filename = filename
     if size is not None:
         f.size = size
-    f.read = AsyncMock(return_value=content)
+
+    # T78：read 改消耗型游标（支持分块 size 语义，对齐生产 UploadFile.read(size)）
+    pos = {"n": 0}
+
+    async def _read(chunk: int = -1):
+        start = pos["n"]
+        if chunk is None or chunk < 0:
+            data = content[start:]
+            pos["n"] = len(content)
+        else:
+            data = content[start : start + chunk]
+            pos["n"] += len(data)
+        return data
+
+    f.read = AsyncMock(side_effect=_read)
     return f
 
 

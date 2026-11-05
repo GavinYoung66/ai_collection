@@ -21,6 +21,7 @@ from redis.asyncio import Redis
 from app.settings import settings
 from common.resilience.rate_limit import allow as _rate_limit_allow
 from common.resilience._redis import configure_redis as _configure_common_redis
+from common.security.rbac import verify_token
 from common.trace.middleware import get_trace_id
 from common.utils.ip import get_client_ip
 
@@ -68,11 +69,23 @@ def _ensure_common_client() -> Redis:
 
 
 def _user_key(request: Request) -> str:
-    """按用户维度：X-User-Id 优先，缺失回退客户端 IP。"""
-    user = request.headers.get("X-User-Id")
-    if not user:
-        user = get_client_ip(request) or "anonymous"
-    return user
+    """T68：限流身份取服务端可信来源——验签后 sub 优先（``uid:`` 命名空间），
+    匿名回退客户端 IP（``ip:`` 命名空间）。
+
+    - 两命名空间 MUST NOT 混用（spec §6.7）；
+    - ``X-User-Id`` 请求头不再进限流 key（伪造 100 个不同头会膨胀 Redis key
+      空间，且维度可被客户端操控）；
+    - token 经 verify_token 验签（含 T69 的 type 校验），伪造/refresh token
+      一律落入 ``ip:`` 命名空间。
+    """
+    auth = request.headers.get("authorization") or ""
+    payload = None
+    if auth.startswith("Bearer "):
+        payload = verify_token(auth[len("Bearer "):].strip())
+    if payload and payload.get("sub"):
+        return f"uid:{payload['sub']}"
+    ip = get_client_ip(request) or "anonymous"
+    return f"ip:{ip}"
 
 
 def rate_limiter(bucket: str, limit: int, window: int = 60) -> Callable:
