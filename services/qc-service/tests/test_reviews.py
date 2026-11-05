@@ -26,6 +26,9 @@ class FakeReviewRepo:
         self.records: dict[str, QcRecord] = []
         self.by_id: dict[str, QcRecord] = {}
         self.reviews: list[QcReview] = []
+        # T63：DB 行状态影子——生产中条件 UPDATE 检查的是 DB 行而非 ORM 内存
+        # 快照（submit 会先改内存对象的 qc_status），故此处须与内存对象分离
+        self._db_status: dict[str, str] = {}
         self.session = SimpleNamespace(commit=self._commit)
 
     async def _commit(self) -> None:
@@ -33,6 +36,7 @@ class FakeReviewRepo:
 
     def add(self, row: QcRecord) -> None:
         self.by_id[str(row.id)] = row
+        self._db_status[str(row.id)] = row.qc_status
 
     async def get_record(self, qc_record_id):
         return self.by_id.get(str(qc_record_id))
@@ -55,6 +59,26 @@ class FakeReviewRepo:
         row.id = uuid4()
         self.reviews.append(row)
         return row
+
+    async def mark_reviewed_conditional(
+        self, qc_record_id, *, qc_status, deduction_total, compliance_score, qc_result
+    ) -> int:
+        """T63：模拟 DB 条件更新（WHERE 旧状态=PENDING_REVIEW），返回 rowcount。
+
+        检查对象为影子状态（对应真实 DB 行），而非 submit 已改写的内存快照。
+        """
+        key = str(qc_record_id)
+        if self._db_status.get(key) != "PENDING_REVIEW":
+            return 0
+        self._db_status[key] = qc_status
+        row = self.by_id.get(key)
+        if row is not None:
+            row.qc_status = qc_status
+            row.deduction_total = deduction_total
+            row.compliance_score = compliance_score
+            row.grade = None
+            row.qc_result = qc_result
+        return 1
 
 
 def _client(repo: FakeReviewRepo, redis: MemoryRedis | None = None) -> TestClient:

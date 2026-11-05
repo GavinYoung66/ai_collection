@@ -132,13 +132,34 @@ class SessionReviewRepo:
     def __init__(self, session: ApiFakeSession):
         self.session = session
         self.reviews: list[QcReview] = []
+        # T63：DB 行状态影子（对应真实 DB 行，与 submit 改写的内存快照分离）
+        self._db_status: dict[str, str] = {}
 
     async def get_record(self, qc_record_id):
         key = str(qc_record_id)
         for row in self.session.qc_by_session.values():
             if str(row.id) == key:
+                self._db_status[key] = row.qc_status
                 return row
         return None
+
+    async def mark_reviewed_conditional(
+        self, qc_record_id, *, qc_status, deduction_total, compliance_score, qc_result
+    ) -> int:
+        """T63：模拟 DB 条件更新（WHERE 旧状态=PENDING_REVIEW），返回 rowcount。"""
+        key = str(qc_record_id)
+        if self._db_status.get(key) != "PENDING_REVIEW":
+            return 0
+        self._db_status[key] = qc_status
+        for row in self.session.qc_by_session.values():
+            if str(row.id) == key:
+                row.qc_status = qc_status
+                row.deduction_total = deduction_total
+                row.compliance_score = compliance_score
+                row.grade = None
+                row.qc_result = qc_result
+                break
+        return 1
 
     async def insert_review(self, **kwargs) -> QcReview:
         row = QcReview(

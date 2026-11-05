@@ -7,6 +7,7 @@ from typing import Any, Sequence
 
 from app.core.config import qc_settings
 from app.services.ac_filter import WordHit, normalize_word
+from common.utils.time_parse import parse_naive_or_aware
 
 TURN_INDEX_WINDOW = 2
 DEFAULT_SAME_WORD_WINDOW_MS = 30000
@@ -21,15 +22,19 @@ def _is_ac_hit(hit: WordHit) -> bool:
 
 
 def _ts_ms(value: Any) -> int | None:
+    """T64：时间戳收敛走 time_parse 单一事实源。
+
+    naive（无时区后缀）一律按业务时区 Asia/Shanghai 解释——此前按进程本地
+    时区解释，容器 UTC 下与上海同时刻差 8 小时，AC 去重窗口静默误判。
+    """
     if value is None:
         return None
-    if isinstance(value, datetime):
-        return int(value.timestamp() * 1000)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return int(value)
+    if isinstance(value, datetime):
+        return int(parse_naive_or_aware(value).timestamp() * 1000)
     if isinstance(value, str) and value.strip():
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return int(parsed.timestamp() * 1000)
+        return int(parse_naive_or_aware(value).timestamp() * 1000)
     return None
 
 

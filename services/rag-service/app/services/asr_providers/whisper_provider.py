@@ -1,10 +1,11 @@
 """Whisper ASR Provider 实现（本地 faster-whisper 模型转写）。"""
-import threading
+import asyncio
 
 from app.services.asr_providers.base import ASRProvider
 
-# 模块级锁：faster-whisper 模型懒加载的并发保护（并发首次转写只加载一次）
-_MODEL_LOCK = threading.Lock()
+# T65：asyncio.Lock 门控懒加载（事件循环单线程内争用可见；threading.Lock 在
+# 纯协程上下文中永不争用，形同虚设）。加载体移入 to_thread，不阻塞事件循环。
+_MODEL_LOCK = asyncio.Lock()
 
 
 class WhisperASRProvider(ASRProvider):
@@ -36,12 +37,15 @@ class WhisperASRProvider(ASRProvider):
 
         model = getattr(self, "_model", None)
         if model is None:
-            with _MODEL_LOCK:
-                # 双重检查：锁内再次确认，避免并发首次调用重复加载模型
+            async with _MODEL_LOCK:
+                # T65：双重检查 + 加载移入线程池——模型加载耗时数秒，
+                # MUST NOT 在事件循环线程内同步执行（期间 /health 与并发请求全部阻塞）
                 model = getattr(self, "_model", None)
                 if model is None:
                     try:
-                        model = WhisperModel("tiny", device="cpu", compute_type="int8")
+                        model = await asyncio.to_thread(
+                            WhisperModel, "tiny", device="cpu", compute_type="int8"
+                        )
                     except Exception as e:
                         raise RuntimeError(f"Whisper 模型加载失败: {e}")
                     self._model = model

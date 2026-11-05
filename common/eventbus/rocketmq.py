@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -150,6 +151,9 @@ class RocketMQEventBus:
         # 共享消费组：gid_{svc} → {tag: handler}，消费组数量不随事件数增长（T34）
         self._subscriptions: dict[str, _GroupSubscription] = {}
         self._producer = None
+        # T62：发布执行器为 2 线程池，跨线程并发首发会双构造 Producer
+        # （check-then-act 竞态，后者覆盖前者泄漏底层连接）——锁住懒加载全段
+        self._producer_lock = threading.Lock()
 
     @property
     def max_retry_times(self) -> int:
@@ -160,16 +164,21 @@ class RocketMQEventBus:
         return self._parallelism
 
     def _ensure_producer(self):
-        if self._producer is not None:
-            return self._producer
-        from rocketmq import ClientConfiguration, Credentials, Producer
+        # T62：threading.Lock 包住懒加载全段，消除跨线程 check-then-act 竞态
+        # （publish/_send_to_dlq 均可能从发布执行器线程并发触发）
+        with self._producer_lock:
+            if self._producer is not None:
+                return self._producer
+            from rocketmq import ClientConfiguration, Credentials, Producer
 
-        conf = ClientConfiguration(self._endpoints, Credentials(), request_timeout=5)
-        # Decision 8: do NOT pass topics= at construction (startup hang on host Proxy).
-        producer = Producer(conf)
-        producer.startup()
-        self._producer = producer
-        return producer
+            conf = ClientConfiguration(
+                self._endpoints, Credentials(), request_timeout=5
+            )
+            # Decision 8: do NOT pass topics= at construction (startup hang on host Proxy).
+            producer = Producer(conf)
+            producer.startup()
+            self._producer = producer
+            return producer
 
     async def publish(
         self,
