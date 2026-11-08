@@ -619,21 +619,35 @@ class TestReplayRaw:
         hits = [payload for name, payload in emitted if name == "qc.rate_limit.hit"]
         assert hits
         assert hits[0]["trace_id"] == "trace-raw-11"
-        assert hits[0]["key"] == "qc:ratelimit:raw:u-rate-trace"
+        # T116：X-User-Id 不再被信任（未认证 → ip 维度命名空间；
+        # TestClient 默认对端 host=testclient → ip:testclient）
+        assert hits[0]["key"] == "qc:ratelimit:raw:ip:testclient"
         assert hits[0]["reason"] == "rate_limited"
         assert "qc.rate_limit.hit" not in {ch for ch, _ in redis.published}
 
     def test_rate_limit_user_dimension_header_ip_anon(self):
+        """T116：限流身份取服务端可信形态——uid:{sub}/ip:{addr} 命名空间，
+        客户端可伪造的 X-User-Id 不再产生独立配额。"""
         from types import SimpleNamespace
 
-        from app.routers.check import _raw_rate_user
+        from app.routers.check import _rate_user_key
 
-        header = SimpleNamespace(headers={"X-User-Id": "alice"}, client=SimpleNamespace(host="9.9.9.9"))
-        assert _raw_rate_user(header) == "alice"
-        ip_only = SimpleNamespace(headers={}, client=SimpleNamespace(host="10.0.0.8"))
-        assert _raw_rate_user(ip_only) == "10.0.0.8"
-        anon = SimpleNamespace(headers={}, client=None)
-        assert _raw_rate_user(anon) == "anon"
+        def _req(headers, host, user=None):
+            return SimpleNamespace(
+                headers=headers,
+                client=SimpleNamespace(host=host) if host else None,
+                state=SimpleNamespace(user=user),
+            )
+
+        # 未认证：X-User-Id 头不被采信，按对端 IP 维度
+        assert _rate_user_key(_req({"X-User-Id": "alice"}, "9.9.9.9")) == "ip:9.9.9.9"
+        assert _rate_user_key(_req({}, "10.0.0.8")) == "ip:10.0.0.8"
+        assert _rate_user_key(_req({}, None)) == "ip:anon"
+        # 已认证（T88 require_roles 注入 state.user）：uid:{sub}
+        assert (
+            _rate_user_key(_req({"X-User-Id": "alice"}, "9.9.9.9", {"sub": "alice"}))
+            == "uid:alice"
+        )
 
     def test_rate_limit_without_user_header_uses_client_ip_key(self, monkeypatch):
         monkeypatch.setattr(platform_settings, "TRUST_PROXY_HEADERS", True)
@@ -663,7 +677,7 @@ class TestReplayRaw:
         assert hits
         key = hits[0]["key"]
         assert key.startswith("qc:ratelimit:raw:")
-        assert key == "qc:ratelimit:raw:10.0.0.1"
+        assert key == "qc:ratelimit:raw:ip:10.0.0.1"
         assert "u-rate" not in key
         assert hits[0]["reason"] == "rate_limited"
         assert hits[0]["trace_id"] == "trace-ip"

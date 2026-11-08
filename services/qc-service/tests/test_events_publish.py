@@ -403,7 +403,9 @@ class TestResilienceHooks:
         hits = [payload for name, payload in emitted if name == "qc.rate_limit.hit"]
         assert hits
         assert hits[0]["trace_id"] == "trace-hook-rate"
-        assert hits[0]["key"] == "qc:ratelimit:raw:u-hook-rate"
+        # T116：X-User-Id 伪造头不入键（未认证 → ip 维度，TestClient 对端
+        # host=testclient）；键形态适配漏项补记
+        assert hits[0]["key"] == "qc:ratelimit:raw:ip:testclient"
         assert hits[0]["reason"] == "rate_limited"
         published = {ch for ch, _ in redis.published}
         assert "qc.rate_limit.hit" not in published

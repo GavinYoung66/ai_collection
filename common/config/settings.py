@@ -3,6 +3,8 @@
 仅放跨服务平台项（库连接、共享密钥占位、公共超时等）。
 RAG 产品开关与检索/入库参数见 `services/rag-service/app/rag_settings.py`。
 """
+from urllib.parse import quote
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -121,11 +123,15 @@ class Settings(BaseSettings):
 
     @property
     def pg_dsn(self) -> str:
-        return f"postgresql+asyncpg://{self.PG_USER}:{self.PG_PASSWORD}@{self.PG_HOST}:{self.PG_PORT}/{self.PG_DB}"
+        # T115：用户/密码统一 URL 编码（spec runtime-correctness：DSN 构造单源
+        # 收敛）——密码含 `@ : / # ?` 等保留字符时未编码拼接会被 SQLAlchemy
+        # URL 解析错位（启动失败或连错 host）。用 quote(safe="") 而非 quote_plus：
+        # 后者把空格编成 `+`，而 URL 解析/ConfigParser 出的 DSN 空格语义错位。
+        return f"postgresql+asyncpg://{quote(self.PG_USER, safe='')}:{quote(self.PG_PASSWORD, safe='')}@{self.PG_HOST}:{self.PG_PORT}/{self.PG_DB}"
 
     @property
     def pg_dsn_sync(self) -> str:
-        return f"postgresql+psycopg2://{self.PG_USER}:{self.PG_PASSWORD}@{self.PG_HOST}:{self.PG_PORT}/{self.PG_DB}"
+        return f"postgresql+psycopg2://{quote(self.PG_USER, safe='')}:{quote(self.PG_PASSWORD, safe='')}@{self.PG_HOST}:{self.PG_PORT}/{self.PG_DB}"
 
     @property
     def pg_dsn_psycopg3(self) -> str:
@@ -136,7 +142,7 @@ class Settings(BaseSettings):
         psycopg_pool 直接吃 libpq 语义的 URL，带 "+driver" 会解析失败，
         故此处返回不带 driver 的 postgresql://。
         """
-        return f"postgresql://{self.PG_USER}:{self.PG_PASSWORD}@{self.PG_HOST}:{self.PG_PORT}/{self.PG_DB}"
+        return f"postgresql://{quote(self.PG_USER, safe='')}:{quote(self.PG_PASSWORD, safe='')}@{self.PG_HOST}:{self.PG_PORT}/{self.PG_DB}"
 
     @property
     def es_url(self) -> str:

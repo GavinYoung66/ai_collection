@@ -235,9 +235,12 @@ async def judge_complaint(complaint_id: str, request: Request, req: JudgeRequest
         await complaint_service.aget_or_raise(complaint_id)
     except ComplaintNotFound:
         return fail(ErrorCode.A5001, f"投诉工单不存在: {complaint_id}", request=request)
-    # 用户维接入限流（X-User-Id 优先回退 IP，Redis 挂零件层静默放行）
+    # 用户维接入限流（T116：服务端可信身份 uid:{sub}/ip:{addr}，Redis 挂零件层
+    # 静默放行；MUST NOT 信任客户端可伪造的 X-User-Id——V4 取证见 rate_limiter）
     client_host = get_client_ip(request)
-    user_key = rate_limiter.resolve_user_key(request.headers, client_host)
+    user_key = rate_limiter.resolve_user_key(
+        getattr(request.state, "user", None), client_host
+    )
     user_allowed = await rate_limiter.acquire_user(
         user_key, trace_id=request.headers.get("x-trace-id", "")
     )

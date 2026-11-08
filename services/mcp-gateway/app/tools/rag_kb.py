@@ -65,7 +65,17 @@ class RagKbToolset:
             raise MCPError("rag_kb", tool, "RAG_SERVICE_URL not configured")
 
         query = _extract_query(params)
-        top_k = int(params.get("top_k") or 5)
+        # T108：网关前置收敛下游协议参数（spec mcp-gateway：工具参数边界收敛）——
+        # 越界 top_k（21/0/负数/非数字）直接透传会让 rag 返回 422，可靠性层
+        # 重试 3 次计熔断失败，反复触发即打开 csmp:mcp_degraded:rag_kb 拒绝
+        # 全部正常调用（DoS）。上限 20 与 rag SearchRequest.top_k Field(ge=1,
+        # le=20) 对齐；非法输入回退默认值 5。
+        raw_top_k = params.get("top_k")
+        try:
+            top_k_val = int(raw_top_k) if raw_top_k is not None else 5
+        except (TypeError, ValueError):
+            top_k_val = 5
+        top_k = min(max(top_k_val, 1), 20)
         payload = {
             "query": query,
             "category": category,

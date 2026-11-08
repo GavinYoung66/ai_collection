@@ -15,6 +15,7 @@ from common.errors.codes import ErrorCode
 from common.errors.exceptions import BizException
 from common.llm.reliability import call_with_retry
 from common.resilience.breaker import BreakerState, CircuitBreaker, make_mcp_breaker_key
+from common.security.path_params import ensure_safe_path_param
 from common.security.rbac import create_token
 from common.trace.middleware import get_trace_id
 

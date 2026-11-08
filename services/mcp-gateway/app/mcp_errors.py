@@ -9,11 +9,19 @@ from __future__ import annotations
 
 
 class MCPError(Exception):
-    """MCP 调用错误（业务类 / 服务故障 / 权限拒绝均通过子类或 message 区分）。"""
+    """MCP 调用错误（业务类 / 服务故障 / 权限拒绝均通过子类或 message 区分）。
 
-    def __init__(self, server: str, tool: str, message: str = ""):
+    T108：``retryable=False`` 标记不可重试错误（如下游 4xx 参数/协议校验错）——
+    可靠性层据此跳过重试（spec mcp-gateway：下游因参数校验返回的 4xx MUST
+    视为不可重试）。默认 True 保持既有调用点语义零变更。
+    """
+
+    def __init__(
+        self, server: str, tool: str, message: str = "", *, retryable: bool = True
+    ):
         self.server = server
         self.tool = tool
+        self.retryable = retryable
         super().__init__(f"MCP error [{server}.{tool}]: {message}")
 
 

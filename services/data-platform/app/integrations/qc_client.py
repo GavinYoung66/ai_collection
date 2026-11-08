@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from app.core.config import dp_settings
+from common.security.path_params import is_safe_path_param
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,15 @@ class QcClient:
     async def get_record(self, session_id: str) -> dict[str, Any] | None:
         """GET /records/{session_id}；失败返回 None 并记日志。"""
         if not session_id:
+            return None
+        # T111：path 参数白名单（common 单源，对齐 qc→dp 的 T79 口径）——
+        # payload 的 session_id 直接拼 URL path，非法值（x/../y、含 ?/#）会
+        # 改写下游请求语义；非法按既有失败语义记日志返回 None，不发起请求。
+        if not is_safe_path_param(session_id):
+            logger.warning(
+                "qc_record_invalid_session_id",
+                extra={"session_id": session_id},
+            )
             return None
         # Router prefix is /api/v1/qc → full path /api/v1/qc/records/{session_id}
         base = self._base.rstrip("/")

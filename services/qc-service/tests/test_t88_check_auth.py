@@ -159,7 +159,8 @@ class TestT88RateLimit:
         assert codes[0][1] != "B0006"
 
     def test_rate_limit_keys_share_namespace(self):
-        """T88：sid/batch 限流键与 raw 同 qc:ratelimit:* 命名空间。"""
+        """T88 命名空间回归 + T116：限流键取服务端可信身份（uid:/ip: 命名空间），
+        客户端可伪造的 X-User-Id 不再产生独立配额键。"""
         db = ApiFakeSession()
         db.call_ids.add("sess_ok")
         redis = MemoryRedis(db=3)
@@ -171,8 +172,10 @@ class TestT88RateLimit:
                 headers={"X-User-Id": "u-ns"},
                 json={"batch_id": f"b{i}", "session_ids": ["sess_ok"]},
             )
-        # 未认证（auth_required=false 本地放行）：X-User-Id 作为用户维
-        assert "qc:ratelimit:batch:u-ns" in redis.data
+        # 未认证（auth_required=false 本地放行）：按对端 IP 维度（TestClient
+        # 默认对端地址 host=testclient → ip:testclient），X-User-Id 不入键
+        assert "qc:ratelimit:batch:ip:testclient" in redis.data
+        assert not any("u-ns" in key for key in redis.data)
         assert not any(key.startswith("qc:ratelimit:raw:") for key in redis.data)
 
 

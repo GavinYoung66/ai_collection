@@ -27,6 +27,9 @@ from typing import Any
 import httpx
 
 from app.core.config import dp_settings
+from common.errors.codes import ErrorCode
+from common.errors.exceptions import BizException
+from common.security.path_params import ensure_safe_path_param
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +126,9 @@ class ComplaintClient:
 
         图停在 human_review，尚未 write_session。
         """
+        # T111：path 参数白名单（common 单源）——complaint_id 直接拼 URL path，
+        # 非法值（路径穿越/改写请求语义）显式拒绝（逃生舱语义：宁可不发请求）
+        ensure_safe_path_param(complaint_id, name="complaint_id")
         result = await self._request(
             "POST",
             f"/complaints/{complaint_id}/judge",
@@ -142,6 +148,8 @@ class ComplaintClient:
 
         恢复同一线程 Command(resume="approve")，进入 sample_backflow。
         """
+        # T111：path 参数白名单（common 单源，与 judge_complaint 同口径）
+        ensure_safe_path_param(complaint_id, name="complaint_id")
         result = await self._request(
             "PUT",
             f"/complaints/{complaint_id}/review",

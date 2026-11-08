@@ -28,6 +28,12 @@ def uuid_to_int64(uuid_str: str) -> int:
     return int.from_bytes(u.bytes[:8], "big") & 0x7FFFFFFFFFFFFFFF
 
 
+# T118（防御纵深，豁免规格）：milvus expr 的 category 插值白名单——与
+# SearchRequest 的 pydantic pattern（^(regulation|script|case|other)$）对齐，
+# 两处形态锚定（修改 MUST 同步）。当前 expr 拼接仅此单一插值来源。
+_MILVUS_CATEGORIES = frozenset({"regulation", "script", "case", "other"})
+
+
 class MilvusClient:
     COLLECTION_NAME = "kb_vectors"
     COLLECTION_NAME_V2 = "kb_vectors_v2"
@@ -134,6 +140,14 @@ class MilvusClient:
         self, query_vector: list[float], top_n: int = 20,
         category: str | None = None,
     ) -> list[dict]:
+        # T118（防御纵深，豁免规格）：入口集中白名单断言——非法 expr 片段在
+        # 进入线程池前被拒。当前 expr 拼接的插值来源 category 被 pydantic
+        # pattern（SearchRequest: ^(regulation|script|case|other)$）单点阻断、
+        # 无第二条调用路径；新增调用点 MUST 经此校验，MUST NOT 绕过直接拼
+        # expr（es_client 同维度已参数化）。
+        if category and category not in _MILVUS_CATEGORIES:
+            raise ValueError(f"illegal milvus expr category: {category!r}")
+
         def _search() -> list[dict]:
             self._connect()
             col = self._collection or Collection(self._active_name)
@@ -179,6 +193,9 @@ class MilvusClient:
                 # 留 debug + 异常栈，便于区分「已加载」与「集合不存在」两类情况。
                 logger.debug("milvus_collection_load_skipped", exc_info=True)
             doc_id_int = uuid_to_int64(doc_id)
+            # T118 形态固化：delete 的 expr 插值来源经 uuid_to_int64 收敛为
+            # int64（非字符串插值），注入面封闭；新增 expr 插值 MUST 走白名单
+            # 断言（参照 search 的 category 形态）。
             col.delete(expr=f"doc_id == {doc_id_int}")
             col.flush()
 

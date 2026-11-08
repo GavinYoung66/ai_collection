@@ -281,16 +281,28 @@ class RateLimiter:
             context=_event_context(trace_id, node=f"mcp:{server}"),
         )
 
-    # ── 用户维：X-User-Id 优先回退 IP ─────────────────────
+    # ── 用户维：服务端可信身份（T116/V4）─────────────────────
 
     @staticmethod
     def resolve_user_key(
-        headers: Mapping[str, str] | None, client_host: str | None = None
+        user_payload: Mapping[str, Any] | None, client_host: str | None = None
     ) -> str:
-        user = ""
-        if headers:
-            user = headers.get("X-User-Id") or headers.get("x-user-id") or ""
-        return user or client_host or "anonymous"
+        """限流身份键（T116）：``uid:{sub}`` / ``ip:{addr}`` 命名空间。
+
+        MUST NOT 信任客户端可伪造的 ``X-User-Id``（每伪造一个 id 即得独立配额）。
+        V4 取证（deploy/gateway/docker-entrypoint.sh:63-66）：网关 auth_request
+        模式以 auth 服务验签产物覆写该头，但绕过网关的直连流量不受保护——
+        限流身份以 JWT 验签 sub（``request.state.user``，require_roles 注入）
+        为准，未认证回退 ``get_client_ip``（T68 TRUST_PROXY_HEADERS 机制）。
+        """
+        sub = (
+            user_payload.get("sub")
+            if isinstance(user_payload, Mapping) and user_payload.get("sub")
+            else None
+        )
+        if sub:
+            return f"uid:{sub}"
+        return f"ip:{client_host or 'anonymous'}"
 
     async def acquire_user(
         self,
