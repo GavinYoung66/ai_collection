@@ -18,8 +18,13 @@ CHANNEL_COMPLAINT_CREATED = "complaint.created"
 SUBSCRIBE_CHANNELS: tuple[str, ...] = (CHANNEL_COMPLAINT_CREATED,)
 _GROUP_SHORT = "cs"  # → gid_cs（服务级共享消费组，事件用 tag 过滤区分）
 
-# 进程内 event_id 去重（单测 / mock）；生产另有 Redis SET NX
-_seen_event_ids: set[str] = set()
+# 进程内 event_id 去重（单测 / mock）；生产另有 Redis SET NX。
+# T102（spec runtime-correctness：常驻进程内存有界）：dict 保序形态（O(1) 成员
+# 判断 + 插入序可见）+ 容量上限显式常量——超限按插入序驱逐最旧，攻击者以随机
+# event_id 刷事件不再永久驻留。生产去重主防线为 Redis SET NX（TTL 24h），
+# 进程内集合仅在 Redis 不可用时兜底，容量截断不破坏该语义。
+_SEEN_EVENT_IDS_MAXLEN = 10_000
+_seen_event_ids: dict[str, None] = {}
 _EVENT_ID_TTL_KEY = "cs:event_id:complaint_created:{event_id}"
 
 
@@ -35,6 +40,17 @@ def reset_event_id_dedupe() -> None:
     _seen_event_ids.clear()
 
 
+def _remember_event_id(event_id: str) -> None:
+    """登记 event_id：容量超限时按插入序驱逐最旧（T102 有界化）。"""
+    if len(_seen_event_ids) >= _SEEN_EVENT_IDS_MAXLEN:
+        # dict.popitem 无 last 参数（OrderedDict API）——普通 dict 保序形态下
+        # 按插入序驱逐最旧用 next(iter(...))（批次 5 实施缺陷，随批次 7 T112-T114
+        # 全量回归暴露后修复；守护测试 test_t102_seen_event_ids_bounded 恢复有效）
+        oldest = next(iter(_seen_event_ids))
+        _seen_event_ids.pop(oldest, None)
+    _seen_event_ids[event_id] = None
+
+
 async def _claim_event_id(event_id: str) -> bool:
     """True = 首次见到，应处理；False = 重复投递，跳过。"""
     if not event_id:
@@ -48,11 +64,11 @@ async def _claim_event_id(event_id: str) -> bool:
         key = _EVENT_ID_TTL_KEY.format(event_id=event_id)
         ok = await redis.set(key, "1", nx=True, ex=86400)
         if ok is None or ok is False:
-            _seen_event_ids.add(event_id)
+            _remember_event_id(event_id)
             return False
     except Exception:  # noqa: BLE001 — Redis 不可用时退化为进程内去重
         logger.warning("redis_dedupe_failed", event_id=event_id, exc_info=True)
-    _seen_event_ids.add(event_id)
+    _remember_event_id(event_id)
     return True
 
 

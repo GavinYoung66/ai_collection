@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -11,10 +10,10 @@ import httpx
 
 from app.core.config import qc_settings
 from app.integrations.qc_session import QCSession, map_qc_source, unwrap_envelope
-from common.errors.codes import ErrorCode
-from common.errors.exceptions import BizException
 from common.llm.reliability import call_with_retry
 from common.resilience.breaker import BreakerState, CircuitBreaker, make_mcp_breaker_key
+from common.security.path_params import ensure_safe_path_param
+from common.security.rbac import create_token
 from common.trace.middleware import get_trace_id
 
 DP_RETRY_ATTEMPTS = 3
@@ -22,9 +21,6 @@ PENDING_BREAKER_FAILURES = 3
 _PENDING_BREAKER_KEY = make_mcp_breaker_key("qc", "data_platform")
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 logger = logging.getLogger(__name__)
-
-# T79：URL path 参数白名单（spec §6.6）——session_id 仅允许字母/数字/*/-
-_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9*-]{1,64}$")
 
 
 class DpClient:
@@ -63,11 +59,9 @@ class DpClient:
         return self._client
 
     def qc_source_url(self, session_id: str) -> str:
-        # T79：path 参数白名单校验——防路径注入/拼接污染，不合法抛 A2002
-        if not _SESSION_ID_RE.match(session_id or ""):
-            raise BizException(
-                ErrorCode.A2002, f"非法 session_id: {session_id!r}"
-            )
+        # T79/T111：path 参数白名单校验（common 单源）——防路径注入/拼接污染，
+        # 不合法抛 A2002（既有行为保持）
+        ensure_safe_path_param(session_id, name="session_id")
         path = self._session_path.format(session_id=session_id)
         if not path.startswith("/"):
             path = "/" + path
@@ -81,9 +75,21 @@ class DpClient:
     def pending_circuit_open(self) -> bool:
         return self._pending_breaker.state == BreakerState.OPEN.value
 
+    @staticmethod
+    def _service_token() -> str:
+        """T91：dp 数据面服务间凭证——静态配置优先，否则共享密钥动态签发。"""
+        configured = (qc_settings.QC_DP_SERVICE_TOKEN or "").strip()
+        if configured:
+            return configured
+        return create_token({"sub": "service:qc-service", "role": "service"})
+
     async def _get_json(self, url: str, params: dict[str, Any] | None = None) -> Any:
         client = await self._http()
-        headers = {"Accept": "application/json"}
+        headers = {
+            "Accept": "application/json",
+            # T91：服务间凭证强制——dp 数据面无凭证一律 401，不泄露任何 PII
+            "Authorization": f"Bearer {self._service_token()}",
+        }
         trace_id = get_trace_id()
         if trace_id:
             headers["X-Trace-Id"] = trace_id

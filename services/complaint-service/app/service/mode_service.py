@@ -3,12 +3,20 @@
 - single_agent / multi_agent 双模
 - gray_percent (0~100) / gray_sessions
 - 一致性达标（AI-人工≥85%、互一致≥80%）后全量切换
-- 切换失败回滚 A5014；双签（运营+技术负责人）
+- 切换失败回滚 A5014
+- T89：双签改为两阶段审批模型——判定来源 MUST 为已认证身份（JWT payload）
+  **与** 独立审批记录（ApprovalLedger），MUST NOT 采信请求体 signers 自报值
+  （JWT 角色词表 admin/supervisor/agent/qc_reviewer/ai_trainer 中不存在 ops/tech，
+  旧 REQUIRED_SIGNERS 自报校验形同虚设，已随本整改移除）。
 """
 from __future__ import annotations
 
+import fnmatch
+import json
+import time
 import zlib
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
 
 import structlog
 
@@ -25,10 +33,52 @@ VALID_MODES = {"single_agent", "multi_agent"}
 
 AI_HUMAN_THRESHOLD = 0.85
 CROSS_THRESHOLD = 0.80
-REQUIRED_SIGNERS = {"ops", "tech"}
+
+# T89：审批记录键前缀（键含目标参数摘要）与显式 TTL（防无限期悬挂有效审批）
+APPROVAL_KEY_PREFIX = "csmp:mode:approval:"
+APPROVAL_TTL_SECONDS = 600
+
+
+@dataclass(frozen=True)
+class AuthenticatedApprover:
+    """T89：审批身份值对象——只来自已认证 JWT payload（request.state.user）。"""
+
+    sub: str
+    role: str
+
+    @classmethod
+    def from_state_user(cls, payload: dict | None) -> "AuthenticatedApprover | None":
+        if not payload:
+            return None
+        sub = payload.get("sub") or payload.get("user_id")
+        role = payload.get("role")
+        if not sub or not role:
+            return None
+        return cls(sub=str(sub), role=str(role))
+
+
+@dataclass(frozen=True)
+class ModeApprovalRecord:
+    """T89：待审批记录——审批人 + 目标参数快照 + 登记时间 + TTL。"""
+
+    approver: AuthenticatedApprover
+    target_mode: str
+    target_gray_percent: Optional[int]
+    recorded_at: float
+    ttl_seconds: int = APPROVAL_TTL_SECONDS
+
+    def matches(self, mode: str, gray: Optional[int]) -> bool:
+        """第二阶段参数必须与登记快照一致，防"A 审 A 模式、B 放 B 模式"拼接绕过。"""
+        return self.target_mode == mode and self.target_gray_percent == gray
+
+    def is_expired(self, now: float | None = None) -> bool:
+        now = time.time() if now is None else now
+        return now - self.recorded_at >= self.ttl_seconds
 
 
 class _InMemoryRedis:
+    """进程内内存实现——仅作单测测试替身（T112：生产经 lifespan 注入共享 Redis）。"""
+
     def __init__(self) -> None:
         self._d: dict[str, str] = {}
 
@@ -42,6 +92,11 @@ class _InMemoryRedis:
     def delete(self, k):
         return self._d.pop(k, None) is not None
 
+    def keys(self, pattern: str = "*"):
+        # T89：ApprovalLedger 按前缀扫描待审批记录；真实 Redis 原生支持，
+        # 内存测试替身以 fnmatch 等价实现（过期判定由 Ledger 层兜底）
+        return [k for k in self._d if fnmatch.fnmatch(k, pattern)]
+
 
 def gray_bucket(session_id: str) -> int:
     """灰度分片 0–99：crc32 跨进程/重启稳定，不受 PYTHONHASHSEED 影响。
@@ -52,11 +107,101 @@ def gray_bucket(session_id: str) -> int:
     return zlib.crc32(session_id.encode("utf-8")) % 100
 
 
+class ApprovalLedger:
+    """T89：模式切换独立审批记录（Redis 存储含 TTL）。
+
+    - 单副本语义本批成立，多副本一致性由批 7（T112）装配承接；
+    - Redis 客户端经 provider 惰性获取——沿用 ``mode_service._redis`` 装配路径，
+      兼容 ``set_redis_client`` 动态替换，不触碰装配点；
+    - 同一时刻至多保留一条待审批记录：异参数重新登记即拒绝旧记录。
+    """
+
+    def __init__(self, redis_provider: Callable[[], Any]) -> None:
+        self._redis_provider = redis_provider
+
+    @property
+    def _redis(self):
+        return self._redis_provider()
+
+    @staticmethod
+    def _record_key(target_mode: str, target_gray_percent: Optional[int]) -> str:
+        digest = zlib.crc32(f"{target_mode}|{target_gray_percent}".encode("utf-8"))
+        return f"{APPROVAL_KEY_PREFIX}{digest:08x}"
+
+    @staticmethod
+    def _decode(raw) -> ModeApprovalRecord | None:
+        try:
+            data = json.loads(raw)
+            approver = AuthenticatedApprover(
+                sub=str(data["approver_sub"]), role=str(data["approver_role"])
+            )
+            gray = data.get("target_gray_percent")
+            return ModeApprovalRecord(
+                approver=approver,
+                target_mode=str(data["target_mode"]),
+                target_gray_percent=int(gray) if gray is not None else None,
+                recorded_at=float(data["recorded_at"]),
+            )
+        except Exception:  # noqa: BLE001 — 脏数据视为无记录，不阻断切换主流程
+            return None
+
+    def register(self, record: ModeApprovalRecord) -> None:
+        """登记审批记录（同参数重复登记幂等覆盖；异参数旧记录清除=拒绝并重新登记）。"""
+        self.clear()
+        payload = json.dumps(
+            {
+                "approver_sub": record.approver.sub,
+                "approver_role": record.approver.role,
+                "target_mode": record.target_mode,
+                "target_gray_percent": record.target_gray_percent,
+                "recorded_at": record.recorded_at,
+            }
+        )
+        self._redis.set(
+            self._record_key(record.target_mode, record.target_gray_percent),
+            payload,
+            ex=record.ttl_seconds,
+        )
+
+    def find_pending(self) -> ModeApprovalRecord | None:
+        for key in self._redis.keys(f"{APPROVAL_KEY_PREFIX}*"):
+            raw = self._redis.get(key)
+            if raw is None:
+                continue
+            record = self._decode(raw)
+            if record is not None and not record.is_expired():
+                return record
+        return None
+
+    @staticmethod
+    def is_other_identity(
+        record: ModeApprovalRecord, approver: AuthenticatedApprover
+    ) -> bool:
+        return record.approver.sub != approver.sub
+
+    def clear(self) -> None:
+        for key in self._redis.keys(f"{APPROVAL_KEY_PREFIX}*"):
+            self._redis.delete(key)
+
+
 class ModeService:
     def __init__(self, redis_client: Any = None,
                  consistency_provider: Any = None) -> None:
         self._redis = redis_client or _InMemoryRedis()
         self._consistency = consistency_provider
+        # T89：审批记录组件，沿用 _redis 装配路径（provider 惰性取，兼容动态替换）
+        self._ledger = ApprovalLedger(lambda: self._redis)
+
+    def set_redis_client(self, client: Any) -> None:
+        """T112：lifespan 注入共享 Redis 的正式装配点。
+
+        - 单一注入点：替换 ``_redis`` 后，模式状态与 ApprovalLedger（经
+          ``lambda: self._redis`` 惰性取）同步切换到同一 client，不建两套装配；
+        - 生产经 lifespan 调用本方法注入共享 Redis（spec complaint-service/mode
+          「模式状态多副本一致」）；单测经 routes.mode.set_redis_client（本方法
+          的委托形态）注入 _InMemoryRedis 测试替身。
+        """
+        self._redis = client
 
     def get_active(self) -> str:
         return self._redis.get(KEY_ACTIVE) or "single_agent"
@@ -102,14 +247,64 @@ class ModeService:
             )
             return False
 
-    def switch(self, mode: str, signers: list[str],
+    def register_approval(
+        self,
+        approver: AuthenticatedApprover,
+        target_mode: str,
+        gray_percent: Optional[int],
+    ) -> None:
+        """T89：登记一条审批记录（同身份重复登记幂等覆盖、不推进）。"""
+        self._ledger.register(
+            ModeApprovalRecord(
+                approver=approver,
+                target_mode=target_mode,
+                target_gray_percent=gray_percent,
+                recorded_at=time.time(),
+            )
+        )
+
+    def switch(self, mode: str, approver: AuthenticatedApprover | None,
                gray_percent: Optional[int] = None) -> tuple[bool, Optional[str]]:
-        """切换模式。返回 (success, error_code)。"""
+        """切换模式（T89 两阶段审批）。返回 (success, error_code)。
+
+        - mode 词表与 gray 越界校验 A5014 先行（既有语义保持）；
+        - approver 为 None（无已认证身份；请求体 signers 已被路由层忽略）→ A5014；
+        - 存在另一不同身份且参数一致的待审批记录 → 推进既有写入/事件/回滚主体，
+          成功后清空待审批记录（审批留痕语义由记录登记-推进-清空链路承载）；
+        - 否则登记当前审批（第一阶段）返回 (True, None)——模式未变化，
+          调用方以响应中的当前模式感知待审批状态。
+        """
         if mode not in VALID_MODES:
             return False, ErrorCode.A5014
-        if not REQUIRED_SIGNERS.issubset(set(signers or [])):
+        if gray_percent is not None and not (0 <= gray_percent <= 100):
+            return False, ErrorCode.A5014
+        if approver is None:
             return False, ErrorCode.A5014
 
+        try:
+            pending = self._ledger.find_pending()
+        except Exception:  # noqa: BLE001 — 审批记录设施故障按 A5014 拒绝，不向调用方抛出
+            return False, ErrorCode.A5014
+        if (
+            pending is not None
+            and self._ledger.is_other_identity(pending, approver)
+            and pending.matches(mode, gray_percent)
+        ):
+            ok, err = self._advance(mode, gray_percent)
+            if ok:
+                try:
+                    self._ledger.clear()
+                except Exception:  # noqa: BLE001 — 切换已成功；残留记录由 TTL 兜底清理
+                    logger.warning("mode_approval_clear_failed", exc_info=True)
+            return ok, err
+        try:
+            self.register_approval(approver, mode, gray_percent)
+        except Exception:  # noqa: BLE001 — 登记失败等同切换失败（A5014，无状态变更）
+            return False, ErrorCode.A5014
+        return True, None
+
+    def _advance(self, mode: str, gray_percent: Optional[int]) -> tuple[bool, Optional[str]]:
+        """既有切换/回滚主体（T89 零变更；gray 越界校验已前移至 switch）。"""
         # 读旧值也包进 try：Redis 异常 → A5014；脏 gray 由 get_gray_percent 兜底为 0
         old_mode = "single_agent"
         old_gray = 0
@@ -118,8 +313,6 @@ class ModeService:
             old_gray = self.get_gray_percent()
             self._redis.set(KEY_ACTIVE, mode)
             if gray_percent is not None:
-                if not (0 <= gray_percent <= 100):
-                    raise ValueError("gray_percent out of range")
                 self._redis.set(KEY_GRAY, gray_percent)
             publisher.publish("complaint.mode.switched", {
                 "trace_id": f"mode-{mode}",
@@ -139,8 +332,41 @@ class ModeService:
     def full_switch_if_consistent(self, target_mode: str = "multi_agent") -> bool:
         if not self.check_consistency_ready():
             return False
-        ok, _ = self.switch(target_mode, signers=["ops", "tech"], gray_percent=100)
+        if target_mode not in VALID_MODES:
+            return False
+        # T89：服务内审批语义——登记服务内审批人记录后直接推进，
+        # 不依赖 HTTP 两阶段跨请求留痕，审批记录留痕语义与 HTTP 路径一致
+        self.register_approval(
+            AuthenticatedApprover(sub="service-internal:consistency", role="admin"),
+            target_mode,
+            100,
+        )
+        ok, _ = self._advance(target_mode, 100)
+        if ok:
+            self._ledger.clear()
         return ok
+
+
+def build_shared_redis_client() -> Any:
+    """T112：构造模式状态共享 Redis 客户端（同步形态，由 lifespan 探活后注入）。
+
+    - ModeService / ApprovalLedger 为同步 API，注入同步客户端（redis.Redis）；
+    - ``decode_responses=True`` 与 _InMemoryRedis 值语义对齐（get 返回 str/None）；
+    - 短 socket 超时与 common.resilience 同形态；连接参数单源 common settings，
+      不在本服务新建第二套配置口径。
+    """
+    from common.config.settings import settings as platform_settings
+    from redis import Redis
+
+    return Redis(
+        host=platform_settings.REDIS_HOST,
+        port=platform_settings.REDIS_PORT,
+        password=platform_settings.REDIS_PASSWORD or None,
+        db=platform_settings.REDIS_DB,
+        decode_responses=True,
+        socket_timeout=1.0,
+        socket_connect_timeout=1.0,
+    )
 
 
 mode_service = ModeService()

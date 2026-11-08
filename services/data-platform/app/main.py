@@ -9,6 +9,7 @@ from common.config.logging import setup_logging
 from common.errors.handlers import register_exception_handlers
 from common.observability.metrics import mount_metrics
 from common.trace.middleware import TraceMiddleware
+from app.api.auth import register_service_auth_handlers
 from app.api.health import router as health_router
 from app.api.qc_source import router as qc_source_router
 from app.api.snapshot import router as snapshot_router
@@ -50,6 +51,15 @@ async def lifespan(app: FastAPI):
         from common.llm.transport import aclose_shared_client
 
         await aclose_shared_client()
+        # T133：关闭 qc/complaint 共享出站 client 连接池（长生命周期复用，
+        # 关停显式释放，无悬挂连接；幂等 best-effort，失败不阻断关停）
+        from app.integrations.qc_client import aclose_shared_qc_http_client
+        from app.integrations.complaint_client import (
+            aclose_shared_complaint_http_client,
+        )
+
+        await aclose_shared_qc_http_client()
+        await aclose_shared_complaint_http_client()
         # W4：关闭 Redis 连接池（job/result 快照缓存；仅 reset 会留池到进程退出）
         from app.core.redis import aclose_redis
 
@@ -71,6 +81,8 @@ app.add_middleware(TraceMiddleware)
 # 同时注册无需鉴权的 GET /metrics（原生 exposition，不包统一信封）。
 mount_metrics(app, service_name="data-platform")
 register_exception_handlers(app)
+# T91：数据面服务间凭证 401 统一信封处理器（豁免仅 health/metrics）
+register_service_auth_handlers(app)
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(qc_source_router)
 app.include_router(snapshot_router)

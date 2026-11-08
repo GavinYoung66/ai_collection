@@ -29,7 +29,14 @@ from common.resilience.rate_limit import allow
 from common.trace.middleware import get_trace_id
 
 from app import audit
-from app.asgi_util import make_replay_receive, read_body
+from app.asgi_util import (
+    MAX_BODY_BYTES,
+    JSONRPC_PAYLOAD_TOO_LARGE_CODE as _JSONRPC_PAYLOAD_TOO_LARGE_CODE,
+    BodyTooLargeError,
+    ClientDisconnectedError,
+    make_replay_receive,
+    read_body,
+)
 from app.config import settings
 
 logger = structlog.get_logger()
@@ -117,7 +124,15 @@ class MCPRateLimitMiddleware:
             await self.asgi_app(scope, receive, send)
             return
 
-        body = await read_body(receive)
+        # T103（spec mcp-gateway：请求体读取上限与断连处理）：累计超 1MB 返回 413
+        # 并停止累积；客户端断连后无响应可发，读取协程直接退出不挂起。
+        try:
+            body = await read_body(receive)
+        except BodyTooLargeError:
+            await self._respond_413(scope, send)
+            return
+        except ClientDisconnectedError:
+            return
 
         # 重放缓冲 body 仅一次，此后回退原 receive：streamable-http 长连接 SSE
         # 会持续调 receive 轮询 http.disconnect，若无限重放 http.request 会空转挂起
@@ -199,6 +214,36 @@ class MCPRateLimitMiddleware:
             {
                 "type": "http.response.start",
                 "status": 429,
+                "headers": headers,
+            }
+        )
+        await send({"type": "http.response.body", "body": payload})
+    @staticmethod
+    async def _respond_413(scope, send) -> None:  # noqa: ARG004 — ASGI 签名统一
+        """请求体超限 413（T103，spec mcp-gateway：请求体读取上限与断连处理）。
+
+        JSON-RPC error 信封与 429 同风格；code 取服务端保留段 -32002
+        （-32000 已被 429 占用、-32001 已被 401 占用，顺延不冲突）。
+        body 超限未完整读取，JSON-RPC id 无法回显，按协议置 null。
+        """
+        payload_obj = {
+            "jsonrpc": "2.0",
+            "error": {
+                "code": _JSONRPC_PAYLOAD_TOO_LARGE_CODE,
+                "message": "payload too large",
+                "data": {"reason": "payload_too_large", "limit_bytes": MAX_BODY_BYTES},
+            },
+            "id": None,
+        }
+        payload = json.dumps(payload_obj, ensure_ascii=False).encode("utf-8")
+        headers = [(b"content-type", b"application/json")]
+        trace_id = get_trace_id()
+        if trace_id:
+            headers.append((b"x-trace-id", trace_id.encode("utf-8", "ignore")))
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
                 "headers": headers,
             }
         )

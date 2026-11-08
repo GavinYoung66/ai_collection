@@ -1,0 +1,10 @@
+{
+  "complaint_id": "CP-2026-0001",
+  "user_id": "U10001",
+  "case_ids": [
+    "C-2026-0001"
+  ],
+  "complaint_text": "催收人员在晚上11点打电话威胁我。",
+  "submit_time": "2026-09-01T10:00:00+08:00",
+  "source_channel": "phone"
+}

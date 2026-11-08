@@ -45,6 +45,9 @@ def require_roles(*roles: str) -> Callable:
 
     async def check(request: Request) -> dict | None:
         if not settings.auth_required:
+            # T89：认证关闭（本地调试）时注入本地审批身份，使依赖已认证身份的
+            # 逻辑（模式切换两阶段审批）本地可用；生产 auth_required=true 恒强制真实 JWT。
+            request.state.user = {"sub": "local-admin", "role": "admin"}
             return None
         header = request.headers.get(_AUTH_HEADER, "")
         token = header[len(_BEARER_PREFIX) :].strip() if header.startswith(_BEARER_PREFIX) else ""

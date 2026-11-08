@@ -1,14 +1,17 @@
 """QC 韧性 hooks 适配器：记录 qc.* 事件，不进 M1 六频道 Redis。"""
 from __future__ import annotations
 
+from collections import deque
 from typing import Any
 
 import structlog
 
 logger = structlog.get_logger()
 
-# 与 QcEventPublisher.emitted 隔离，避免走六频道 _publish / Redis PUBLISH
-emitted: list[tuple[str, dict[str, Any]]] = []
+# 与 QcEventPublisher.emitted 隔离，避免走六频道 _publish / Redis PUBLISH；
+# T102：有界（deque maxlen），长期运行不得因观测列表无界增长泄漏内存。
+MAX_EMITTED = 1000
+emitted: deque[tuple[str, dict[str, Any]]] = deque(maxlen=MAX_EMITTED)
 
 
 async def on_resilience_event(name: str, payload: dict[str, Any]) -> None:

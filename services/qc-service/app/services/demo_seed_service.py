@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
+from app.core.config import qc_settings
 from app.events.publisher import event_call_id
 from app.repositories.demo_repo import DemoSeedRepo
 from app.repositories.demo_store import DemoSessionStore, DemoTraceStore
@@ -84,13 +85,15 @@ class DemoSeedService:
         commit = getattr(self.repo.session, "commit", None)
         if commit is not None:
             await commit()
-        token = create_token({"sub": str(reviewer_id), "role": "qc_reviewer"})
-        return {
+        data: dict[str, Any] = {
             "session_ids": [item["session_id"] for item in sessions],
             "sessions": sessions,
-            "token": token,
             "reviewer_id": str(reviewer_id),
         }
+        # T87：token 签发仅受 DEMO_MODE 开关控制；关闭时响应不含 "token" 键
+        if qc_settings.DEMO_MODE:
+            data["token"] = create_token({"sub": str(reviewer_id), "role": "qc_reviewer"})
+        return data
 
     async def pending(self) -> dict[str, Any]:
         registered = await self.store.list_all()

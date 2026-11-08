@@ -1,0 +1,21 @@
+{
+  "case_id": "C-2026-0004-A",
+  "case_info": {
+    "overdue_amount": 10000.0,
+    "overdue_days": 60,
+    "product_type": "personal_loan"
+  },
+  "call_evidence": [],
+  "history_tickets": [],
+  "history_complaints": [
+    {
+      "evidence_id": "HC-001",
+      "source": "history_complaint",
+      "content": "2026-06-01 历史投诉",
+      "confidence": 0.6,
+      "confidence_level": "medium",
+      "is_corrupted": false
+    }
+  ],
+  "qc_alerts": []
+}

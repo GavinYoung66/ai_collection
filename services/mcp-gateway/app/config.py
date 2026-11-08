@@ -68,6 +68,10 @@ class GatewaySettings(Settings):
     # rag 检索超时（秒）：检索含 ES+向量+rerank，源桥为 30s
     RAG_SEARCH_TIMEOUT: float = 30.0
 
+    # T91：data-platform 数据面出站服务间凭证（静态值须与 dp 侧 DP_SERVICE_TOKEN 同值）。
+    # 留空 = 以共享 JWT_SECRET 动态签发 sub=service:mcp-gateway 的内部服务 JWT。
+    DP_SERVICE_TOKEN: str = ""
+
     # ===== Batch 3：可靠性层 =====
     # 服务名：熔断/限流 key 派生前缀（{svc}:mcp_degraded:{server} / {svc}:mcp_ratelimit:{server}）。
     # 对齐 spec 键型 csmp:mcp_degraded:{server}；启动时经 set_default_service 注入

@@ -1,0 +1,9 @@
+[
+  {
+    "template_id": "TPL-V2-POOR-001",
+    "title": "服务体验致歉与改进模板（V2）",
+    "template_text": "尊敬的客户：核查未发现硬性违规，但对服务态度问题我们表示歉意，将加强坐席礼仪培训并提供更清晰的还款指引（虚构模板）。",
+    "doc_id": "TPL-V2-POOR-001",
+    "applicable_scenarios": ["compliant_but_poor_experience", "v2_poor_experience"]
+  }
+]

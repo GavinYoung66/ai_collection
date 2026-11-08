@@ -1,0 +1,15 @@
+[
+  {
+    "qc_id": "QC-V2-POOR-001",
+    "alert_id": "QC-V2-POOR-001",
+    "violation_type": "soft_attitude",
+    "violation_rule_id": "RULE-ATTITUDE-SOFT",
+    "call_session_id": "S-V2-POOR-001",
+    "start_ts": "10:30:45",
+    "end_ts": "10:31:20",
+    "snippet_text": "打断提问 / 语气生硬",
+    "description": "无硬性法规违规；标记服务态度与打断风险（虚构软告警）",
+    "score": 0.55,
+    "scenario": "v2_poor_experience"
+  }
+]

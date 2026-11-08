@@ -1,0 +1,8 @@
+{
+  "verdict": "agent_violation",
+  "confidence": 0.92,
+  "reasoning": "坐席违反催收时段规定并使用威胁性语言，有法规支撑。",
+  "conflicts": [],
+  "conflict_highlight": false,
+  "per_case_verdicts": {}
+}

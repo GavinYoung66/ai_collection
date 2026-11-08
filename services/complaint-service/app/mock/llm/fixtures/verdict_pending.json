@@ -1,0 +1,10 @@
+{
+  "verdict": "pending",
+  "confidence": 0.4,
+  "reasoning": "证据存在核心冲突且合规判定缺失，需人工复核。",
+  "conflicts": [
+    "金额陈述不一致"
+  ],
+  "conflict_highlight": true,
+  "per_case_verdicts": {}
+}

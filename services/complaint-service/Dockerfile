@@ -24,8 +24,7 @@ RUN grep -vE '^rocketmq-python-client' requirements.lock > /tmp/requirements.bas
 COPY common/ ./common/
 # 只拷 app 子目录到 /app/app/（原写法嵌套成 /app/app/app/，uvicorn app.main:app 找不到入口）
 COPY services/complaint-service/app/ ./app/
-# Mock MCP/LLM 在 USE_MOCK_*=true 时从 tests.mock 懒加载（dev 默认）
-COPY services/complaint-service/tests/__init__.py ./tests/__init__.py
-COPY services/complaint-service/tests/mock/ ./tests/mock/
+# T121：Mock MCP/LLM 在 USE_MOCK_*=true 时从 app.mock 懒加载（dev 默认），
+# 随上方 app/ 整体 COPY 进镜像，不再依赖 tests/ 目录
 ENV PYTHONPATH=/app
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

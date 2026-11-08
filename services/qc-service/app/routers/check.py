@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.auth import require_roles_if_enabled
 from app.core.config import qc_settings
 from app.deps import get_job_store, get_quality_repo, get_rag_client, get_redis
 from app.errors import envelope, http_status_for, success
@@ -32,13 +33,33 @@ router = APIRouter(prefix="/api/v1/qc", tags=["qc-check"])
 ALLOWED_SPEAKERS = frozenset({"agent", "user", "ai", "human"})
 RAW_RATE_LIMIT = 10
 RAW_RATE_WINDOW = 1
+# T88：sid/batch 限流与 raw 同量级、同 qc:ratelimit:* 命名空间
+SID_RATE_LIMIT = 10
+SID_RATE_WINDOW = 1
+BATCH_RATE_LIMIT = 10
+BATCH_RATE_WINDOW = 1
+
+# T88：三写端点统一鉴权（复用 qc 既有 if-enabled 语义，保持本地调试可用）
+qc_write_roles = require_roles_if_enabled("admin", "supervisor")
 
 
-def _raw_rate_user(request: Request) -> str:
-    """用户维：X-User-Id → 客户端 IP → anon。"""
-    return request.headers.get("X-User-Id") or (
-        get_client_ip(request) or "anon"
-    )
+def _rate_user_key(request: Request) -> str:
+    """T116：服务端可信身份命名空间（spec qc-service/api-layer：质检写端点限流身份可信）。
+
+    - 已认证（T88 `qc_write_roles` 验签后注入 ``request.state.user``）→ ``uid:{sub}``；
+    - 未认证 / 本地放行（auth_required=false，state.user 未注入）→ ``ip:{addr}``
+      （``get_client_ip`` 走 T68 ``TRUST_PROXY_HEADERS`` 机制：代理头仅在可信
+      网关后采信，非法格式回退 ASGI client）；
+    - MUST NOT 直接信任客户端可伪造的 ``X-User-Id``（每伪造一个 id 即得独立
+      配额）。V4 取证（deploy/gateway/docker-entrypoint.sh:63-66）：网关
+      auth_request 模式以 auth 服务验签产物覆写该头，但绕过网关的直连流量
+      不受保护，服务端限流身份 MUST 以验签 sub / 对端 IP 为准。
+    """
+    user = getattr(request.state, "user", None)
+    sub = user.get("sub") if isinstance(user, dict) else None
+    if sub:
+        return f"uid:{sub}"
+    return f"ip:{get_client_ip(request) or 'anon'}"
 
 
 class ReplayPathBody(BaseModel):
@@ -129,12 +150,40 @@ async def get_replay_service(
 
 
 async def raw_rate_limit(request: Request, redis=Depends(get_redis)) -> None:
-    user = _raw_rate_user(request)
+    key = _rate_user_key(request)
     configure_redis(redis)
     allowed = await rate_limit_allow(
-        f"qc:ratelimit:raw:{user}",
+        f"qc:ratelimit:raw:{key}",
         limit=RAW_RATE_LIMIT,
         window=RAW_RATE_WINDOW,
+        context={"trace_id": get_trace_id()},
+    )
+    if not allowed:
+        raise BizException(ErrorCode.B0006)
+
+
+async def sid_rate_limit(request: Request, redis=Depends(get_redis)) -> None:
+    """T88：replay/{sid} 限流，键与 raw 同命名空间（T116 同口径可信身份）。"""
+    key = _rate_user_key(request)
+    configure_redis(redis)
+    allowed = await rate_limit_allow(
+        f"qc:ratelimit:sid:{key}",
+        limit=SID_RATE_LIMIT,
+        window=SID_RATE_WINDOW,
+        context={"trace_id": get_trace_id()},
+    )
+    if not allowed:
+        raise BizException(ErrorCode.B0006)
+
+
+async def batch_rate_limit(request: Request, redis=Depends(get_redis)) -> None:
+    """T88：check/batch 限流，键与 raw 同命名空间（T116 同口径可信身份）。"""
+    key = _rate_user_key(request)
+    configure_redis(redis)
+    allowed = await rate_limit_allow(
+        f"qc:ratelimit:batch:{key}",
+        limit=BATCH_RATE_LIMIT,
+        window=BATCH_RATE_WINDOW,
         context={"trace_id": get_trace_id()},
     )
     if not allowed:
@@ -164,6 +213,7 @@ def _result_response(result) -> JSONResponse:
 async def replay_raw(
     body: RawQcSession,
     replay: ReplayService = Depends(get_replay_service),
+    _auth: None = Depends(qc_write_roles),
     _: None = Depends(raw_rate_limit),
     idempotency_key: str = Header(..., alias="X-Idempotency-Key"),
     force_header: str | None = Header(None, alias="X-QC-Force-Rerun"),
@@ -181,6 +231,8 @@ async def replay_raw(
 async def replay_by_id(
     session_id: str,
     replay: ReplayService = Depends(get_replay_service),
+    _auth: None = Depends(qc_write_roles),
+    _rate: None = Depends(sid_rate_limit),
     body: ReplayPathBody | None = None,
     force_header: str | None = Header(None, alias="X-QC-Force-Rerun"),
 ):
@@ -193,7 +245,10 @@ async def replay_by_id(
 async def check_batch(
     body: BatchBody,
     replay: ReplayService = Depends(get_replay_service),
+    _auth: None = Depends(qc_write_roles),
+    _rate: None = Depends(batch_rate_limit),
 ):
+    # 校验顺序：鉴权/限流依赖先行 → QC_BATCH_MAX 上限校验 → 质检管道
     if len(body.session_ids) > qc_settings.QC_BATCH_MAX:
         return _qc_json(ErrorCode.A2004.value)
     accepted: list[dict[str, Any]] = []

@@ -1,0 +1,25 @@
+{
+  "opinions": [
+    {
+      "behavior": "23:05致电用户",
+      "is_violation": true,
+      "regulation_refs": [
+        "REG-001"
+      ],
+      "reasoning": "违反催收时段规定（22:00-08:00禁止致电）"
+    },
+    {
+      "behavior": "威胁上门",
+      "is_violation": true,
+      "regulation_refs": [
+        "REG-002"
+      ],
+      "reasoning": "违反禁止使用威胁性语言"
+    }
+  ],
+  "regulation_refs": [
+    "REG-001",
+    "REG-002"
+  ],
+  "overall_compliance": "violation"
+}

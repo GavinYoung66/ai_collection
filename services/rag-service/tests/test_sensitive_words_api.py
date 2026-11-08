@@ -8,6 +8,13 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.api import sensitive_words as sw
+from common.security.rbac import create_token
+
+
+def _admin_headers() -> dict:
+    # T117：current.dict 收口后要求 ADMIN/SUPERVISOR——既有用例带 admin 头保持
+    # 原验证意图（字典文本返回与 404 语义）
+    return {"Authorization": f"Bearer {create_token({'sub': 'u-admin', 'role': 'ADMIN'})}"}
 
 
 class TestSensitiveWordsCurrentDict:
@@ -27,7 +34,7 @@ class TestSensitiveWordsCurrentDict:
         )
 
         client = TestClient(app)
-        resp = client.get("/api/v1/sensitive-words/current.dict")
+        resp = client.get("/api/v1/sensitive-words/current.dict", headers=_admin_headers())
 
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/plain")
@@ -48,6 +55,6 @@ class TestSensitiveWordsCurrentDict:
         )
 
         client = TestClient(app)
-        resp = client.get("/api/v1/sensitive-words/current.dict")
+        resp = client.get("/api/v1/sensitive-words/current.dict", headers=_admin_headers())
 
         assert resp.status_code == 404

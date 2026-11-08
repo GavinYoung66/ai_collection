@@ -6,6 +6,8 @@
 【批次2】`@llm_breaker` 全局单实例已替换为 per-key breaker
 （key=`{svc}:llm_degraded:{model}`），一个模型/服务的熔断不再影响其他
 服务与模型，消灭 `csmp:llm_degraded=1` 全局单 key。
+【T106】per-key 熔断注册表收敛为 reliability.orchestrator._llm_breakers
+单源，本模块不再自建第二套注册表。
 
 底层经 common.llm.transport.post_chat_completions（不再使用 openai SDK）。
 """
@@ -13,19 +15,15 @@ from __future__ import annotations
 
 from common.config.settings import settings
 from common.llm.reliability import (
+    _llm_breakers,  # T106：与编排器共享同一注册表单例（熔断状态单一事实源）
     call_with_retry,
     is_placeholder_secret,
     require_real_secret,
     resolve_service_name,
 )
-from common.resilience.breaker import BreakerRegistry, make_llm_breaker_key
+from common.resilience.breaker import make_llm_breaker_key
 from common.llm.constants import DASHSCOPE_COMPAT_BASE  # T44：单一常量源
 from common.llm.transport import message_content_from_completions, post_chat_completions
-
-_per_key_breakers = BreakerRegistry(
-    fail_max=settings.LLM_CIRCUIT_BREAKER_THRESHOLD,
-    reset_timeout=settings.LLM_CIRCUIT_BREAKER_RECOVERY,
-)
 
 
 def _resolve_api_key() -> str:
@@ -37,8 +35,13 @@ def _resolve_api_key() -> str:
 
 
 def _breaker_for(model: str | None):
-    """per-service-per-model 熔断器；无全局单 key。"""
-    return _per_key_breakers.get_or_create(
+    """per-service-per-model 熔断器；无全局单 key。
+
+    T106：复用 reliability.orchestrator 的 ``_llm_breakers`` 同一注册表单例——
+    legacy ``chat`` 入口与 ``invoke_llm`` 编排入口对同一模型 key 读写同一
+    熔断状态机，不出现一边 open 一边 closed 的状态分裂。
+    """
+    return _llm_breakers.get_or_create(
         make_llm_breaker_key(resolve_service_name(), model or settings.LLM_MODEL)
     )
 

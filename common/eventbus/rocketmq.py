@@ -42,6 +42,7 @@ from common.resilience.retry import (
     retry_async,
     retry_delay,
 )
+from common.utils.time_parse import parse_naive_or_aware
 
 logger = structlog.get_logger(__name__)
 
@@ -55,16 +56,17 @@ RECEIVE_INVISIBLE_DURATION = 300
 
 
 def _parse_ts(value: datetime | str | None) -> datetime | None:
-    """Parse an ISO8601 bound; naive values are treated as UTC."""
+    """解析 ISO8601 时间边界（T105：收敛到 time_parse 单源，spec §6.2）。
+
+    平台约定：naive 输入按业务时区 Asia/Shanghai 解释——此前本地实现 naive 按
+    UTC，``replay_dlq`` 运维传不带时区的窗口（since/until）会偏移 8 小时。
+    事件侧时间戳不受影响：occurred_at 为发布方 aware ISO 串；broker 侧
+    dlq_timestamp 由本模块以 ``datetime.now(timezone.utc).isoformat()`` 生成
+    （aware，:515/:570），aware 输入在 parse_naive_or_aware 中原样返回。
+    """
     if value is None:
         return None
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    text = value.strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    parsed = datetime.fromisoformat(text)
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return parse_naive_or_aware(value)
 
 
 def _dlq_event_time(body: dict[str, Any]) -> datetime | None:

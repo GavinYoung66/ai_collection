@@ -59,8 +59,13 @@ async def _graded_call(
     return await retry_async(
         lambda: _mcp_transport(server, tool, payload, timeout_seconds),
         policy=policy,
-        should_retry=lambda exc: not isinstance(
-            exc, (asyncio.TimeoutError, PermissionError)
+        # T108：异常携带 retryable=False（如下游 4xx 参数/协议校验错，bridge_http
+        # 标记）时跳过重试——重试无意义且每次都计熔断失败（spec mcp-gateway：
+        # 下游因参数校验返回的 4xx MUST 视为不可重试，MUST NOT 计入熔断失败
+        # 次数）。未携带该属性的异常保持既有分级语义（超时/权限不重试）。
+        should_retry=lambda exc: (
+            not isinstance(exc, (asyncio.TimeoutError, PermissionError))
+            and getattr(exc, "retryable", True)
         ),
     )
 
@@ -99,6 +104,12 @@ async def call_tool(
         # 权限拒绝不会自愈：不重试、不计熔断失败，直接终止
         raise
     except Exception as e:
+        # T108：不可重试错（下游 4xx 参数/协议校验错，retryable=False，bridge_http
+        # 标记）不重试也不计熔断失败——重复失败计数只会误开熔断（spec
+        # mcp-gateway：下游因参数校验返回的 4xx MUST 视为不可重试，MUST NOT
+        # 计入熔断失败次数，后续正常调用仍可执行）。
+        if not getattr(e, "retryable", True):
+            raise
         await breaker.record_failure(e, context=context)  # 业务错重试耗尽 → 计一次失败
         raise
     await breaker.record_success()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from typing import Any
 
 import structlog
@@ -16,7 +17,11 @@ STALE_AFTER_SECONDS = 2 * 3600
 PROCESS_STARTED_AT = time.time()
 _last_success_load_at: float | None = None
 _mismatch_since: float | None = None
-_events: list[dict[str, Any]] = []
+# T102（spec runtime-correctness：常驻进程内存有界）：容量上限显式常量——
+# deque(maxlen) 环形截断后 10 万次 emit 长度稳定在上限内，RSS 不线性增长；
+# 消费方 captured_events() 返回 list 快照，deque 形态对调用方透明。
+_EVENTS_MAXLEN = 1000
+_events: deque[dict[str, Any]] = deque(maxlen=_EVENTS_MAXLEN)
 
 FORBIDDEN_METRIC_EVENTS = frozenset({"qc.escalate.triggered"})
 

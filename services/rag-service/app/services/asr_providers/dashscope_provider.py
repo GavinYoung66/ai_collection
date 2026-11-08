@@ -195,11 +195,18 @@ class DashScopeASRProvider(ASRProvider):
             raise RuntimeError("ASR service is in circuit-break state")
 
         try:
-            duration = self._probe_duration(audio_bytes, fmt)
+            # T93：ffprobe 探测为同步 subprocess（subprocess.run(timeout=30)），
+            # MUST NOT 在事件循环线程内同步执行（期间 /health 与并发请求全部
+            # 阻塞）——实现体不动，仅调用点移入线程池（对齐 whisper_provider
+            # 既有 T65 声明形态）
+            duration = await asyncio.to_thread(self._probe_duration, audio_bytes, fmt)
             # 超过 4 分钟才需要分段（接口上限 5 分钟，保留余量）
             if duration is not None and duration > 240:
                 try:
-                    segments = self._segment_audio(audio_bytes, fmt)
+                    # T93：ffmpeg 分段为同步 subprocess（subprocess.run(timeout=600)，
+                    # 最长阻塞约 630s）——MUST NOT 在事件循环线程内同步执行；
+                    # 实现体不动，仅调用点移入线程池
+                    segments = await asyncio.to_thread(self._segment_audio, audio_bytes, fmt)
                 except Exception as e:
                     logger.warning(
                         "asr_segment_failed",

@@ -22,6 +22,11 @@ class QcSettings(Settings):
     QC_DP_SESSION_PATH: str = "/api/v1/data/sessions/{session_id}/qc-source"
     QC_DP_PENDING_QC_PATH: str = "/api/v1/data/sessions:pending-qc"
     QC_DP_TIMEOUT: int = 5
+    # T91：dp 数据面服务间凭证——静态 token 显式配置时优先（运维自管签发/过期）；
+    # 留空则由 DpClient 以共享 JWT_SECRET 动态签发（sub=service:qc-service，
+    # 过期取 common JWT_EXPIRE_HOURS；密钥缺省占位由 T03 validate_required_secrets
+    # 生产 fail-fast 闸门承接，凭证配置源统一定义见 common Settings）
+    QC_DP_SERVICE_TOKEN: str = ""
     # 主模型：DeepSeek 线上 V4.1 Flash（官方调用名 deepseek-flash，api-docs.deepseek.com）；
     # qwen 系列保留在降级链（DashScope 兜底），llm_reviewer 按模型名前缀路由 provider
     QC_LLM_MODEL: str = "deepseek-flash"
@@ -41,6 +46,9 @@ class QcSettings(Settings):
     QC_ALERT_LEVEL_MIN: str = "high"
     QC_BATCH_MAX: int = 100
     QC_MOCK_LLM: bool = False  # true 跳过真实 LLM，不熔断、不发 A2011；默认 false
+    # T87：DEMO_MODE 仅控制 demo seed 的 qc_reviewer token 签发分支，不控制灌数本身；
+    # 缺省 false（fail-closed），需要演示 token 时显式开启
+    DEMO_MODE: bool = False
     QC_DEFAULT_ACTIVE_RULES_VERSION: str = "v1.0"
     QC_R14_RAG_ENABLED: bool = False  # 单测/无 rag 默认 false；compose 演示钉 true
     QC_REDIS_DB: int = 3

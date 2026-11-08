@@ -1,28 +1,38 @@
 """rag 客户端：GET current.dict；QC_R14_RAG_ENABLED 时 POST /kb/search。
 
 search 失败 MUST NOT 累加词库熔断计数。
+【T107】词库熔断收敛 common/resilience/breaker.CircuitBreaker 单源
+（半开恢复 + 失败计数清零），替换手写 _consecutive_failures 只开不关
+状态机；probe_dict_reachable 在 open/half-open 时如实返回 False。
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import httpx
 
 from app.core.config import qc_settings
 from common.llm.reliability import call_with_retry
-from common.resilience.breaker import BreakerRegistry, make_mcp_breaker_key
+from common.resilience.breaker import (
+    BreakerRegistry,
+    BreakerState,
+    CircuitBreaker,
+    make_mcp_breaker_key,
+)
 from common.trace.middleware import get_trace_id
 
 DICT_PATH = "/api/v1/sensitive-words/current.dict"
 SEARCH_PATH = "/api/v1/kb/search"
 RAG_RETRY_ATTEMPTS = 3
 RAG_BREAKER_FAILURES = 2
+RAG_DICT_BREAKER_RESET_TIMEOUT = 60
 SEARCH_SCORE_THRESHOLD = 0.6
 SEARCH_SNIPPET_MAX = 80
 SEARCH_DEFAULT_CATEGORY = "script"
 SEARCH_DEFAULT_TOP_K = 3
 RAG_MCP_BREAKER_KEY = make_mcp_breaker_key("qc", "rag_kb")
+RAG_DICT_BREAKER_KEY = make_mcp_breaker_key("qc", "rag_dict")
 _search_breakers = BreakerRegistry(fail_max=3, reset_timeout=60)
 
 
@@ -84,6 +94,7 @@ class RagClient:
         timeout: float | None = None,
         retry_delay: float = 1.0,
         client: httpx.AsyncClient | None = None,
+        breaker_clock: Callable[[], float] | None = None,
     ) -> None:
         self._base = (base_url or qc_settings.QC_RAG_SENSITIVE_BASE).rstrip("/")
         self._timeout = float(timeout if timeout is not None else qc_settings.QC_RAG_INITIAL_TIMEOUT)
@@ -92,7 +103,15 @@ class RagClient:
         self._owns_client = client is None
         self._words: list[str] = []
         self._ac_ref: tuple[str, ...] | None = None
-        self._consecutive_failures = 0
+        # T107：词库熔断收敛 common CircuitBreaker（半开恢复 + 失败计数清零），
+        # 替换手写 _consecutive_failures 只开不关状态机。
+        breaker_kwargs = {"clock": breaker_clock} if breaker_clock is not None else {}
+        self._dict_breaker = CircuitBreaker(
+            RAG_DICT_BREAKER_KEY,
+            fail_max=RAG_BREAKER_FAILURES,
+            reset_timeout=RAG_DICT_BREAKER_RESET_TIMEOUT,
+            **breaker_kwargs,
+        )
         self._request_log: list[tuple[str, str]] = []
         self._last_search_payload: dict[str, Any] | None = None
 
@@ -107,12 +126,16 @@ class RagClient:
 
     @property
     def breaker_open(self) -> bool:
-        return self._consecutive_failures >= RAG_BREAKER_FAILURES
+        """词库熔断 open/half-open（半开=探针未决，同样不放行后续请求）。"""
+        return self._dict_breaker.state in (
+            BreakerState.OPEN.value,
+            BreakerState.HALF_OPEN.value,
+        )
 
     @property
     def fetch_healthy(self) -> bool:
-        """最近一次 current.dict 拉取成功且未熔断。失败/OPEN 时 WordLoader 不得改 version。"""
-        return self._consecutive_failures == 0
+        """最近一次 current.dict 拉取成功且失败计数已清零。失败/OPEN 时 WordLoader 不得改 version。"""
+        return self._dict_breaker.failures == 0
 
     def dict_url(self) -> str:
         return f"{self._base}{DICT_PATH}"
@@ -147,8 +170,13 @@ class RagClient:
         return resp.text
 
     async def fetch_current_dict(self) -> list[str]:
-        """拉取词库。OPEN 时 MUST NOT GET；成功则清零计数并闭合。"""
-        if self.breaker_open:
+        """拉取词库。熔断拒绝时 MUST NOT GET；成功则清零失败计数并闭合。
+
+        T107：common CircuitBreaker 状态机——open 冷却
+        （RAG_DICT_BREAKER_RESET_TIMEOUT 秒）期满后放行唯一半开探针，
+        探针成功即关闭并清零失败计数，探针失败重开并重置计时。
+        """
+        if not await self._dict_breaker.before_call():
             return list(self._words)
         try:
             body = await call_with_retry(
@@ -158,19 +186,23 @@ class RagClient:
                 backoff=2.0,
                 exceptions=(httpx.HTTPError, OSError),
             )
-        except (httpx.HTTPError, OSError):
-            self._consecutive_failures += 1
+        except (httpx.HTTPError, OSError) as exc:
+            await self._dict_breaker.record_failure(exc)
             return list(self._words)
         words = parse_current_dict(body)
         self._words = words
         self._ac_ref = tuple(words)
-        self._consecutive_failures = 0
+        await self._dict_breaker.record_success()
         return list(self._words)
 
     async def probe_dict_reachable(self, timeout: float = 1.0) -> bool:
-        """Health 短超时单次 GET current.dict。失败 False；不发 /kb/search。"""
+        """Health 短超时单次 GET current.dict。失败 False；不发 /kb/search。
+
+        T107：熔断 open/half-open 时如实返回 False（MUST NOT 报告连通）；
+        probe 为只读探针，不写熔断状态机。
+        """
         if self.breaker_open:
-            return bool(self._words or self._ac_ref)
+            return False
         headers = {"Accept": "text/plain"}
         trace_id = get_trace_id()
         if trace_id:
@@ -205,7 +237,7 @@ class RagClient:
     ) -> str | None:
         """POST /api/v1/kb/search。score≥0.6 则截断 content 至 80 字；失败返回 None。
 
-        瞬时 ``call_with_retry``（与 current.dict 同次数）；不累加 `_consecutive_failures`。
+        瞬时 ``call_with_retry``（与 current.dict 同次数）；不累加词库熔断失败计数。
         """
         q = (query or "").strip()
         if not q:

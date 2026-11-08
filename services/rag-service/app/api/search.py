@@ -97,12 +97,22 @@ async def hybrid_search(
     if settings.KB_CACHE_ENABLED and not skip_cache:
         # T21：匿名固定 anon 作用域，行级权限开启时登录用户按身份隔离，避免缓存跨身份泄漏
         scope = query_cache.identity_scope(jwt_payload, settings.KB_ROW_LEVEL_ENABLED)
+        # T101：cache key 收录请求级 rewrite 位——rewrite=true/false 召回语义不同，
+        # 不隔离则 TTL 内共享缓存条目发生语义漂移（spec hybrid-search：缓存键语义完整性）
         cache_key = query_cache.make_cache_key(
-            req.query, req.category, req.top_k, scope=scope
+            req.query, req.category, req.top_k, scope=scope, rewrite=req.rewrite
         )
         cache_start = time.time()
         cached = await query_cache.get_cached(cache_key)
         if cached is not None:
+            # T128：缓存命中时响应 trace_id 统一覆盖为本次请求 contextvar
+            # （get_trace_id()）。缓存值内嵌的是写入请求的旧 trace_id，直接
+            # 原样返回会让命中响应的追踪标识无法在本次请求日志链路中检索到
+            # （spec hybrid-search：缓存键语义完整性与 trace 一致性）。
+            # 最小改动裁决：写入端保留完整响应结构（兼容 TTL 内已存在的旧
+            # 缓存条目，无需缓存版本迁移），仅在命中出口覆盖；
+            # cached 为 json.loads 反序列化的新 dict，覆盖不污染 Redis 存储。
+            cached["trace_id"] = get_trace_id()
             # 缓存命中也必须落 kb_search_logs（cache_hit='1'），
             # 否则命中率监控失真（V1-T20，对齐 step6/02 检索命中率指标）
             await LogService(db).log(

@@ -90,18 +90,29 @@ def identity_scope(
 
 
 def make_cache_key(
-    query: str, category: str | None, top_k: int, scope: str | None = None
+    query: str,
+    category: str | None,
+    top_k: int,
+    scope: str | None = None,
+    rewrite: bool = False,
 ) -> str:
-    """    V2 cache key: rag:cache:query:v2:{md5(len(query)+":"+query+category+top_k+flags_hash+scope)}。
+    """    V2 cache key: rag:cache:query:v2:{md5(len(query)+":"+query+category+top_k+flags_hash+scope+rewrite)}。
 
     T75：query 段加长度前缀（spec §6.5 钉死）——消除拼接歧义（如 query="ab"+
     category="c" 与 query="abc"+category=None 的旧 key 相同导致串扰）；旧 key 由
     TTL 自然过期失效，无需迁移。
 
+    T101：key 追加请求级 rewrite 位——同一 query 以 rewrite=true 与 rewrite=false
+    检索语义不同（改写会改写召回词），不隔离则 TTL 内共享缓存条目发生语义漂移；
+    旧 key 自然过期失效，无需迁移。
+
     flags_hash 随功能开关状态变化（V2 7 个 + V4 1 个 + T21 1 个），开关切换后旧缓存
     自动隔离不命中；scope 为身份作用域（见 ``identity_scope``），匿名固定 ``anon``。
     """
-    raw = f"{len(query)}:{query}|{category or ''}|{top_k}|{_flags_hash()}|{scope or ''}"
+    raw = (
+        f"{len(query)}:{query}|{category or ''}|{top_k}|{_flags_hash()}"
+        f"|{scope or ''}|{1 if rewrite else 0}"
+    )
     return _CACHE_KEY_PREFIX + hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 

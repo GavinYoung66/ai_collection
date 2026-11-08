@@ -199,8 +199,12 @@ async def test_mcp_server_token_bucket_per_server():
 
 @pytest.mark.asyncio
 async def test_user_key_resolution():
-    """用户维 key：X-User-Id 优先，缺失回退 IP，再缺匿名。"""
+    """用户维 key（T116）：服务端可信身份 uid:{sub}/ip:{addr} 命名空间——
+    客户端可伪造的 X-User-Id 不再被采信（V4：网关覆写仅覆盖网关路径，
+    直连流量以 JWT 验签 sub / 对端 IP 为准）。"""
     resolve = RateLimiter.resolve_user_key
-    assert resolve({"X-User-Id": "u1"}, "1.2.3.4") == "u1"
-    assert resolve({}, "1.2.3.4") == "1.2.3.4"
-    assert resolve(None, None) == "anonymous"
+    assert resolve({"sub": "u1"}, "1.2.3.4") == "uid:u1"
+    # headers 形态（X-User-Id）不再被信任：按对端 IP 维度
+    assert resolve({"X-User-Id": "u1"}, "1.2.3.4") == "ip:1.2.3.4"
+    assert resolve(None, "1.2.3.4") == "ip:1.2.3.4"
+    assert resolve(None, None) == "ip:anonymous"

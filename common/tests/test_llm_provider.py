@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from common.llm import provider as provider_mod
+from common.llm import reliability as reliability_mod
 
 
 @pytest.mark.asyncio
@@ -51,10 +52,9 @@ async def test_chat_json_sets_json_object(monkeypatch):
 # ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _isolate_service():
-    from common.llm import reliability as reliability_mod
 
     reliability_mod.set_default_service("csmp")
-    provider_mod._per_key_breakers.clear()
+    reliability_mod._llm_breakers.clear()
     yield
     reliability_mod.set_default_service(None)
 
@@ -63,7 +63,7 @@ def _isolate_service():
 async def test_chat_circuit_open_rejects_without_post(monkeypatch):
     monkeypatch.setattr(provider_mod.settings, "LLM_API_KEY", "sk-test")
     monkeypatch.setattr(provider_mod.settings, "LLM_MODEL", "qwen-plus")
-    breaker = provider_mod._per_key_breakers.get_or_create("csmp:llm_degraded:qwen-plus")
+    breaker = reliability_mod._llm_breakers.get_or_create("csmp:llm_degraded:qwen-plus")
     for _ in range(3):
         await breaker.record_failure()
 
@@ -80,7 +80,7 @@ async def test_chat_circuit_open_rejects_without_post(monkeypatch):
 async def test_chat_per_model_isolation(monkeypatch):
     monkeypatch.setattr(provider_mod.settings, "LLM_API_KEY", "sk-test")
     monkeypatch.setattr(provider_mod.settings, "LLM_MODEL", "qwen-plus")
-    breaker = provider_mod._per_key_breakers.get_or_create("csmp:llm_degraded:qwen-plus")
+    breaker = reliability_mod._llm_breakers.get_or_create("csmp:llm_degraded:qwen-plus")
     for _ in range(3):
         await breaker.record_failure()
 

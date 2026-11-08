@@ -43,6 +43,21 @@ class AlertRepo:
             row.id = aid or uuid4()
         return row
 
+    async def list_by_record(self, qc_record_id: UUID | str) -> list[QcAlert]:
+        """T97：重放告警判重读取——返回该质检记录的全部未删告警行。
+
+        供 replay 重放分支按 violation_id 关联判重：同一违规行的告警已存在则
+        跳过插入，at-least-once 重投不重复推送告警（qc_alerts 无唯一索引，
+        以应用层判重实现明细幂等）。
+        """
+        rid = qc_record_id if isinstance(qc_record_id, UUID) else UUID(str(qc_record_id))
+        stmt = select(QcAlert).where(
+            QcAlert.qc_record_id == rid,
+            QcAlert.is_delete == "0",
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def get(self, alert_id: UUID | str) -> QcAlert | None:
         try:
             aid = alert_id if isinstance(alert_id, UUID) else UUID(str(alert_id))
@@ -59,6 +74,7 @@ class AlertRepo:
         page_size: int,
         status: str | None = None,
         session_id: str | None = None,
+        qc_record_id: UUID | str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         stmt = (
             select(QcAlert, QcRecord.session_id, QcViolation.evidence_text)
@@ -70,6 +86,11 @@ class AlertRepo:
             stmt = stmt.where(QcAlert.status == status)
         if session_id:
             stmt = stmt.where(QcRecord.session_id == session_id)
+        # T129：qc_record_id 下推数据层 WHERE——call_qc MCP 告警查询按记录精确过滤，
+        # 消除"只取前 N 条后内存过滤"的后段静默漏报；HTTP /qc/alerts 不传此参，行为不变。
+        if qc_record_id:
+            rid = qc_record_id if isinstance(qc_record_id, UUID) else UUID(str(qc_record_id))
+            stmt = stmt.where(QcAlert.qc_record_id == rid)
         count_stmt = select(func.count()).select_from(stmt.subquery())
         total = int((await self.session.execute(count_stmt)).scalar_one() or 0)
         stmt = stmt.order_by(QcAlert.create_time.desc()).offset((page - 1) * page_size).limit(page_size)

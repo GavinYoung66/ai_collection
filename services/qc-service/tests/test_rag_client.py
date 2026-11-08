@@ -86,7 +86,7 @@ class TestRagClientFetch:
         assert first == ["立案"]
         assert second == ["立案"]
         assert client.ac_ref is old_ref
-        assert client._consecutive_failures == RAG_BREAKER_FAILURES
+        assert client._dict_breaker.failures == RAG_BREAKER_FAILURES
         assert client.breaker_open is True
         _assert_no_search(list(client.recorded_urls()))
         assert all("current.dict" in url for url in client.recorded_urls())
@@ -133,12 +133,12 @@ class TestRagClientFetch:
         first = await client.fetch_current_dict()
         assert first == ["立案"]
         assert client.breaker_open is False
-        assert client._consecutive_failures == 1
+        assert client._dict_breaker.failures == 1
 
         second = await client.fetch_current_dict()
         assert second == ["起诉"]
         assert client.ac_ref == ("起诉",)
-        assert client._consecutive_failures == 0
+        assert client._dict_breaker.failures == 0
         assert client.breaker_open is False
 
 
@@ -202,7 +202,7 @@ class TestRagClientSearch:
         snippet = await client.search("再不还就起诉你")
         assert snippet is None
         assert posts["n"] == RAG_RETRY_ATTEMPTS
-        assert client._consecutive_failures == 0
+        assert client._dict_breaker.failures == 0
         assert client.breaker_open is False
         words = await client.fetch_current_dict()
         assert words == ["起诉"]
@@ -219,7 +219,7 @@ class TestRagClientSearch:
         client = RagClient(base_url="http://rag-service:8000", retry_delay=0, client=http)
         assert await client.search("强制执行") is None
         assert hits["n"] == RAG_RETRY_ATTEMPTS
-        assert client._consecutive_failures == 0
+        assert client._dict_breaker.failures == 0
 
     @pytest.mark.asyncio
     async def test_empty_results_returns_none(self):

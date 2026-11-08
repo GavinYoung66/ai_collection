@@ -22,6 +22,7 @@ from mcp.client.streamable_http import streamable_http_client
 from app.bridge_http import BridgeHttpClient, BridgeNotFound
 from app.config import settings
 from app.mcp_errors import MCPError, MCPTimeoutError
+from common.security.ssrf import check_outbound_url
 
 logger = structlog.get_logger()
 
@@ -81,6 +82,17 @@ async def call_qc_remote(
     params["session_id"] = session_id
 
     url = f"{settings.QC_SERVICE_URL.rstrip('/')}/mcp"
+    # T109：出站连接前过 SSRF 校验单源（spec mcp-gateway：出站校验全覆盖）——
+    # 本 client 是唯一绕过 bridge_http 共享基座的出站点（直用 httpx + MCP client），
+    # 其余 toolset 均经 BridgeHttpClient 内置校验；allowed_hosts=None 跳过主机
+    # 白名单比对（QC_SERVICE_URL 为服务配置的内部主机名），但云元数据/回环/
+    # 内网 IP 字面量仍被无条件阻断，与 bridge 形态一致。
+    reason = check_outbound_url(url)
+    if reason is not None:
+        logger.warning(
+            "qc_mcp_outbound_rejected", url=url, reason=reason, trace_id=trace_id
+        )
+        raise MCPError("call_qc", tool, f"outbound url rejected: {reason}")
     try:
         # mcp 1.30 streamable_http_client 不收 timeout 参数：经注入 http_client 控制超时
         async with httpx.AsyncClient(timeout=_CALL_TIMEOUT) as http_client:

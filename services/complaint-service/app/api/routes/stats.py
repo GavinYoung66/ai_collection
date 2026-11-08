@@ -2,17 +2,25 @@
 
 GET /complaints/stats：按 verdict 四值分组 + 指标
 GET /complaints/consistency：AI-人工一致率
+
+T90：整组挂 require_roles("admin","supervisor")——与 mode/complaints 组同口径
+（complaint 版内嵌 auth_required 开关，本地关认证放行调试）。
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
+from app.api.auth import require_roles
 from app.api.response import success
 from app.api.schemas.complaint import ConsistencyResponse, StatsResponse
 from app.models.state import VerdictType
-from app.service.stats_service import stats_service
+from app.service.stats_service import STATS_DATA_SOURCE, stats_service
 
-router = APIRouter(prefix="/complaints", tags=["stats"])
+router = APIRouter(
+    prefix="/complaints",
+    tags=["stats"],
+    dependencies=[Depends(require_roles("admin", "supervisor"))],
+)
 
 
 @router.get("/stats")
@@ -26,6 +34,7 @@ async def get_stats(request: Request):
         evidence_insufficient_rate=st["evidence_insufficient_ratio"],
         mcp_failure_rate=st["mcp_failure_rate"],
         ai_human_consistency_rate=st["ai_human_consistency_rate"],
+        data_source=STATS_DATA_SOURCE,
     )
     return success(data=data.model_dump(mode="json"), request=request)
 
@@ -43,5 +52,6 @@ async def get_consistency(request: Request):
             VerdictType.compliant_but_poor_experience.value: 0.90,
             VerdictType.pending.value: 0.0,
         },
+        data_source=STATS_DATA_SOURCE,
     )
     return success(data=data.model_dump(mode="json"), request=request)

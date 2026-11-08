@@ -1,0 +1,21 @@
+{
+  "case_id": "C-2026-0006",
+  "case_info": {},
+  "call_evidence": [
+    {
+      "evidence_id": "CALL-006",
+      "source": "call",
+      "case_id": "C-2026-0006",
+      "turn_number": 1,
+      "timestamp": "2026-08-28T16:00:01",
+      "content": "###***&&&...###",
+      "confidence": 0.3,
+      "confidence_level": "low",
+      "confidence_reason": "ASR乱码，核心内容缺失",
+      "is_corrupted": true
+    }
+  ],
+  "history_tickets": [],
+  "history_complaints": [],
+  "qc_alerts": []
+}

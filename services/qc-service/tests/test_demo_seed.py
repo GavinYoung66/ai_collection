@@ -18,7 +18,6 @@ from common.db.session import get_session
 from app.seeds.demo_scenarios import DEMO_SCENARIOS
 from app.services.demo_seed_service import DemoSeedService
 from app.services.llm_reviewer import LLMReviewer
-from common.security.rbac import verify_token
 from tests.test_job_store import MemoryRedis
 from tests.test_replay_api import ENVELOPE_KEYS, ApiFakeSession, FakeDp, FakeQualityRepo
 
@@ -147,10 +146,8 @@ class TestDemoSeed:
         speakers = {turn["speaker"] for turn in demo_repo.turns}
         assert speakers <= {"ai", "user"}
         assert "agent" not in speakers
-        payload = verify_token(data["token"])
-        assert payload is not None
-        assert payload["role"] == "qc_reviewer"
-        assert payload["sub"] == data["reviewer_id"]
+        # T87：DEMO_MODE 缺省 false，seed 响应不含 qc_reviewer token；reviewer_id 仍返回
+        assert "token" not in data
         UUID(data["reviewer_id"])
 
     def test_two_seeds_yield_six_distinct_session_ids(self):

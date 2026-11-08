@@ -1,8 +1,10 @@
 """FastAPI 依赖注入 + 统一响应助手。"""
 import os
 import tempfile
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
@@ -51,6 +53,23 @@ _session_service: SessionService | None = None
 # V5 服务单例
 _llm_service: LLMService | None = None
 
+# T127（spec platform/runtime-correctness：惰性单例初始化线程安全）：
+# 下方 13 个惰性单例 getter（5 个同步 def + 8 个 async def，含 get_redis）
+# 原为无锁 check-then-act——并发首调（多线程/多 worker）会各自构造一个实例，
+# 其中 get_llm_service 的实例分裂会让 LLMService 内部并发信号量 ×N 放大。
+# 裁决：统一一把进程级 threading.Lock 做 DCL（双重检查锁定）——
+# 1) 不用 asyncio.Lock：模块级 asyncio.Lock 在 Python 3.10+ 首次 acquire 时
+#    绑定 event loop，pytest-asyncio 每用例新建 loop，跨用例复用即抛
+#    RuntimeError；且 5 个同步 getter 无法在同步上下文使用 asyncio.Lock。
+# 2) 各 getter 构造临界区均为纯同步属性赋值（Redis/httpx/LLMService 等
+#    构造不建立网络连接；RoutingService/RowAccessService 仅读本地 YAML），
+#    持锁微秒级；async getter 唯一的 await（get_redis）置于锁外，
+#    临界区内零 await，不阻塞事件循环。
+# 3) 兼容既有测试注入形态：monkeypatch.setattr("app.api.deps._xxx", stub)
+#    直接赋值模块级变量——替身非 None 时首检命中直接返回替身，不进锁，
+#    无需额外 reset 钩子。
+_SINGLETON_LOCK = threading.Lock()
+
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with async_session_factory() as session:
@@ -60,21 +79,49 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 async def get_redis() -> Redis:
     global _redis_client
     if _redis_client is None:
-        _redis_client = Redis(
-            host=settings.REDIS_HOST,
-            port=settings.REDIS_PORT,
-            db=settings.RAG_REDIS_DB,
-            decode_responses=True,
-        )
+        with _SINGLETON_LOCK:  # T127：DCL 双检，并发首调仅构造一次
+            if _redis_client is None:
+                _redis_client = Redis(
+                    host=settings.REDIS_HOST,
+                    port=settings.REDIS_PORT,
+                    db=settings.RAG_REDIS_DB,
+                    decode_responses=True,
+                )
     return _redis_client
 
 
 # T77：会话身份绑定（owner 归属）内存 store——session_id → (owner, bound_at)。
 # owner 为内存 store 追加字段，无持久化 schema 变更（design 2.3.2）；
 # 匿名会话 TTL 缩短（1h 过期自动失效），登录 owner 绑定 24h。
-_SESSION_OWNERS: dict[str, tuple[str, float]] = {}
+# T102（spec runtime-correctness：常驻进程内存有界）：OrderedDict 保序 + 容量
+# 上限显式常量——写入前先清扫 TTL 过期条目，仍超限按插入序驱逐最旧；攻击者以
+# 随机 X-Session-Id 刷请求不再线性增长（惰性 TTL 清理只覆盖被再次读取的 sid，
+# 随机 sid 永不再读会永久驻留，必须有容量上限兜底）。
+_SESSION_OWNERS: OrderedDict[str, tuple[str, float]] = OrderedDict()
+_SESSION_OWNERS_MAX = 10_000
 _OWNER_TTL_SECONDS = 24 * 3600.0
 _ANON_SESSION_TTL_SECONDS = 3600.0
+
+
+def _owner_ttl(owner: str) -> float:
+    """owner 对应的绑定 TTL：匿名 1h，登录 24h。"""
+    return _ANON_SESSION_TTL_SECONDS if owner == "anon" else _OWNER_TTL_SECONDS
+
+
+def _bind_session_owner(sid: str, owner: str) -> None:
+    """登记/升级 owner 绑定；仅容量达上限时触发清扫（稳态零开销）。"""
+    if len(_SESSION_OWNERS) >= _SESSION_OWNERS_MAX:
+        now = time.time()
+        expired = [
+            sid_
+            for sid_, (owner_, bound_at) in _SESSION_OWNERS.items()
+            if now - bound_at > _owner_ttl(owner_)
+        ]
+        for sid_ in expired:
+            _SESSION_OWNERS.pop(sid_, None)
+        while len(_SESSION_OWNERS) >= _SESSION_OWNERS_MAX:
+            _SESSION_OWNERS.popitem(last=False)
+    _SESSION_OWNERS[sid] = (owner, time.time())
 
 
 def _verified_sub(request: Request) -> str | None:
@@ -93,8 +140,7 @@ def _owner_of(sid: str) -> str | None:
     if entry is None:
         return None
     owner, bound_at = entry
-    ttl = _ANON_SESSION_TTL_SECONDS if owner == "anon" else _OWNER_TTL_SECONDS
-    if time.time() - bound_at > ttl:
+    if time.time() - bound_at > _owner_ttl(owner):
         _SESSION_OWNERS.pop(sid, None)
         return None
     return owner
@@ -119,7 +165,7 @@ def get_session_id(request: Request) -> str:
     if sub:
         owner = _owner_of(sid)
         if owner is None or owner == "anon":
-            _SESSION_OWNERS[sid] = (sub, time.time())  # 首次绑定/匿名升级为登录
+            _bind_session_owner(sid, sub)  # 首次绑定/匿名升级为登录（T102 有界写入）
         elif owner != sub:
             raise BizException(
                 ErrorCode.A2002, "session 归属校验失败（owner 不匹配）"
@@ -127,53 +173,65 @@ def get_session_id(request: Request) -> str:
     elif raw:
         # 匿名显式 session_id：登记弱保护条目（TTL 1h 缩短）
         if _owner_of(sid) is None:
-            _SESSION_OWNERS[sid] = ("anon", time.time())
+            _bind_session_owner(sid, "anon")
     return sid
 
 
 def get_milvus_client() -> MilvusClient:
     global _milvus_client
     if _milvus_client is None:
-        _milvus_client = MilvusClient()
+        with _SINGLETON_LOCK:  # T127：DCL 双检，并发首调仅构造一次
+            if _milvus_client is None:
+                _milvus_client = MilvusClient()
     return _milvus_client
 
 
 def get_es_client() -> ESClient:
     global _es_client
     if _es_client is None:
-        _es_client = ESClient()
+        with _SINGLETON_LOCK:  # T127：DCL 双检，并发首调仅构造一次
+            if _es_client is None:
+                _es_client = ESClient()
     return _es_client
 
 
 async def get_embed_client() -> EmbedClient:
     global _embed_client
     if _embed_client is None:
-        redis = await get_redis()
-        _embed_client = EmbedClient(redis=redis)
+        redis = await get_redis()  # T127：await 置于锁外，临界区内零 await
+        with _SINGLETON_LOCK:
+            if _embed_client is None:  # T127：DCL 双检
+                _embed_client = EmbedClient(redis=redis)
     return _embed_client
 
 
 async def get_rerank_client() -> RerankClient:
     global _rerank_client
     if _rerank_client is None:
-        redis = await get_redis()
-        _rerank_client = RerankClient(redis=redis)
+        redis = await get_redis()  # T127：await 置于锁外，临界区内零 await
+        with _SINGLETON_LOCK:
+            if _rerank_client is None:  # T127：DCL 双检
+                _rerank_client = RerankClient(redis=redis)
     return _rerank_client
 
 
 async def get_ocr_client() -> OCRClient:
     global _ocr_client
     if _ocr_client is None:
-        redis = await get_redis()
-        _ocr_client = OCRClient(redis=redis)
+        redis = await get_redis()  # T127：await 置于锁外，临界区内零 await
+        with _SINGLETON_LOCK:
+            if _ocr_client is None:  # T127：DCL 双检
+                _ocr_client = OCRClient(redis=redis)
     return _ocr_client
 
 
 async def get_asr_client() -> ASRClient:
     global _asr_client
     if _asr_client is None:
-        redis = await get_redis()
-        _asr_client = ASRClient(redis=redis)
+        redis = await get_redis()  # T127：await 置于锁外，临界区内零 await
+        with _SINGLETON_LOCK:
+            if _asr_client is None:  # T127：DCL 双检
+                _asr_client = ASRClient(redis=redis)
     return _asr_client
 
 
@@ -182,37 +240,47 @@ async def get_asr_client() -> ASRClient:
 async def get_rewrite_service() -> RewriteService:
     global _rewrite_service
     if _rewrite_service is None:
-        redis = await get_redis()
-        _rewrite_service = RewriteService(redis=redis)
+        redis = await get_redis()  # T127：await 置于锁外，临界区内零 await
+        with _SINGLETON_LOCK:
+            if _rewrite_service is None:  # T127：DCL 双检
+                _rewrite_service = RewriteService(redis=redis)
     return _rewrite_service
 
 
 def get_routing_service() -> RoutingService:
     global _routing_service
     if _routing_service is None:
-        _routing_service = RoutingService()
+        with _SINGLETON_LOCK:  # T127：DCL 双检，并发首调仅构造一次
+            if _routing_service is None:
+                _routing_service = RoutingService()
     return _routing_service
 
 
 def get_weighting_service() -> WeightingService:
     global _weighting_service
     if _weighting_service is None:
-        _weighting_service = WeightingService()
+        with _SINGLETON_LOCK:  # T127：DCL 双检，并发首调仅构造一次
+            if _weighting_service is None:
+                _weighting_service = WeightingService()
     return _weighting_service
 
 
 def get_row_access_service() -> RowAccessService:
     global _row_access_service
     if _row_access_service is None:
-        _row_access_service = RowAccessService()
+        with _SINGLETON_LOCK:  # T127：DCL 双检，并发首调仅构造一次
+            if _row_access_service is None:
+                _row_access_service = RowAccessService()
     return _row_access_service
 
 
 async def get_session_service() -> SessionService:
     global _session_service
     if _session_service is None:
-        redis = await get_redis()
-        _session_service = SessionService(redis=redis)
+        redis = await get_redis()  # T127：await 置于锁外，临界区内零 await
+        with _SINGLETON_LOCK:
+            if _session_service is None:  # T127：DCL 双检
+                _session_service = SessionService(redis=redis)
     return _session_service
 
 
@@ -223,24 +291,30 @@ async def get_llm_service() -> LLMService:
       （SensitiveWordsSyncService 既有逻辑），每次短 session 读取，
       LLMService 内部以 TTL 300s 缓存词集，不阻塞请求主链路；
       读取失败按空词集处理（LLM 回答仍可用，仅红线校验不生效并告警）。
+    - T127 信号量留痕：LLMService.__init__ 内 self._sem =
+      asyncio.Semaphore(settings.LLM_MAX_CONCURRENCY)（llm_service.py）。
+      单例唯一后全进程仅一个 _sem 实例，并发获取不再产生 N 份信号量，
+      并发检索信号量上限恒等于配置值（修复前实例分裂致上限 ×N 放大）。
     """
     global _llm_service
     if _llm_service is None:
-        redis = await get_redis()
+        redis = await get_redis()  # T127：await 置于锁外，临界区内零 await
+        with _SINGLETON_LOCK:
+            if _llm_service is None:  # T127：DCL 双检，并发首调仅构造一次
+                async def _fetch_redline_words() -> set[str]:
+                    try:
+                        async with async_session_factory() as db:
+                            text = await SensitiveWordsSyncService(
+                                db, redis
+                            ).get_current_dict()
+                        return {w.strip() for w in text.splitlines() if w.strip()}
+                    except Exception as e:
+                        logger.warning("llm_redline_words_fetch_failed", error=str(e))
+                        return set()
 
-        async def _fetch_redline_words() -> set[str]:
-            try:
-                async with async_session_factory() as db:
-                    text = await SensitiveWordsSyncService(
-                        db, redis
-                    ).get_current_dict()
-                return {w.strip() for w in text.splitlines() if w.strip()}
-            except Exception as e:
-                logger.warning("llm_redline_words_fetch_failed", error=str(e))
-                return set()
-
-        _llm_service = LLMService(redis=redis, word_provider=_fetch_redline_words)
+                _llm_service = LLMService(redis=redis, word_provider=_fetch_redline_words)
     return _llm_service
+
 
 
 def get_jwt_payload(request: Request) -> dict | None:

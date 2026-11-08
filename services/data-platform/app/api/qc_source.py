@@ -1,4 +1,9 @@
-"""M1 只读拉数：qc-source / pending-qc。禁止 POST 回调 qc。"""
+"""M1 只读拉数：qc-source / pending-qc。禁止 POST 回调 qc。
+
+T91 隔离声明：本路由组不加入 api-gateway 对外路由（deploy/gateway/nginx.conf），
+且 MUST 携带服务间凭证（内部 JWT）方可访问——"网关未挂载"不作为唯一防护表述；
+与 snapshot.py 既有声明口径对齐（spec 5.5.1 规则 2"代码内显式声明可查证"）。
+"""
 from __future__ import annotations
 
 from datetime import date, datetime
@@ -9,12 +14,17 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.auth import require_service_credential
 from app.services.qc_source import get_qc_source, list_pending_session_ids
 from common.db.session import get_session
 from common.errors.codes import ERROR_MESSAGES
 from common.trace.middleware import get_trace_id
 
-router = APIRouter(prefix="/api/v1/data", tags=["qc-source"])
+router = APIRouter(
+    prefix="/api/v1/data",
+    tags=["qc-source"],
+    dependencies=[Depends(require_service_credential)],
+)
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 

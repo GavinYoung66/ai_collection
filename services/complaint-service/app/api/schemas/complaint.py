@@ -80,7 +80,11 @@ class ComplaintDetailResponse(BaseModel):
 # ── judge ──
 
 class JudgeRequest(BaseModel):
-    run_graph: bool = Field(default=False, description="是否真实跑图（默认 False stub）")
+    # T95：None = 未显式指定，由路由按部署形态取默认（生产 True / 演示 False）；
+    # 显式 True/False 优先，MUST NOT 用 schema 缺省值掩盖"未指定"语义。
+    run_graph: Optional[bool] = Field(
+        default=None, description="是否真实跑图；缺省按部署形态（生产 True）"
+    )
 
 
 class JudgeResponse(BaseModel):
@@ -239,9 +243,15 @@ class StatsResponse(BaseModel):
     evidence_insufficient_rate: float = 0.0
     mcp_failure_rate: float = 0.0
     ai_human_consistency_rate: float = 0.0
+    # T122：当前全部指标为硬编码演示数据（stats_service 批次9+ 接 PG）。
+    # 必填字段：由路由显式写入（见 app/api/routes/stats.py），接入真实数据源时
+    # 不会因遗漏而静默沿用 demo_stub；监控/报表据此区分演示与真实指标。
+    data_source: str
 
 
 class ConsistencyResponse(BaseModel):
     ai_human_consistency_rate: float
     total_reviewed: int
     by_verdict_consistency: dict[str, float]
+    # T122：同 StatsResponse——必填字段，由路由显式写入数据源标记。
+    data_source: str

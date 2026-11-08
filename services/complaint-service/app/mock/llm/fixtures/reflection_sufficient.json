@@ -1,0 +1,13 @@
+{
+  "evidence_sufficient": true,
+  "missing_evidence": [],
+  "contradictions": [],
+  "loop_count": 0,
+  "per_case_reflection": {
+    "C-2026-0001": {
+      "evidence_sufficient": true,
+      "missing_evidence": [],
+      "contradictions": []
+    }
+  }
+}

@@ -17,7 +17,10 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-config.set_main_option("sqlalchemy.url", settings.pg_dsn)
+# T115：ConfigParser 默认开启 %(name)s 插值——DSN 中 URL 编码后的 `%xx`
+# （如密码含空格 → %20）会被当成插值语法而报 ValueError。此处转义 `%` 为
+# `%%`，读取时（ConfigParser.items/get 默认 raw=False）自动还原为单个 `%`。
+config.set_main_option("sqlalchemy.url", settings.pg_dsn.replace("%", "%%"))
 
 
 def run_migrations_offline() -> None:

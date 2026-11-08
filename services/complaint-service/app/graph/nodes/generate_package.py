@@ -22,7 +22,7 @@ from common.prompt.loader import load_prompt
 from app.service.degrade_llm import node_degrade_fallback
 from app.service.evidence_refs import extract_doc_ids_from_hits
 from app.service.guardrails_postcheck import postcheck
-from app.service.security import mask_before_persist
+
 
 logger = structlog.get_logger()
 
@@ -63,12 +63,14 @@ async def generate_package_node(state: ComplaintSessionState) -> dict:
             error_type=type(e).__name__, message=str(e), node="generate_package"
         ).model_dump()
 
+    # T113：prompt 脱敏由 ComplaintLLMProvider.invoke 入口单点承接
+    # （spec observability「Prompt 外发前脱敏」），节点侧不重复实现。
     prompt = load_prompt(
         "complaint_generate_package",
         service="complaint-service",
-        verdict_draft=mask_before_persist(str(state.verdict_draft.model_dump())[:2000]),
-        rag_templates=mask_before_persist(str(rag_result)[:1000]),
-        complaint_text=mask_before_persist(state.complaint_text[:1500]),
+        verdict_draft=str(state.verdict_draft.model_dump())[:2000],
+        rag_templates=str(rag_result)[:1000],
+        complaint_text=state.complaint_text[:1500],
     )
     llm = get_llm_provider()
     try:

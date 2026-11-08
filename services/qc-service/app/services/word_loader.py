@@ -41,13 +41,9 @@ class WordLoader:
 
     async def load_once(self, *, event_version: str | None = None) -> dict[str, Any]:
         current = await self._current_version()
-        if self.rag.breaker_open:
-            evaluate_words_stale(
-                fetch_failing=True,
-                qc_version=current,
-                rag_version=event_version,
-            )
-            return {"ok": False, "kept_old": True, "reason": "breaker_open", "version": current}
+        # T107：熔断短路统一由 rag.fetch_current_dict 内 before_call 判定——
+        # 不再前置 breaker_open 短路，open 冷却期满后半开探针可经本链路放行恢复；
+        # 拒绝时 fetch 返回旧词表且 fetch_healthy=False，kept_old 语义不变。
         words = await self.rag.fetch_current_dict()
         if not self.rag.fetch_healthy:
             evaluate_words_stale(

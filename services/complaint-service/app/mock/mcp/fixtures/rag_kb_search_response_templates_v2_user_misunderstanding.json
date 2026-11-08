@@ -1,0 +1,9 @@
+[
+  {
+    "template_id": "TPL-V2-MIS-001",
+    "title": "计息规则解释与对账模板（V2）",
+    "template_text": "尊敬的客户：关于提前结清与计息时点，说明如下……我们将协助核对账务并反馈结果（虚构模板）。",
+    "doc_id": "TPL-V2-MIS-001",
+    "applicable_scenarios": ["user_misunderstanding", "v2_user_misunderstanding"]
+  }
+]

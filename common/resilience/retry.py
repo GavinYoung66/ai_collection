@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+from asyncio import CancelledError as _CancelledError
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from functools import wraps
@@ -79,6 +80,28 @@ def retry_delay(attempt: int, policy: RetryPolicy = DEFAULT_RETRY) -> float:
     return delay
 
 
+def _matches_retryable(
+    exc: BaseException, exceptions: tuple[type[BaseException], ...]
+) -> bool:
+    """T104：沿 ``__cause__``/``__context__`` 链判定可重试异常（spec
+    resilience-primitives：重试分类契约——MUST 能识别被转译为业务异常的底层
+    可重试错误，MUST NOT 出现"声明 N 次指数退避、实际零重试"的契约失真）。
+
+    函数体把底层可重试错误（如 aiohttp.ClientError/TimeoutError）转译为业务
+    异常（``raise BizException(...) from exc``）时，裸 isinstance 匹配不到。
+    链首命中即 True，与既有 isinstance 语义完全一致；新增 cause/context 回溯
+    仅覆盖显式/隐式转译形态，未转译调用方零行为变化。
+    """
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, exceptions):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 async def retry_async(
     fn: Callable[[], Awaitable[T]],
     *,
@@ -92,13 +115,22 @@ async def retry_async(
     - ``should_retry`` 返回 False 时立即抛出（如超时/权限错误不重试）；
     - ``on_retry`` 在每次失败后调用，参数为 (第几次失败, 异常, 本次退避秒数)；
       最后一次失败也会回调（delay=0），供事件总线记录 retry 指标；
-    - 退避次数耗尽后抛出最后一次异常。
+    - 退避次数耗尽后抛出最后一次异常；
+    - 可重试判定沿 cause 链（``_matches_retryable``，T104）：函数体内转译为
+      业务异常的底层可重试错误仍按声明执行退避。
     """
     last_error: BaseException | None = None
     for attempt in range(1, policy.max_attempts + 1):
         try:
             return await fn()
-        except exceptions as exc:
+        except (KeyboardInterrupt, SystemExit, _CancelledError):
+            # 控制流异常永不重试（cause 链匹配也不得吞掉）。CancelledError
+            # 取模块加载期快照：本模块 asyncio 允许被测试替换为仅含 sleep
+            # 的替身，except 求值不得依赖被替换后的 asyncio 属性（T104 留痕）
+            raise
+        except BaseException as exc:  # noqa: BLE001 — 匹配下沉 _matches_retryable
+            if not _matches_retryable(exc, exceptions):
+                raise
             last_error = exc
             exhausted = attempt >= policy.max_attempts
             retryable = should_retry(exc) if should_retry is not None else True

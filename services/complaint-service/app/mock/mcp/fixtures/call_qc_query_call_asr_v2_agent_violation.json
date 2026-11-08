@@ -1,0 +1,14 @@
+[
+  {
+    "call_session_id": "S-V2-AGENT-001",
+    "call_start_time": "2026-09-05T23:18:00+08:00",
+    "call_duration": 240,
+    "asr_text_with_timestamp": [
+      {"ts": "23:18:05", "speaker": "agent", "text": "都这么晚了你还不接，是不是不想还了？"},
+      {"ts": "23:18:40", "speaker": "user", "text": "太晚了，能不能白天再打？"},
+      {"ts": "23:19:10", "speaker": "agent", "text": "你再不还钱我就去你家，还要把欠款情况告诉你单位同事。"}
+    ],
+    "agent_role": "agent",
+    "scenario": "v2_agent_violation"
+  }
+]

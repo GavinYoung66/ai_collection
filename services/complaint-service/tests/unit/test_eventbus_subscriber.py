@@ -89,11 +89,11 @@ async def test_handle_complaint_created_event_id_dedupe(monkeypatch):
         AsyncMock(return_value=("t", "compliant", "")),
         raising=False,
     )
-    # 真实进程内 claim（无 Redis）
+    # 真实进程内 claim（无 Redis）；_seen_event_ids 为 T102 有界化后的 dict 保序形态
     async def _claim(eid):
         if eid in sub_mod._seen_event_ids:
             return False
-        sub_mod._seen_event_ids.add(eid)
+        sub_mod._seen_event_ids[eid] = None
         return True
 
     monkeypatch.setattr(sub_mod, "_claim_event_id", _claim)

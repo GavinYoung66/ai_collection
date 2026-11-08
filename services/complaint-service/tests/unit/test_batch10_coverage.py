@@ -25,7 +25,7 @@ from app.graph.checkpointer import (
 from app.graph.nodes.human_review import human_review_node
 from app.models.state import ComplaintSessionState, ReviewAction, TaskStatus, VerdictType
 from app.service.complaint_service import complaint_service
-from app.service.mode_service import ModeService
+from app.service.mode_service import AuthenticatedApprover, ModeService
 from app.service.recovery_service import RecoveryService
 from app.service.scheduler import (
     cleanup_archived_90d,
@@ -241,7 +241,9 @@ class TestHumanReview:
         )
         assert final["task_status"] != TaskStatus.resolved.value
 
-    def test_unknown_action_defaults_approve(self):
+    def test_unknown_action_failsafe_pending_review(self):
+        """T114：非法恢复值（garbage）fail-safe——保持待复核 + exception_info，
+        不再默认 approve 自动结案（旧断言 resolved 固化的正是被整改缺陷）。"""
         st = self._state()
         from langgraph.types import Command
         from app.graph.builder import build_complaint_graph
@@ -250,7 +252,10 @@ class TestHumanReview:
         cfg = {"configurable": {"thread_id": "hr-3"}}
         asyncio.run(graph.ainvoke(st.model_dump(), cfg))
         final = asyncio.run(graph.ainvoke(Command(resume="garbage"), cfg))
-        assert final["task_status"] == TaskStatus.resolved.value
+        assert final["task_status"] == TaskStatus.pending_review.value
+        assert final["task_status"] != TaskStatus.resolved.value
+        assert final["exception_info"]["error_type"] == "invalid_review_action"
+        assert final["human_review"]["review_action"] is None
 
     def test_dict_review_action(self):
         """resume 传 dict 形式的 review_action。"""
@@ -346,17 +351,22 @@ class TestModeService:
 
     def test_switch_invalid_mode(self):
         m = ModeService()
-        ok, err = m.switch("invalid_mode", signers=["ops", "tech"])
+        ok, err = m.switch("invalid_mode", approver=None)
         assert ok is False
 
     def test_switch_rollback_on_redis_failure(self):
-        """Redis set 失败时回滚并返回 A5014。"""
+        """Redis 故障时 switch 返回 A5014（T89：审批记录设施故障同样拒绝不抛出）。"""
         class FailRedis:
             def get(self, k, default=None): return "single_agent"
             def set(self, k, v, ex=None): raise RuntimeError("redis down")
             def delete(self, k): return 1
+            def keys(self, pattern="*"): return []
         m = ModeService(redis_client=FailRedis())
-        ok, err = m.switch("multi_agent", signers=["ops", "tech"], gray_percent=50)
+        ok, err = m.switch(
+            "multi_agent",
+            approver=AuthenticatedApprover(sub="u1", role="admin"),
+            gray_percent=50,
+        )
         assert ok is False
 
     def test_full_switch_requires_consistency(self):

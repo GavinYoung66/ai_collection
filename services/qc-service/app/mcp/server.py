@@ -92,25 +92,37 @@ class CallQcServer:
         if record is None or self.alert_repo is None:
             return []
         session_id = str(params.get("session_id") or "")
-        items, _total = await self.alert_repo.list_alerts(
-            page=1,
-            page_size=100,
-            session_id=session_id or None,
-        )
         wanted = str(record.id)
         out: list[dict[str, Any]] = []
-        for item in items:
-            qc_record_id = str(item.get("qc_record_id") or "")
-            if qc_record_id != wanted:
-                continue
-            evidence = mask_text(str(item.get("evidence") or ""))
-            out.append(
-                {
-                    "qc_record_id": qc_record_id,
-                    "alert_id": str(item.get("alert_id") or ""),
-                    "evidence": evidence,
-                }
+        page = 1
+        page_size = 100
+        # T129：qc_record_id 下推数据层过滤（AlertRepo.list_alerts 的 SQL WHERE），
+        # 并分页遍历全部匹配结果——同一记录告警超过 100 条时也不截断；
+        # 下方内存匹配保留为纵深防御。
+        while True:
+            items, total = await self.alert_repo.list_alerts(
+                page=page,
+                page_size=page_size,
+                session_id=session_id or None,
+                qc_record_id=record.id,
             )
+            for item in items:
+                qc_record_id = str(item.get("qc_record_id") or "")
+                if qc_record_id != wanted:
+                    continue
+                evidence = mask_text(str(item.get("evidence") or ""))
+                out.append(
+                    {
+                        "qc_record_id": qc_record_id,
+                        "alert_id": str(item.get("alert_id") or ""),
+                        "evidence": evidence,
+                    }
+                )
+            # 空页 / 不足一页 / 已覆盖总数 → 结束；空页同时防御 total 与实际
+            # 行数不一致时死循环。
+            if not items or len(items) < page_size or page * page_size >= total:
+                break
+            page += 1
         return out
 
     async def _load_record(self, params: dict[str, Any]) -> Any | None:

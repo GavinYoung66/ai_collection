@@ -64,7 +64,8 @@ class MCPClient:
     def _get_transport(self) -> Any:
         """懒加载默认 transport（批次0 MockMCPClient）。"""
         if self._transport is None:
-            from tests.mock.mcp.mock_client import MockMCPClient
+            # T121：Mock 自 tests/mock 迁入 app/mock，生产镜像不再依赖 tests/
+            from app.mock.mcp.mock_client import MockMCPClient
 
             self._transport = MockMCPClient()
         return self._transport

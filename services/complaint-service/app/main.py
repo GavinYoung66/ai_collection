@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 import httpx
@@ -92,6 +93,7 @@ async def lifespan(app: FastAPI):
     app.state.pg_degraded = False
     app.state.redis_degraded = False
     app.state.mcp_degraded = False
+    app.state.mode_redis = None
 
     if not getattr(settings, "USE_MOCK_MCP", True):
         from app.mcp.validate import validate_real_mcp_config
@@ -131,6 +133,36 @@ async def lifespan(app: FastAPI):
         app.state.checkpointer_kind = "memory"
         app.state.pg_degraded = True
 
+    # T112：模式状态共享 Redis 装配（spec complaint-service/mode「模式状态多副本一致」）。
+    # ModeService 为同步 API，注入同步 Redis 客户端；ping 探活走 to_thread（事件循环
+    # 纪律）；失败降级保留进程内实现（与 checkpointer 降级形态一致），redis_degraded
+    # 由 /health 如实暴露。管理操作低频，运行期同步短超时 IO 可接受（状态行留痕）。
+    from app.service.mode_service import build_shared_redis_client, mode_service
+
+    mode_redis = None
+    try:
+        mode_redis = build_shared_redis_client()
+        await asyncio.to_thread(mode_redis.ping)
+        mode_service.set_redis_client(mode_redis)
+        logger.info("mode_redis_assembled")
+    except Exception as exc:  # noqa: BLE001 — 降级启动，不阻断服务
+        # T71/T112：Redis 不可达按降级处理——模式状态暂存进程内存（单副本语义），
+        # health 标记 degraded，值得暴露
+        logger.warning(
+            "mode_redis_assembly_degraded_to_memory",
+            error=str(exc),
+            exc_info=True,
+        )
+        # T112：ping 失败时客户端已创建，必须关闭释放连接池，避免启动期泄漏。
+        if mode_redis is not None:
+            try:
+                await asyncio.to_thread(mode_redis.close)
+            except Exception:  # noqa: BLE001 — 降级清理失败不阻断启动
+                logger.warning("mode_redis_close_failed_on_degrade", exc_info=True)
+        mode_redis = None
+        app.state.redis_degraded = True
+    app.state.mode_redis = mode_redis
+
     # MCP：standalone 且非 Mock 时探活网关，避免 health mcp 假绿
     # T43：异步探测，不阻塞事件循环（并发 /health 响应不因探测劣化）
     try:
@@ -169,6 +201,12 @@ async def lifespan(app: FastAPI):
         await aclose_shared_client()
     except Exception:  # noqa: BLE001 — 关闭失败不阻断 shutdown
         logger.warning("llm_shared_client_aclose_failed", exc_info=True)
+    # T112：关闭模式状态共享 Redis 连接（装配失败降级时为 None，跳过）。
+    if getattr(app.state, "mode_redis", None) is not None:
+        try:
+            await asyncio.to_thread(app.state.mode_redis.close)
+        except Exception:  # noqa: BLE001 — 关闭失败不阻断 shutdown
+            logger.warning("mode_redis_close_failed", exc_info=True)
     # W4：关闭 resilience 共享 Redis 连接池（rate_limit/idempotency 共用）。
     try:
         from common.resilience._redis import aclose_redis

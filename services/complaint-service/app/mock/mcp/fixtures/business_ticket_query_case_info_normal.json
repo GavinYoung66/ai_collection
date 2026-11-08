@@ -1,0 +1,14 @@
+{
+  "case_id": "C-2026-0001",
+  "overdue_amount": 5000.0,
+  "overdue_days": 30,
+  "repayment_records": [
+    {
+      "date": "2026-07-15",
+      "amount": 1000
+    }
+  ],
+  "customer_name": "张*",
+  "product_type": "personal_loan",
+  "create_time": "2026-06-01T00:00:00+08:00"
+}

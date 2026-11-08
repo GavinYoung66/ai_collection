@@ -1,0 +1,1 @@
+"""Mock MCP 子包（T121：自 tests/mock/mcp 迁入，供生产 USE_MOCK_MCP 懒加载）。"""

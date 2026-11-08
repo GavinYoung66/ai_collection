@@ -46,8 +46,15 @@ async def _fetch_snapshot_ctx(case_id: str) -> tuple[str, str, str]:
         return "", "客户", "未知"
     try:
         timeout = float(getattr(settings, "BRIDGE_HTTP_TIMEOUT", 5.0))
+        # T91：dp 数据面强制服务间凭证——以共享 JWT_SECRET 动态签发内部服务 JWT
+        # （该调用低频，每请求签发开销可忽略；静态 token 形态见 qc 侧同批裁决）
+        from common.security.rbac import create_token
+
+        headers = {
+            "Authorization": f"Bearer {create_token({'sub': 'service:complaint-service', 'role': 'service'})}"
+        }
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.get(url)
+            resp = await client.get(url, headers=headers)
         if resp.status_code != 200:
             logger.warning(
                 "complaint_text_snapshot_http_miss",

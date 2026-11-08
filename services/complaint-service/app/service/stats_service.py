@@ -24,6 +24,11 @@ _CONSISTENCY_ALERT_THRESHOLD = 0.80
 
 _VALID_VERDICTS = [v.value for v in VerdictType]
 
+# T122：统计链路当前为硬编码演示数据（批次9+ 接 PG）。接入真实数据源时
+# 把本常量改为 "real"，路由会显式写入响应；schema 字段已改为必填，
+# 新增构造点漏写会直接报校验错误，不会静默沿用 demo_stub。
+STATS_DATA_SOURCE = "demo_stub"
+
 
 class _InMemoryRedis:
     def __init__(self) -> None:
