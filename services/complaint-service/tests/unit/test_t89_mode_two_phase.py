@@ -31,7 +31,6 @@ from app.service.mode_service import (
     mode_service,
 )
 from common.config.settings import settings as platform_settings
-from common.errors.codes import ErrorCode
 from common.security.rbac import create_token
 from app.service.mode_service import _InMemoryRedis
 

@@ -41,8 +41,13 @@ def create_token(data: dict, expires_hours: int | None = None) -> str:
 
 def create_refresh_token(sub: str, expires_hours: int | None = None) -> str:
     """创建 refresh_token：载荷仅含 sub，不含 role（权限变更后旧 token 不续过期 role）。"""
-    to_encode = {"sub": sub, "type": "refresh"}
-    expire = datetime.now(timezone.utc) + timedelta(hours=expires_hours or getattr(settings, "JWT_REFRESH_HOURS", 168))
+    to_encode: dict[str, object] = {"sub": sub, "type": "refresh"}
+    refresh_hours = (
+        expires_hours
+        if expires_hours is not None
+        else int(getattr(settings, "JWT_REFRESH_HOURS", 168))
+    )
+    expire = datetime.now(timezone.utc) + timedelta(hours=refresh_hours)
     to_encode["exp"] = expire
     return jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 

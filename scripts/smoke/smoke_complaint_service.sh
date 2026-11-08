@@ -53,7 +53,9 @@ echo "========================================"
 check "GET /health 200" "curl -sf http://localhost:$PORT/health >/dev/null"
 check_body "GET /health service=complaint-service" "http://localhost:$PORT/health" "$NAME"
 check_body "GET /health status=ok" "http://localhost:$PORT/health" '"status":"ok"'
-check "GET /health no degraded" "curl -sf http://localhost:$PORT/health | grep -vq degraded"
+# T112：mode 共享 Redis 为可选依赖，缺失时必须如实暴露 degraded；CI 无 Redis，
+# 不再强求"零 degraded"，改为校验该状态字段存在且取值合法（ok/degraded）。
+check "GET /health redis status truthful" "curl -sf http://localhost:$PORT/health | grep -Eq '\"redis\":\"(ok|degraded)\"'"
 check "GET /api/v1/health 200" "curl -sf http://localhost:$PORT/api/v1/health >/dev/null"
 
 # ── create ──

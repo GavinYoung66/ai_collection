@@ -4,10 +4,9 @@
 """
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 # T121：自 tests/mock/mcp 迁入 app/mock/，内部依赖同步改为 app.mock 路径
 from app.mock.mcp.errors import MCPError, MCPTimeoutError
@@ -91,7 +90,7 @@ class MockMCPClient:
             dict 格式的返回数据
         """
         if tool not in ALL_TOOLS:
-            raise MCPError(server, tool, f"unknown tool")
+            raise MCPError(server, tool, "unknown tool")
 
         self._call_log.append(
             {

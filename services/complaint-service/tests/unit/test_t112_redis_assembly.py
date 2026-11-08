@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import fnmatch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from app.api.routes.mode import set_redis_client

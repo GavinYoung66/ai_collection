@@ -18,7 +18,6 @@ from fastapi.testclient import TestClient
 from app.api.deps import get_db, get_row_access_service
 from app.main import app
 from app.services.row_access_service import RowAccessService
-from common.errors.codes import ErrorCode
 from common.security.rbac import create_token
 
 

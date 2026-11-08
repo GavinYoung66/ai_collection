@@ -26,7 +26,6 @@ from tests.test_replay_api import (
     ApiFakeSession,
     FakeDp,
     FakeQualityRepo,
-    _empty_llm,
     _ready,
 )
 
@@ -158,9 +157,11 @@ class TestT88RateLimit:
         assert codes[10] == (429, "B0006")
         assert codes[0][1] != "B0006"
 
-    def test_rate_limit_keys_share_namespace(self):
+    def test_rate_limit_keys_share_namespace(self, monkeypatch):
         """T88 命名空间回归 + T116：限流键取服务端可信身份（uid:/ip: 命名空间），
         客户端可伪造的 X-User-Id 不再产生独立配额键。"""
+        # 注入可信代理头：TestClient 不提供 ASGI client 地址（CI 下为 None）。
+        monkeypatch.setattr(platform_settings, "TRUST_PROXY_HEADERS", True)
         db = ApiFakeSession()
         db.call_ids.add("sess_ok")
         redis = MemoryRedis(db=3)
@@ -169,12 +170,12 @@ class TestT88RateLimit:
         for i in range(11):
             client.post(
                 "/api/v1/qc/check/batch",
-                headers={"X-User-Id": "u-ns"},
+                headers={"X-User-Id": "u-ns", "X-Real-IP": "10.0.0.2"},
                 json={"batch_id": f"b{i}", "session_ids": ["sess_ok"]},
             )
-        # 未认证（auth_required=false 本地放行）：按对端 IP 维度（TestClient
-        # 默认对端地址 host=testclient → ip:testclient），X-User-Id 不入键
-        assert "qc:ratelimit:batch:ip:testclient" in redis.data
+        # 未认证（auth_required=false 本地放行）：按对端 IP 维度（固定
+        # X-Real-IP → ip:10.0.0.2），X-User-Id 不入键
+        assert "qc:ratelimit:batch:ip:10.0.0.2" in redis.data
         assert not any("u-ns" in key for key in redis.data)
         assert not any(key.startswith("qc:ratelimit:raw:") for key in redis.data)
 

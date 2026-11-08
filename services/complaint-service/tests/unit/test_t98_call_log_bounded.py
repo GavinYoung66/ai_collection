@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
 
 from app.llm.provider import (
     CALL_LOG_MAXLEN,

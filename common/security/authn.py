@@ -32,8 +32,8 @@ class AuthResult:
 def authenticate_jwt(token: str) -> AuthResult:
     """验证 JWT，返回身份或明确拒绝原因。"""
     payload, reason = verify_token_with_reason(token)
-    if reason is not None:
-        return AuthResult(ok=False, reason=reason)
+    if payload is None or reason is not None:
+        return AuthResult(ok=False, reason=reason or "invalid token")
     # 身份字段语义与 require_role.py / qc auth.user_uuid 一致：
     # user_id 取 sub 或 user_id；role 取 payload.role（不二次建模）。
     raw_user = payload.get("sub") or payload.get("user_id")

@@ -6,6 +6,8 @@ from uuid import uuid4
 
 import pytest
 
+from common.config.settings import settings as platform_settings
+
 from app.events.publisher import (
     ALERT_STREAM,
     ALLOWED_CHANNELS,
@@ -372,7 +374,10 @@ class TestResilienceHooks:
             CHANNEL_SYSTEM_ALERT,
         }
 
-    def test_rate_limit_hit_emits_qc_event_with_trace_id_not_redis_channel(self):
+    def test_rate_limit_hit_emits_qc_event_with_trace_id_not_redis_channel(self, monkeypatch):
+        # 注入可信代理头：TestClient 不提供 ASGI client 地址（CI 下为 None），
+        # 固定 X-Real-IP 让 ip 维度键可确定性断言。
+        monkeypatch.setattr(platform_settings, "TRUST_PROXY_HEADERS", True)
         from app.events.resilience import clear_emitted, emitted
         from app.main import wire_resilience_hooks
         from tests.test_replay_api import (
@@ -396,6 +401,7 @@ class TestResilienceHooks:
                     "X-Idempotency-Key": f"hook-{i}",
                     "X-User-Id": "u-hook-rate",
                     "X-Trace-Id": "trace-hook-rate",
+                    "X-Real-IP": "9.9.9.9",
                 },
                 json=_ready(),
             )
@@ -403,9 +409,8 @@ class TestResilienceHooks:
         hits = [payload for name, payload in emitted if name == "qc.rate_limit.hit"]
         assert hits
         assert hits[0]["trace_id"] == "trace-hook-rate"
-        # T116：X-User-Id 伪造头不入键（未认证 → ip 维度，TestClient 对端
-        # host=testclient）；键形态适配漏项补记
-        assert hits[0]["key"] == "qc:ratelimit:raw:ip:testclient"
+        # T116：X-User-Id 伪造头不入键（未认证 → ip 维度，固定 X-Real-IP 可确定性断言）
+        assert hits[0]["key"] == "qc:ratelimit:raw:ip:9.9.9.9"
         assert hits[0]["reason"] == "rate_limited"
         published = {ch for ch, _ in redis.published}
         assert "qc.rate_limit.hit" not in published

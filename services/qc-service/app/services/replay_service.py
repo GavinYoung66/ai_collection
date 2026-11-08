@@ -233,6 +233,9 @@ class ReplayService:
             existing.low_count = low
             row = existing
             await self.quality_repo.session.flush()
+        # SQLAlchemy 模型字段声明为 Column[UUID]，运行期为 UUID；统一收敛为
+        # UUID 供仓储层类型契约（UUID | str）与 mypy 门禁使用。
+        record_id = UUID(str(row.id))
         result.compliance_score = compliance
         result.deduction_total = deduction
         # 违规行三字段与打分同源：复用本次运行快照（由 RuleRepo active 包产出，不在此处硬编码种子）。
@@ -247,7 +250,7 @@ class ReplayService:
         # 幂等实现（对齐 aensure_persisted"存在即跳过写"基线），验收语义一致。
         prev_violations: dict[tuple[Any, Any, Any], Any] = {}
         if existing is not None:
-            for vrow_prev in await self.quality_repo.list_violations(row.id):
+            for vrow_prev in await self.quality_repo.list_violations(record_id):
                 prev_violations[(vrow_prev.rule_id, vrow_prev.turn_id, vrow_prev.speaker)] = vrow_prev
         violation_ids: dict[tuple[Any, Any, Any], Any] = {}
         for hit in result.hits:
@@ -296,7 +299,7 @@ class ReplayService:
             # 已存在则跳过插入并回填既有 id/status，重投不重复推送告警。
             prev_alerts_by_vid: dict[Any, Any] = {}
             if existing is not None:
-                for arow_prev in await alert_repo.list_by_record(row.id):
+                for arow_prev in await alert_repo.list_by_record(record_id):
                     if arow_prev.violation_id is not None:
                         prev_alerts_by_vid[arow_prev.violation_id] = arow_prev
             for alert in result.alerts:
@@ -307,25 +310,25 @@ class ReplayService:
                     alert["status"] = prev_alert.status
                     continue
                 inserted = await alert_repo.insert_high(
-                    qc_record_id=row.id,
+                    qc_record_id=record_id,
                     violation_id=vid,
                     alert_id=alert.get("id"),
                 )
                 alert["id"] = str(inserted.id)
                 alert["status"] = inserted.status
         await self.quality_repo.record_skipped_rules(
-            qc_record_id=row.id,
+            qc_record_id=record_id,
             skipped_rules=result.skipped_rules,
         )
         commit = getattr(self.quality_repo.session, "commit", None)
         if commit is not None:
             await commit()
-        result.qc_record_id = str(row.id)
+        result.qc_record_id = str(record_id)
         result.inserted = True
         if self.job_store is not None and qc_status != "PARTIAL":
             await self.job_store.set_done(
                 qc.session_id,
-                qc_record_id=row.id,
+                qc_record_id=record_id,
                 skipped_rules=result.skipped_rules,
             )
         started = result.started_monotonic

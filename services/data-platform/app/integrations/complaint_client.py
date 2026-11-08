@@ -29,8 +29,6 @@ from typing import Any
 import httpx
 
 from app.core.config import dp_settings
-from common.errors.codes import ErrorCode
-from common.errors.exceptions import BizException
 from common.security.path_params import ensure_safe_path_param
 
 logger = logging.getLogger(__name__)

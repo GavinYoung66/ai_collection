@@ -592,8 +592,9 @@ class TestReplayRaw:
         assert body["code"] != "B0006"
         assert resp.status_code != 429
 
-    def test_rate_limit_hit_payload_includes_trace_id(self):
-
+    def test_rate_limit_hit_payload_includes_trace_id(self, monkeypatch):
+        # 注入可信代理头：TestClient 不提供 ASGI client 地址（CI 下为 None）。
+        monkeypatch.setattr(platform_settings, "TRUST_PROXY_HEADERS", True)
         from app.events.resilience import clear_emitted, emitted
         from app.main import wire_resilience_hooks
 
@@ -610,6 +611,7 @@ class TestReplayRaw:
                     "X-Idempotency-Key": f"k-trace-{i}",
                     "X-User-Id": "u-rate-trace",
                     "X-Trace-Id": "trace-raw-11",
+                    "X-Real-IP": "9.9.9.9",
                 },
                 json=_ready(),
             )
@@ -620,8 +622,8 @@ class TestReplayRaw:
         assert hits
         assert hits[0]["trace_id"] == "trace-raw-11"
         # T116：X-User-Id 不再被信任（未认证 → ip 维度命名空间；
-        # TestClient 默认对端 host=testclient → ip:testclient）
-        assert hits[0]["key"] == "qc:ratelimit:raw:ip:testclient"
+        # 固定 X-Real-IP 让键可确定性断言）
+        assert hits[0]["key"] == "qc:ratelimit:raw:ip:9.9.9.9"
         assert hits[0]["reason"] == "rate_limited"
         assert "qc.rate_limit.hit" not in {ch for ch, _ in redis.published}
 

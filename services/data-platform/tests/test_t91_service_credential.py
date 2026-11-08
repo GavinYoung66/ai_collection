@@ -6,13 +6,11 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.qc_source import get_qc_source, list_pending_session_ids
 from app.main import app
 from common.db.session import get_session
 from common.security.rbac import create_token
@@ -63,7 +61,6 @@ def client(monkeypatch):
 
 
 def _expired_token() -> str:
-    from datetime import datetime
 
     from common.security.rbac import create_token
 
