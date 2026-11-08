@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import time
+from contextvars import ContextVar, Token
 from typing import Any
 
 import structlog
@@ -40,6 +41,7 @@ from common.security.authn import authenticate
 from common.trace.middleware import get_trace_id
 
 from app import audit
+from app.mcp_errors import MCPPermissionDeniedError
 from app.asgi_util import (
     MAX_BODY_BYTES as _MAX_BODY_BYTES,
     JSONRPC_PAYLOAD_TOO_LARGE_CODE as _JSONRPC_PAYLOAD_TOO_LARGE_CODE,
@@ -55,6 +57,63 @@ logger = structlog.get_logger()
 _UNAUTHENTICATED_MESSAGE = "请先登录"  # 对齐 ERROR_MESSAGES[B0002]
 _JSONRPC_UNAUTH_CODE = -32001  # 服务端保留段（-32000~-32099），429 已占用 -32000
 # T103：413 的 code 单源在 app.asgi_util.JSONRPC_PAYLOAD_TOO_LARGE_CODE（-32002）
+
+# ===== T120：工具级 role ACL =====
+
+# 调用方角色上下文（与 common/trace/middleware.py 的 trace_id contextvar 同机制：
+# 中间件 set → dispatch 层 get；dispatch 已依赖同一传播路径读取 trace_id）。
+_current_role: ContextVar[str | None] = ContextVar("mcp_gateway_caller_role", default=None)
+
+
+def get_current_role() -> str | None:
+    """T120：读取调用方角色（未鉴权/未启用鉴权/非请求上下文为 None）。"""
+    return _current_role.get()
+
+
+def set_current_role(role: str | None) -> Token[str | None]:
+    """T120：鉴权成功后记录调用方角色，供 dispatch 层工具级 ACL 读取。"""
+    return _current_role.set(role)
+
+
+# T120：工具级 role ACL 白名单——线网工具名（{server}.{tool}）→ 允许角色集合。
+# 空集合 = 任意已认证调用方放行（读类：search_*/query_*，共 8 个）；
+# 写类 = data_platform 两个回写工具（走下游 PUT 快照口，app/tools/data_platform.py
+# _SUPPORTED_TOOLS），仅 admin（API_KEY_ROLE 缺省身份，白名单覆盖现状默认身份）。
+# MUST 覆盖全部注册工具（形态守护：tests/test_t120_tool_acl.py 与 TOOL_SPECS 双向断言）。
+TOOL_ROLE_ACL: dict[str, frozenset[str]] = {
+    "rag_kb.search_regulations": frozenset(),  # 读
+    "rag_kb.search_response_templates": frozenset(),  # 读
+    "business_ticket.query_case_info": frozenset(),  # 读
+    "business_ticket.query_history_tickets": frozenset(),  # 读
+    "business_ticket.query_history_complaints": frozenset(),  # 读
+    "data_platform.write_session": frozenset({"admin"}),  # 写（PUT 快照回写）
+    "data_platform.write_human_review_truth": frozenset({"admin"}),  # 写（人审真值回写）
+    "call_qc.query_call_asr": frozenset(),  # 读
+    "call_qc.query_qc_violations": frozenset(),  # 读
+    "call_qc.query_qc_alerts": frozenset(),  # 读
+}
+
+
+def check_tool_acl(server: str, tool: str) -> None:
+    """T120：按调用方角色执行工具级白名单校验（dispatch 前置，拒绝抛 MCPPermissionDeniedError）。
+
+    - ``ENABLE_AUTH=false``：本地形态无身份上下文，不做 ACL（与鉴权中间件
+      "默认关闭直通"的本地放行语义一致，测试留痕）；
+    - ``ENABLE_AUTH=true``：读类（白名单空集）放行已认证调用方；写类要求
+      admin——角色缺失（contextvar 不可达 / JWT 无 role 字段）时 fail-safe
+      拒绝，MUST NOT 静默放行或降级为匿名执行；
+    - 角色比较大小写不敏感（API_KEY_ROLE=admin 与 JWT role=ADMIN 同义）；
+      拒绝 message 不含角色词表与调用方身份细节（可观测性：审计侧
+      error=permission_denied，协议侧经 FastMCP 转 ToolError 客户端可见）。
+    """
+    if not settings.ENABLE_AUTH:
+        return
+    allowed = TOOL_ROLE_ACL.get(f"{server}.{tool}")
+    if not allowed:
+        return
+    role = get_current_role()
+    if role is None or role.strip().lower() not in allowed:
+        raise MCPPermissionDeniedError(server, tool, "insufficient role for tool")
 
 
 def bridge_api_keys() -> None:
@@ -178,7 +237,13 @@ class MCPAuthMiddleware:
         result = authenticate(_extract_authorization(scope))
         if result.ok:
             logger.info("mcp_auth_ok", user_id=result.user_id, role=result.role)
-            await self.asgi_app(scope, forward_receive, send)
+            # T120：角色上下文传递到 dispatch 层（工具级 ACL 的唯一来源）；
+            # await 结束后 reset，防 worker/复用 task 场景下上下文跨请求残留。
+            role_token = set_current_role(result.role)
+            try:
+                await self.asgi_app(scope, forward_receive, send)
+            finally:
+                _current_role.reset(role_token)
             return
 
         logger.warning("mcp_auth_rejected", reason=result.reason, kind=kind)

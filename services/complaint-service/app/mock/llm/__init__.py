@@ -1,0 +1,1 @@
+"""Mock LLM 子包（T121：自 tests/mock/llm 迁入，供生产 USE_MOCK_LLM 懒加载）。"""

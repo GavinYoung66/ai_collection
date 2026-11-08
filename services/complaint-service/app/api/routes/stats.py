@@ -14,7 +14,7 @@ from app.api.auth import require_roles
 from app.api.response import success
 from app.api.schemas.complaint import ConsistencyResponse, StatsResponse
 from app.models.state import VerdictType
-from app.service.stats_service import stats_service
+from app.service.stats_service import STATS_DATA_SOURCE, stats_service
 
 router = APIRouter(
     prefix="/complaints",
@@ -34,6 +34,7 @@ async def get_stats(request: Request):
         evidence_insufficient_rate=st["evidence_insufficient_ratio"],
         mcp_failure_rate=st["mcp_failure_rate"],
         ai_human_consistency_rate=st["ai_human_consistency_rate"],
+        data_source=STATS_DATA_SOURCE,
     )
     return success(data=data.model_dump(mode="json"), request=request)
 
@@ -51,5 +52,6 @@ async def get_consistency(request: Request):
             VerdictType.compliant_but_poor_experience.value: 0.90,
             VerdictType.pending.value: 0.0,
         },
+        data_source=STATS_DATA_SOURCE,
     )
     return success(data=data.model_dump(mode="json"), request=request)

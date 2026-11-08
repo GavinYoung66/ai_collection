@@ -29,6 +29,7 @@ from common.mcp.reliability import MCPCircuitOpenError
 from common.trace.middleware import get_trace_id
 
 from app import audit, pii
+from app.auth import check_tool_acl
 from app.reliability import call_tool_reliable
 from app.tools import TOOL_ROUTES, TOOL_SPECS
 
@@ -73,6 +74,9 @@ async def dispatch(
     call_tool_reliable 完成 per-server 熔断 + 30s 超时 + 错误分级 + 容错兜底。
     Batch 4：本方法是 tools/call 的唯一审计点——成功/失败双路均记录
     mcp_calls 审计（任务 5.1/5.2）；出口 PII 递归脱敏在返回前完成（任务 5.3/5.4）。
+    T120：路由命中后、可靠性层之前执行工具级 role ACL（app.auth.check_tool_acl）；
+    拒绝抛 MCPPermissionDeniedError——经本方法既有 except 通道记
+    error=permission_denied 审计后原样上抛，由 FastMCP 转 MCP 错误响应。
     """
     # 优先取调用方经 _meta 透传的 trace_id；缺省回退 HTTP X-Trace-Id（全链路串联）
     trace_id = trace_id or get_trace_id()
@@ -85,6 +89,9 @@ async def dispatch(
         route = TOOL_ROUTES.get(server, {}).get(tool)
         if route is None:
             raise UnknownToolError(f"unknown tool {tool!r} for server {server!r}")
+        # T120：工具级 role ACL 前置（先路由后授权；拒绝不进可靠性层，
+        # 走下方既有 except 通道记 error=permission_denied 审计）
+        check_tool_acl(server, tool)
         result = await call_tool_reliable(
             server, tool, route, params, trace_id=trace_id, session_id=session_id
         )

@@ -243,9 +243,15 @@ class StatsResponse(BaseModel):
     evidence_insufficient_rate: float = 0.0
     mcp_failure_rate: float = 0.0
     ai_human_consistency_rate: float = 0.0
+    # T122：当前全部指标为硬编码演示数据（stats_service 批次9+ 接 PG）。
+    # 必填字段：由路由显式写入（见 app/api/routes/stats.py），接入真实数据源时
+    # 不会因遗漏而静默沿用 demo_stub；监控/报表据此区分演示与真实指标。
+    data_source: str
 
 
 class ConsistencyResponse(BaseModel):
     ai_human_consistency_rate: float
     total_reviewed: int
     by_verdict_consistency: dict[str, float]
+    # T122：同 StatsResponse——必填字段，由路由显式写入数据源标记。
+    data_source: str

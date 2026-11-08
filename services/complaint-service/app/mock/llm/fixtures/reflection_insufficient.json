@@ -1,0 +1,10 @@
+{
+  "evidence_sufficient": false,
+  "missing_evidence": [
+    "案件基础信息缺失",
+    "通话记录缺失"
+  ],
+  "contradictions": [],
+  "loop_count": 0,
+  "per_case_reflection": {}
+}

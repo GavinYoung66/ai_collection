@@ -1,0 +1,20 @@
+[
+  {
+    "doc_id": "REG-V2-AGENT-001",
+    "title": "禁止威胁恐吓与隐私泄露（虚构）",
+    "content_snippet": "催收不得以威胁上门、向单位同事泄露欠款信息等方式施压；禁止时段不得致电。",
+    "source_type": "regulation",
+    "score": 0.95,
+    "source_url": "https://kb.example.com/reg/v2-agent-001",
+    "scenario": "v2_agent_violation"
+  },
+  {
+    "doc_id": "REG-V2-AGENT-002",
+    "title": "催收时段管理规定（虚构摘录）",
+    "content_snippet": "禁止在 22:00-08:00 致电债务人。",
+    "source_type": "regulation",
+    "score": 0.91,
+    "source_url": "https://kb.example.com/reg/v2-agent-002",
+    "scenario": "v2_agent_violation"
+  }
+]

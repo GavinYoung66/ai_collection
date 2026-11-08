@@ -1,0 +1,11 @@
+[
+  {
+    "template_id": "TPL-001",
+    "title": "坐席违规道歉模板",
+    "template_text": "尊敬的用户您好，经核查坐席确有违规，我们深表歉意。",
+    "doc_id": "TPL-001",
+    "applicable_scenarios": [
+      "agent_violation"
+    ]
+  }
+]

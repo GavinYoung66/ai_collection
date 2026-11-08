@@ -1,0 +1,14 @@
+{
+  "case_id": "case-v2-misunderstand-001",
+  "overdue_amount": 0.0,
+  "overdue_days": 0,
+  "repayment_records": [
+    {"date": "2026-08-20", "amount": 12000, "type": "early_settle_claimed"}
+  ],
+  "customer_name": "李*测",
+  "product_type": "personal_loan",
+  "create_time": "2026-04-01T00:00:00+08:00",
+  "scenario": "v2_user_misunderstanding",
+  "interest_rule_summary": "结清申请审批中仍按日计息至到账日（虚构说明）",
+  "notes": "虚构案件：用户主张已结清，账务仍显示计息"
+}

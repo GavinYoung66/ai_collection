@@ -53,7 +53,8 @@ class MCPGateway:
     def _build_transport(self, server: str) -> Any:
         """根据 Mock 开关构建底层 transport。"""
         if getattr(settings, "USE_MOCK_MCP", True):
-            from tests.mock.mcp.mock_client import MockMCPClient
+            # T121：Mock 自 tests/mock 迁入 app/mock，生产镜像不再依赖 tests/
+            from app.mock.mcp.mock_client import MockMCPClient
 
             return MockMCPClient()
         # Batch 5：真路径经 MCP SDK client 连独立网关，不再传任何进程内桥

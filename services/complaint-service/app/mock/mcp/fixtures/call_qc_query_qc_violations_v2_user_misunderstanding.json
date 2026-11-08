@@ -1,0 +1,15 @@
+[
+  {
+    "qc_id": "QC-V2-MIS-001",
+    "alert_id": "QC-V2-MIS-001",
+    "violation_type": "none_hard_violation",
+    "violation_rule_id": "RULE-NONE",
+    "call_session_id": "S-V2-MIS-001",
+    "start_ts": "14:05:00",
+    "end_ts": "14:08:00",
+    "snippet_text": "解释结清停息规则",
+    "description": "未检出硬性违规；对话焦点为计息/结清规则解释（虚构）",
+    "score": 0.2,
+    "scenario": "v2_user_misunderstanding"
+  }
+]

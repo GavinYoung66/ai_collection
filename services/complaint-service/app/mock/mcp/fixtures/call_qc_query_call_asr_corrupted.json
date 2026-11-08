@@ -1,0 +1,15 @@
+[
+  {
+    "call_session_id": "S-0006",
+    "call_start_time": "2026-08-28T16:00:00+08:00",
+    "call_duration": 200,
+    "asr_text_with_timestamp": [
+      {
+        "ts": "16:00:01",
+        "speaker": "agent",
+        "text": "###***&&&...###"
+      }
+    ],
+    "agent_role": "agent"
+  }
+]

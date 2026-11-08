@@ -307,7 +307,8 @@ class ComplaintService:
 
     def seed_demo(self) -> list[dict]:
         """Create V2-scenario complaints（含 pending 样例，供 V4 验收⑤）。"""
-        from tests.mock.data.seed_complaints_v2 import (
+        # T121：种子数据自 tests/mock/data 迁入 app/mock/data，生产镜像不再依赖 tests/
+        from app.mock.data.seed_complaints_v2 import (
             SCENARIO_PENDING,
             iter_demo_seed_creates,
         )

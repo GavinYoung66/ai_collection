@@ -150,7 +150,8 @@ class ComplaintLLMProvider:
     def _get_transport(self) -> Any:
         if self._transport is None:
             if getattr(settings, "USE_MOCK_LLM", True):
-                from tests.mock.llm.mock_provider import MockLLMProvider
+                # T121：Mock 自 tests/mock 迁入 app/mock，生产镜像不再依赖 tests/
+                from app.mock.llm.mock_provider import MockLLMProvider
 
                 self._transport = MockLLMProvider()
             else:
