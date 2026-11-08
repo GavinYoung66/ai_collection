@@ -13,8 +13,10 @@ load_prompt(prompt_id@version, service, **context_vars) -> str：
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any, Optional
 
@@ -159,13 +161,52 @@ def _load_yaml(prompt_id: str, version: Optional[str], templates_dir: Path) -> d
     return _load_from_local(prompt_id, version, templates_dir)
 
 
+# T125：_load_from_local 进程级 YAML 解析缓存。
+# 键 = (文件绝对路径字符串, mtime_ns, size)：文件内容或属性变更（任一变化）自动失效；
+# 值 = yaml.safe_load 解析产物，缓存内只读，返回调用方前 deepcopy，
+# 避免调用方修改返回 dict 污染缓存中的共享状态。
+# 锁保护读写；miss 解析在锁内（double-check），命中路径在锁外 deepcopy 减少持锁时间。
+# 失效重建时清理同 path 旧键防泄漏；总量超上限整体清空防膨胀（显式常量）。
+# 边界留痕：mtime+size 失效存在约 1ns 窗口内同尺寸重写的理论漏检（文件系统固有），
+# dev/prod 模板为低频人工变更，可接受。
+_LOCAL_YAML_CACHE: dict[tuple[str, int, int], Any] = {}
+_LOCAL_YAML_CACHE_LOCK = threading.Lock()
+_LOCAL_YAML_CACHE_MAX = 256
+_LOCAL_YAML_CACHE_MISS = object()
+
+
+def _load_yaml_cached(path: Path) -> Any:
+    """按 (path, mtime_ns, size) 缓存 yaml.safe_load 解析结果，命中不重复解析。"""
+    st = path.stat()
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    with _LOCAL_YAML_CACHE_LOCK:
+        cached = _LOCAL_YAML_CACHE.get(key, _LOCAL_YAML_CACHE_MISS)
+    if cached is not _LOCAL_YAML_CACHE_MISS:
+        return copy.deepcopy(cached)
+    with _LOCAL_YAML_CACHE_LOCK:
+        cached = _LOCAL_YAML_CACHE.get(key, _LOCAL_YAML_CACHE_MISS)
+        if cached is _LOCAL_YAML_CACHE_MISS:
+            with open(path, "r", encoding="utf-8") as f:
+                cached = yaml.safe_load(f)
+            for old_key in [k for k in _LOCAL_YAML_CACHE if k[0] == key[0]]:
+                del _LOCAL_YAML_CACHE[old_key]
+            if len(_LOCAL_YAML_CACHE) >= _LOCAL_YAML_CACHE_MAX:
+                _LOCAL_YAML_CACHE.clear()
+            _LOCAL_YAML_CACHE[key] = cached
+    return copy.deepcopy(cached)
+
+
 def _load_from_local(prompt_id: str, version: Optional[str], templates_dir: Path) -> dict:
-    """从服务模板目录加载 YAML。"""
+    """从服务模板目录加载 YAML。
+
+    T125：glob 仍每次执行（保证新增/删除文件即时可见），但 YAML 解析结果
+    按 (path, mtime_ns, size) 进程级缓存，连续 load 同一模板不重复解析，
+    文件内容或属性变更（mtime/size 任一变化）自动失效重建。
+    """
     # 收集所有 prompt_id 匹配的文件
     matched: list[tuple[Path, dict]] = []
     for path in templates_dir.glob("*.yaml"):
-        with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+        data = _load_yaml_cached(path)
         if not isinstance(data, dict):
             continue
         if data.get("prompt_id") == prompt_id:

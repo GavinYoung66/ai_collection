@@ -29,10 +29,13 @@ class FakeAlertRepo:
     def __init__(self) -> None:
         self.items: list[dict] = []
 
-    async def list_alerts(self, *, page, page_size, status=None, session_id=None):
+    async def list_alerts(self, *, page, page_size, status=None, session_id=None, qc_record_id=None):
         rows = list(self.items)
         if session_id:
             rows = [item for item in rows if item.get("session_id") == session_id]
+        # T129：数据层过滤语义同步——按 qc_record_id 精确过滤后再返回
+        if qc_record_id is not None:
+            rows = [item for item in rows if item.get("qc_record_id") == str(qc_record_id)]
         return rows, len(rows)
 
 

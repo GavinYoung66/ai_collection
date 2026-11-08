@@ -74,6 +74,7 @@ class AlertRepo:
         page_size: int,
         status: str | None = None,
         session_id: str | None = None,
+        qc_record_id: UUID | str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         stmt = (
             select(QcAlert, QcRecord.session_id, QcViolation.evidence_text)
@@ -85,6 +86,11 @@ class AlertRepo:
             stmt = stmt.where(QcAlert.status == status)
         if session_id:
             stmt = stmt.where(QcRecord.session_id == session_id)
+        # T129：qc_record_id 下推数据层 WHERE——call_qc MCP 告警查询按记录精确过滤，
+        # 消除"只取前 N 条后内存过滤"的后段静默漏报；HTTP /qc/alerts 不传此参，行为不变。
+        if qc_record_id:
+            rid = qc_record_id if isinstance(qc_record_id, UUID) else UUID(str(qc_record_id))
+            stmt = stmt.where(QcAlert.qc_record_id == rid)
         count_stmt = select(func.count()).select_from(stmt.subquery())
         total = int((await self.session.execute(count_stmt)).scalar_one() or 0)
         stmt = stmt.order_by(QcAlert.create_time.desc()).offset((page - 1) * page_size).limit(page_size)

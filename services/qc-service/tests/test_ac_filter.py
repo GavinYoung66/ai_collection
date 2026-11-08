@@ -84,12 +84,27 @@ class TestACFilterMatcherErrors:
         hits = ACFilter().match("", "agent")
         assert hits == []
 
-    def test_automaton_not_ready_returns_empty(self, caplog):
+    def test_automaton_not_ready_returns_empty(self):
+        # T124（r3 批次 9）语义变更留痕：common SensitiveWordMatcher 单源未构建
+        # automaton 时 match() 直接返回 [] 不再抛 AttributeError，ACFilter 正常返回空命中。
         filt = ACFilter()
+        hits = filt.match("强制执行", "agent")
+        assert hits == []
+        assert not any(getattr(hit, "score_eligible", False) for hit in hits)
+
+    def test_defensive_not_ready_warning_on_attribute_error(self, caplog):
+        # 纵深防御分支保留：底层 matcher 抛 AttributeError（automaton 未 ready 形态）
+        # 时 ACFilter 仍记 warning 并返回 []，不向上传播。
+        filt = ACFilter()
+
+        class _NotReady:
+            def match(self, text: str):
+                raise AttributeError("Not an Aho-Corasick automaton yet")
+
+        filt._matcher = _NotReady()  # type: ignore[assignment]
         with caplog.at_level("WARNING"):
             hits = filt.match("强制执行", "agent")
         assert hits == []
-        assert not any(getattr(hit, "score_eligible", False) for hit in hits)
         assert any("automaton not ready" in rec.message for rec in caplog.records)
 
     def test_unexpected_runtime_error_propagates(self):

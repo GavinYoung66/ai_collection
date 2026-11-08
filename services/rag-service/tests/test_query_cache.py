@@ -9,6 +9,7 @@ from app.api import search as search_api
 from app.models.search import SearchRequest
 from app.services import query_cache
 from app.settings import settings
+from common.trace.middleware import get_trace_id
 
 
 class FakeRedis:
@@ -265,7 +266,13 @@ class TestSearchRouteCache:
 
         embed = MockEmbed()
         resp = await search_api.hybrid_search(req, **_route_args(embed))
-        assert resp == cached
+        # T128：命中响应 trace_id 覆盖为本次请求 contextvar（本用例未设置，为
+        # 空串），不再等于缓存写入时的旧值；业务字段与缓存值保持一致
+        assert resp["code"] == cached["code"]
+        assert resp["message"] == cached["message"]
+        assert resp["data"] == cached["data"]
+        assert resp["trace_id"] == get_trace_id()
+        assert resp["trace_id"] != cached["trace_id"]
         assert embed.calls == 0  # 命中缓存不执行检索
 
     @pytest.mark.asyncio
@@ -406,10 +413,13 @@ class TestCacheFallbackAndHitLog:
         args = _route_args(MockEmbed())
         args["db"] = db
         resp = await search_api.hybrid_search(req, **args)
-        assert resp == cached
+        # T128：命中响应业务结果与缓存一致；trace_id 覆盖为本次请求 contextvar
+        assert resp["data"] == cached["data"]
+        assert resp["trace_id"] == get_trace_id()
         assert len(db.added) == 1
         entry = db.added[0]
         assert entry.cache_hit == "1"
+        assert entry.trace_id == resp["trace_id"]  # T128：命中日志与响应 trace 一致
         assert entry.query == "逾期协商"
         assert entry.category == "regulation"
 

@@ -105,6 +105,14 @@ async def hybrid_search(
         cache_start = time.time()
         cached = await query_cache.get_cached(cache_key)
         if cached is not None:
+            # T128：缓存命中时响应 trace_id 统一覆盖为本次请求 contextvar
+            # （get_trace_id()）。缓存值内嵌的是写入请求的旧 trace_id，直接
+            # 原样返回会让命中响应的追踪标识无法在本次请求日志链路中检索到
+            # （spec hybrid-search：缓存键语义完整性与 trace 一致性）。
+            # 最小改动裁决：写入端保留完整响应结构（兼容 TTL 内已存在的旧
+            # 缓存条目，无需缓存版本迁移），仅在命中出口覆盖；
+            # cached 为 json.loads 反序列化的新 dict，覆盖不污染 Redis 存储。
+            cached["trace_id"] = get_trace_id()
             # 缓存命中也必须落 kb_search_logs（cache_hit='1'），
             # 否则命中率监控失真（V1-T20，对齐 step6/02 检索命中率指标）
             await LogService(db).log(
