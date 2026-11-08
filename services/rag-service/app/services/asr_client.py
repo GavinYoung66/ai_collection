@@ -4,6 +4,7 @@ V4 D8 增量：转写文本拼接完成后执行"通话开场白"规则裁剪
 （`KB_ASR_OPENING_TRIM_ENABLED=true` 生效，规则见 conf/asr_opening_rules.yaml，
 纯正则+关键词表，零 LLM、零新第三方依赖；开关关闭 = V3 行为）。
 """
+import asyncio
 import os
 import re
 import struct
@@ -332,8 +333,13 @@ class ASRClient:
             ValueError: 音频格式不支持。
         """
         fmt = self._extract_format(filename)
-        audio_bytes = self._trim_silence(file_bytes, fmt)
-        segments = self._split_segments(audio_bytes, fmt)
+        # T94：静音裁剪（逐采样 struct.unpack_from 双层循环，20MB WAV 约 1000 万
+        # 采样阻塞 10–20s）与切分均为纯 CPU 同步实现，MUST NOT 在事件循环线程内
+        # 同步执行（期间 /health 与并发请求全部冻结）——实现体不动，仅调用点
+        # 移入线程池（_parse_wav 作为二者内部调用的纯函数随线程池一并离环）；
+        # to_thread 包装后裁剪任务可被外层 asyncio.wait_for 以 CancelledError 取消
+        audio_bytes = await asyncio.to_thread(self._trim_silence, file_bytes, fmt)
+        segments = await asyncio.to_thread(self._split_segments, audio_bytes, fmt)
 
         if self._provider is None:
             self._provider = ASRFactory.create()

@@ -93,6 +93,12 @@ class MCPGateway:
     def health_check(self) -> dict[str, str]:
         """同步健康检查钩子：返回各 server 状态（healthy / degraded / unavailable）。
 
+        T142 处置裁决（2026-11-07 现场 grep 复核：`health_check()` 生产零调用点，
+        死代码定性成立；`MCPGateway` 类本身经 `app/api/deps.py:26` 被生产引用，
+        类不可删）：本方法保留 + 本注释固化。接入任何调用点前 MUST 经
+        `asyncio.to_thread` 执行或改用既有异步版 `ahealth_check()`，否则同步
+        `httpx.get` 3s 将冻结事件循环。
+
         Mock：全部 healthy，不发起网络请求。
         真路径：HTTP GET 网关 ``/health`` 短探活（3s）。``/health`` 与 MCP 端点
         同属网关一个 FastAPI 进程，进程存活即 MCP server 在；需要协议级深探活
