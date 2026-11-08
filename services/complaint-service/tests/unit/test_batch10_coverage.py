@@ -241,7 +241,9 @@ class TestHumanReview:
         )
         assert final["task_status"] != TaskStatus.resolved.value
 
-    def test_unknown_action_defaults_approve(self):
+    def test_unknown_action_failsafe_pending_review(self):
+        """T114：非法恢复值（garbage）fail-safe——保持待复核 + exception_info，
+        不再默认 approve 自动结案（旧断言 resolved 固化的正是被整改缺陷）。"""
         st = self._state()
         from langgraph.types import Command
         from app.graph.builder import build_complaint_graph
@@ -250,7 +252,10 @@ class TestHumanReview:
         cfg = {"configurable": {"thread_id": "hr-3"}}
         asyncio.run(graph.ainvoke(st.model_dump(), cfg))
         final = asyncio.run(graph.ainvoke(Command(resume="garbage"), cfg))
-        assert final["task_status"] == TaskStatus.resolved.value
+        assert final["task_status"] == TaskStatus.pending_review.value
+        assert final["task_status"] != TaskStatus.resolved.value
+        assert final["exception_info"]["error_type"] == "invalid_review_action"
+        assert final["human_review"]["review_action"] is None
 
     def test_dict_review_action(self):
         """resume 传 dict 形式的 review_action。"""

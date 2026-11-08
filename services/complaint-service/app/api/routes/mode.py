@@ -24,7 +24,8 @@ router = APIRouter(
 
 
 def set_redis_client(client) -> None:
-    mode_service._redis = client  # noqa: SLF001
+    # T112：委托 service 层正式装配点（单一注入点：模式状态与 ApprovalLedger 同步切换）
+    mode_service.set_redis_client(client)
 
 
 def get_redis_client():

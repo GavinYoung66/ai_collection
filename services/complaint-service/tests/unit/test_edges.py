@@ -71,6 +71,10 @@ class TestShouldProceedAfterVerdict:
 
 
 class TestShouldProceedAfterReview:
+    def test_missing_review_result_to_manual(self):
+        """T114 fail-safe：无人工审阅结果时不得默认回写，转人工。"""
+        assert should_proceed_after_review(_state()) == "to_manual"
+
     def test_reject_within_limit_to_re_gather(self):
         s = _state(
             reject_count=1,

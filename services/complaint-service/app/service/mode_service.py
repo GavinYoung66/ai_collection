@@ -77,6 +77,8 @@ class ModeApprovalRecord:
 
 
 class _InMemoryRedis:
+    """进程内内存实现——仅作单测测试替身（T112：生产经 lifespan 注入共享 Redis）。"""
+
     def __init__(self) -> None:
         self._d: dict[str, str] = {}
 
@@ -189,6 +191,17 @@ class ModeService:
         self._consistency = consistency_provider
         # T89：审批记录组件，沿用 _redis 装配路径（provider 惰性取，兼容动态替换）
         self._ledger = ApprovalLedger(lambda: self._redis)
+
+    def set_redis_client(self, client: Any) -> None:
+        """T112：lifespan 注入共享 Redis 的正式装配点。
+
+        - 单一注入点：替换 ``_redis`` 后，模式状态与 ApprovalLedger（经
+          ``lambda: self._redis`` 惰性取）同步切换到同一 client，不建两套装配；
+        - 生产经 lifespan 调用本方法注入共享 Redis（spec complaint-service/mode
+          「模式状态多副本一致」）；单测经 routes.mode.set_redis_client（本方法
+          的委托形态）注入 _InMemoryRedis 测试替身。
+        """
+        self._redis = client
 
     def get_active(self) -> str:
         return self._redis.get(KEY_ACTIVE) or "single_agent"
@@ -332,6 +345,28 @@ class ModeService:
         if ok:
             self._ledger.clear()
         return ok
+
+
+def build_shared_redis_client() -> Any:
+    """T112：构造模式状态共享 Redis 客户端（同步形态，由 lifespan 探活后注入）。
+
+    - ModeService / ApprovalLedger 为同步 API，注入同步客户端（redis.Redis）；
+    - ``decode_responses=True`` 与 _InMemoryRedis 值语义对齐（get 返回 str/None）；
+    - 短 socket 超时与 common.resilience 同形态；连接参数单源 common settings，
+      不在本服务新建第二套配置口径。
+    """
+    from common.config.settings import settings as platform_settings
+    from redis import Redis
+
+    return Redis(
+        host=platform_settings.REDIS_HOST,
+        port=platform_settings.REDIS_PORT,
+        password=platform_settings.REDIS_PASSWORD or None,
+        db=platform_settings.REDIS_DB,
+        decode_responses=True,
+        socket_timeout=1.0,
+        socket_connect_timeout=1.0,
+    )
 
 
 mode_service = ModeService()

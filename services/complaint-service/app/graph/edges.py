@@ -45,6 +45,11 @@ def should_proceed_after_review(state: ComplaintSessionState) -> str:
     """human_review 后路由。"""
     action = state.human_review.review_action if state.human_review else None
 
+    # T114 fail-safe：无人工审阅结果（图中断/状态缺失）不得默认走自动回写，
+    # MUST 转人工复核，避免未审即流转。
+    if action is None:
+        return "to_manual"
+
     if action == ReviewAction.reject_rejudge:
         if state.reject_count <= 2:
             return "to_re_gather"

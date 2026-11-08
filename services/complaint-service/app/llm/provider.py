@@ -183,6 +183,12 @@ class ComplaintLLMProvider:
         start = time.monotonic()
         chain = get_llm_fallback_chain()
         primary, fallbacks = chain[0], chain[1:]
+        # T113（spec observability「Prompt 外发前脱敏」）：外发第三方 LLM 的 payload
+        # 在 Provider 入口单点脱敏（手机号/证件号/银行卡等 PII），复用 common 安全
+        # 模块单一事实源（mask_text），各业务节点 MUST NOT 各自重复实现；
+        # 与 _record_audit 落库 preview 的 mask_before_persist（T98 审计落库脱敏）
+        # 分层不冲突：前者防第三方外发、后者防审计驻留，mask 幂等。
+        prompt = mask_before_persist(prompt)
         messages = [{"role": "user", "content": prompt}]
 
         async def _transport_adapter(
