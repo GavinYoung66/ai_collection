@@ -97,8 +97,10 @@ async def hybrid_search(
     if settings.KB_CACHE_ENABLED and not skip_cache:
         # T21：匿名固定 anon 作用域，行级权限开启时登录用户按身份隔离，避免缓存跨身份泄漏
         scope = query_cache.identity_scope(jwt_payload, settings.KB_ROW_LEVEL_ENABLED)
+        # T101：cache key 收录请求级 rewrite 位——rewrite=true/false 召回语义不同，
+        # 不隔离则 TTL 内共享缓存条目发生语义漂移（spec hybrid-search：缓存键语义完整性）
         cache_key = query_cache.make_cache_key(
-            req.query, req.category, req.top_k, scope=scope
+            req.query, req.category, req.top_k, scope=scope, rewrite=req.rewrite
         )
         cache_start = time.time()
         cached = await query_cache.get_cached(cache_key)

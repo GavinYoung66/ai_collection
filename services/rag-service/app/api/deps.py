@@ -3,6 +3,7 @@ import os
 import tempfile
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
@@ -72,9 +73,35 @@ async def get_redis() -> Redis:
 # T77：会话身份绑定（owner 归属）内存 store——session_id → (owner, bound_at)。
 # owner 为内存 store 追加字段，无持久化 schema 变更（design 2.3.2）；
 # 匿名会话 TTL 缩短（1h 过期自动失效），登录 owner 绑定 24h。
-_SESSION_OWNERS: dict[str, tuple[str, float]] = {}
+# T102（spec runtime-correctness：常驻进程内存有界）：OrderedDict 保序 + 容量
+# 上限显式常量——写入前先清扫 TTL 过期条目，仍超限按插入序驱逐最旧；攻击者以
+# 随机 X-Session-Id 刷请求不再线性增长（惰性 TTL 清理只覆盖被再次读取的 sid，
+# 随机 sid 永不再读会永久驻留，必须有容量上限兜底）。
+_SESSION_OWNERS: OrderedDict[str, tuple[str, float]] = OrderedDict()
+_SESSION_OWNERS_MAX = 10_000
 _OWNER_TTL_SECONDS = 24 * 3600.0
 _ANON_SESSION_TTL_SECONDS = 3600.0
+
+
+def _owner_ttl(owner: str) -> float:
+    """owner 对应的绑定 TTL：匿名 1h，登录 24h。"""
+    return _ANON_SESSION_TTL_SECONDS if owner == "anon" else _OWNER_TTL_SECONDS
+
+
+def _bind_session_owner(sid: str, owner: str) -> None:
+    """登记/升级 owner 绑定；仅容量达上限时触发清扫（稳态零开销）。"""
+    if len(_SESSION_OWNERS) >= _SESSION_OWNERS_MAX:
+        now = time.time()
+        expired = [
+            sid_
+            for sid_, (owner_, bound_at) in _SESSION_OWNERS.items()
+            if now - bound_at > _owner_ttl(owner_)
+        ]
+        for sid_ in expired:
+            _SESSION_OWNERS.pop(sid_, None)
+        while len(_SESSION_OWNERS) >= _SESSION_OWNERS_MAX:
+            _SESSION_OWNERS.popitem(last=False)
+    _SESSION_OWNERS[sid] = (owner, time.time())
 
 
 def _verified_sub(request: Request) -> str | None:
@@ -93,8 +120,7 @@ def _owner_of(sid: str) -> str | None:
     if entry is None:
         return None
     owner, bound_at = entry
-    ttl = _ANON_SESSION_TTL_SECONDS if owner == "anon" else _OWNER_TTL_SECONDS
-    if time.time() - bound_at > ttl:
+    if time.time() - bound_at > _owner_ttl(owner):
         _SESSION_OWNERS.pop(sid, None)
         return None
     return owner
@@ -119,7 +145,7 @@ def get_session_id(request: Request) -> str:
     if sub:
         owner = _owner_of(sid)
         if owner is None or owner == "anon":
-            _SESSION_OWNERS[sid] = (sub, time.time())  # 首次绑定/匿名升级为登录
+            _bind_session_owner(sid, sub)  # 首次绑定/匿名升级为登录（T102 有界写入）
         elif owner != sub:
             raise BizException(
                 ErrorCode.A2002, "session 归属校验失败（owner 不匹配）"
@@ -127,7 +153,7 @@ def get_session_id(request: Request) -> str:
     elif raw:
         # 匿名显式 session_id：登记弱保护条目（TTL 1h 缩短）
         if _owner_of(sid) is None:
-            _SESSION_OWNERS[sid] = ("anon", time.time())
+            _bind_session_owner(sid, "anon")
     return sid
 
 

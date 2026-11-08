@@ -26,10 +26,11 @@ class TestCacheKeyLengthPrefix:
         from app.services import query_cache
 
         raw_len = len("查询")
-        # 直接验证 md5 前的原文形态：重构 make_cache_key 的拼接段
+        # 直接验证 md5 前的原文形态：重构 make_cache_key 的拼接段；
+        # T101 在尾部追加请求级 rewrite 位（未传默认 False → "|0"）
         import hashlib
 
-        raw = f"{raw_len}:查询|regulation|5|{query_cache._flags_hash()}|anon"
+        raw = f"{raw_len}:查询|regulation|5|{query_cache._flags_hash()}|anon|0"
         expected = (
             query_cache._CACHE_KEY_PREFIX
             + hashlib.md5(raw.encode("utf-8")).hexdigest()

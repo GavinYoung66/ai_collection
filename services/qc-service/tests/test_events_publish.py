@@ -478,6 +478,16 @@ class TestResilienceHooks:
         assert "qc.rate_limit.degraded" in names
         assert all(not name.startswith("qc.llm.degraded") for name, _ in emitted)
 
+    async def test_adapter_emitted_bounded(self):
+        """T102：韧性观测列表有界，超限淘汰最旧事件（长期运行不泄漏）。"""
+        from app.events.resilience import MAX_EMITTED, clear_emitted, emitted, on_resilience_event
+
+        clear_emitted()
+        for i in range(MAX_EMITTED + 50):
+            await on_resilience_event("qc.test.bounded", {"i": i})
+        assert len(emitted) == MAX_EMITTED
+        assert emitted[-1][1]["i"] == MAX_EMITTED + 49
+
     async def test_adapter_swallows_internal_errors(self, monkeypatch):
         from app.events import resilience
 

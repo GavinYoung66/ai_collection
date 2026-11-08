@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -32,8 +33,12 @@ from app.call_log_sink import emit_call_log
 
 logger = structlog.get_logger()
 
-# 进程内审计快照（append-only）
-_call_log: list[dict[str, Any]] = []
+# 进程内审计快照（append-only）。
+# T102（spec runtime-correctness：常驻进程内存有界）：容量上限显式常量——
+# V5 取证确认 get_call_log() 生产代码零调用、消费方仅 tests，直接 deque(maxlen)
+# 环形截断；10 万次调用后长度稳定在上限内，RSS 不随调用次数线性增长。
+_CALL_LOG_MAXLEN = 500
+_call_log: deque[dict[str, Any]] = deque(maxlen=_CALL_LOG_MAXLEN)
 
 # 可靠性层 fallback 信号：业务错重试耗尽 → 兜默认值时写入错误描述；
 # dispatch 在调用前置空、调用后取走，避免跨调用串扰（同一 asyncio task）。
