@@ -24,6 +24,9 @@ router = APIRouter(tags=["sensitive-words"])
 # 项目内置敏感词字典兜底文件（V1 兼容：测试通过 monkeypatch 替换此路径）
 DICT_FILE = Path(__file__).resolve().parents[2] / "data" / "sensitive_words.dict"
 
+# T117：current.dict 限流阈值（显式常量，口径对齐同文件 sensitive_refresh 的 10 次/60s）
+SENSITIVE_DICT_RATE = 10
+
 
 @router.get(
     "/sensitive-words/current.dict",
@@ -32,10 +35,16 @@ DICT_FILE = Path(__file__).resolve().parents[2] / "data" / "sensitive_words.dict
     description="INTERNAL：优先返回 DB 活跃词（≥50 阈值），不足/异常回退内置字典文本；均失败返回 404。",
 )
 async def current_dict(
+    auth: None = Depends(require_roles("ADMIN", "SUPERVISOR")),
+    rate: None = Depends(rate_limiter("sensitive_dict", SENSITIVE_DICT_RATE)),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ):
-    """只读接口：返回当前生效敏感词字典文本，不包装 JSON。"""
+    """只读接口：返回当前生效敏感词字典文本，不包装 JSON。
+
+    T117：防护词库全文 MUST NOT 匿名可达——角色与限流口径对齐同文件
+    refresh 端点（ADMIN/SUPERVISOR + 固定窗口限流）。
+    """
     try:
         dict_text = await SensitiveWordsSyncService(db, redis, dict_file=DICT_FILE).get_current_dict()
     except FileNotFoundError:

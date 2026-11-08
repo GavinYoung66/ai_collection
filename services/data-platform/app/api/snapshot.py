@@ -6,6 +6,9 @@
 
 两个接口均不加入 api-gateway 对外路由（见 deploy/gateway/nginx.conf），
 不新做登录；响应沿用统一信封 {code,message,data,trace_id}，不新增错误码段。
+
+T91 隔离声明：两个接口均 MUST 携带服务间凭证（内部 JWT）方可访问——
+"不加入网关路由"不作为唯一防护表述，与 qc_source.py 声明口径对齐。
 """
 from __future__ import annotations
 
@@ -16,12 +19,17 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.auth import require_service_credential
 from app.services.snapshot import get_snapshot, update_complaint_cols
 from common.db.session import get_session
 from common.errors.codes import ERROR_MESSAGES
 from common.trace.middleware import get_trace_id
 
-router = APIRouter(prefix="/api/v1/data", tags=["snapshot"])
+router = APIRouter(
+    prefix="/api/v1/data",
+    tags=["snapshot"],
+    dependencies=[Depends(require_service_credential)],
+)
 
 
 class SnapshotBackflowRequest(BaseModel):

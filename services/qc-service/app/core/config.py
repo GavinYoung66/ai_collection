@@ -22,6 +22,11 @@ class QcSettings(Settings):
     QC_DP_SESSION_PATH: str = "/api/v1/data/sessions/{session_id}/qc-source"
     QC_DP_PENDING_QC_PATH: str = "/api/v1/data/sessions:pending-qc"
     QC_DP_TIMEOUT: int = 5
+    # T91：dp 数据面服务间凭证——静态 token 显式配置时优先（运维自管签发/过期）；
+    # 留空则由 DpClient 以共享 JWT_SECRET 动态签发（sub=service:qc-service，
+    # 过期取 common JWT_EXPIRE_HOURS；密钥缺省占位由 T03 validate_required_secrets
+    # 生产 fail-fast 闸门承接，凭证配置源统一定义见 common Settings）
+    QC_DP_SERVICE_TOKEN: str = ""
     # 主模型：DeepSeek 线上 V4.1 Flash（官方调用名 deepseek-flash，api-docs.deepseek.com）；
     # qwen 系列保留在降级链（DashScope 兜底），llm_reviewer 按模型名前缀路由 provider
     QC_LLM_MODEL: str = "deepseek-flash"

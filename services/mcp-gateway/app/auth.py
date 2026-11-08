@@ -40,13 +40,21 @@ from common.security.authn import authenticate
 from common.trace.middleware import get_trace_id
 
 from app import audit
-from app.asgi_util import make_replay_receive, read_body
+from app.asgi_util import (
+    MAX_BODY_BYTES as _MAX_BODY_BYTES,
+    JSONRPC_PAYLOAD_TOO_LARGE_CODE as _JSONRPC_PAYLOAD_TOO_LARGE_CODE,
+    BodyTooLargeError,
+    ClientDisconnectedError,
+    make_replay_receive,
+    read_body,
+)
 from app.config import settings
 
 logger = structlog.get_logger()
 
 _UNAUTHENTICATED_MESSAGE = "请先登录"  # 对齐 ERROR_MESSAGES[B0002]
 _JSONRPC_UNAUTH_CODE = -32001  # 服务端保留段（-32000~-32099），429 已占用 -32000
+# T103：413 的 code 单源在 app.asgi_util.JSONRPC_PAYLOAD_TOO_LARGE_CODE（-32002）
 
 
 def bridge_api_keys() -> None:
@@ -87,11 +95,17 @@ def _protected_kind(scope: dict) -> str | None:
 
     ``GET /metrics`` 已移出保护（Prometheus 拉取端点，spec platform/observability
     「/metrics 不被鉴权拦截」）：ENABLE_AUTH=true 时无 Bearer 同样直通返回 200。
+
+    T110（2026-11-07 取证结论 = 扩展形态 B）：stateless_http + mcp 1.30 下
+    ``GET /mcp``（Accept: text/event-stream）实测返回 200 并建立匿名 SSE 长连接
+    （ENABLE_AUTH=true 时同样放行且无鉴权日志——鉴权旁路实锤），故 GET 一并
+    纳入保护面；未认证复用既有 ``_reject`` 的 JSON-RPC 信封形态返回 401，
+    已认证放行 SSE。MUST NOT 改动 SSE 协议行为（spec 5.7.1 规则 3）。
     """
     if scope.get("type") != "http":
         return None
     path = str(scope.get("path", "")).rstrip("/")
-    if scope.get("method") == "POST" and path.endswith("/mcp"):
+    if scope.get("method") in ("POST", "GET") and path.endswith("/mcp"):
         return "mcp"
     return None
 
@@ -145,11 +159,19 @@ class MCPAuthMiddleware:
             await self.asgi_app(scope, receive, send)
             return
 
-        # /mcp 需读 body 以回显 JSON-RPC id；放行路径仅重放一次缓冲 body
+        # /mcp 需读 body 以回显 JSON-RPC id；放行路径仅重放一次缓冲 body。
+        # T103（spec mcp-gateway：请求体读取上限与断连处理）：累计超 1MB 返回 413
+        # 并停止累积；客户端断连后无响应可发，读取协程直接退出不挂起。
         body = b""
         forward_receive = receive
         if kind == "mcp":
-            body = await read_body(receive)
+            try:
+                body = await read_body(receive)
+            except BodyTooLargeError:
+                await self._respond_413(scope, send)
+                return
+            except ClientDisconnectedError:
+                return
             forward_receive = make_replay_receive(receive, body)
 
         bridge_api_keys()
@@ -221,3 +243,33 @@ class MCPAuthMiddleware:
             )
         except Exception:  # noqa: BLE001 — 边缘拒绝审计永不阻断拒绝响应
             logger.warning("mcp_auth_reject_audit_failed", kind=kind)
+    @staticmethod
+    async def _respond_413(scope, send) -> None:
+        """请求体超限 413（T103，spec mcp-gateway：请求体读取上限与断连处理）。
+
+        JSON-RPC error 信封与 429/401 同风格；code 取服务端保留段 -32002
+        （-32000 已被 429 占用、-32001 已被 401 占用，顺延不冲突）。
+        body 超限未完整读取，JSON-RPC id 无法回显，按协议置 null。
+        """
+        payload_obj = {
+            "jsonrpc": "2.0",
+            "error": {
+                "code": _JSONRPC_PAYLOAD_TOO_LARGE_CODE,
+                "message": "payload too large",
+                "data": {"reason": "payload_too_large", "limit_bytes": _MAX_BODY_BYTES},
+            },
+            "id": None,
+        }
+        payload = json.dumps(payload_obj, ensure_ascii=False).encode("utf-8")
+        headers = [(b"content-type", b"application/json; charset=utf-8")]
+        trace_id = _requested_trace_id(scope)
+        if trace_id:
+            headers.append((b"x-trace-id", trace_id.encode("utf-8", "ignore")))
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": headers,
+            }
+        )
+        await send({"type": "http.response.body", "body": payload})

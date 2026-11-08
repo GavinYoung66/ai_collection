@@ -9,6 +9,7 @@ from common.config.logging import setup_logging
 from common.errors.handlers import register_exception_handlers
 from common.observability.metrics import mount_metrics
 from common.trace.middleware import TraceMiddleware
+from app.api.auth import register_service_auth_handlers
 from app.api.health import router as health_router
 from app.api.qc_source import router as qc_source_router
 from app.api.snapshot import router as snapshot_router
@@ -71,6 +72,8 @@ app.add_middleware(TraceMiddleware)
 # 同时注册无需鉴权的 GET /metrics（原生 exposition，不包统一信封）。
 mount_metrics(app, service_name="data-platform")
 register_exception_handlers(app)
+# T91：数据面服务间凭证 401 统一信封处理器（豁免仅 health/metrics）
+register_service_auth_handlers(app)
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(qc_source_router)
 app.include_router(snapshot_router)

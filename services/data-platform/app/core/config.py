@@ -34,6 +34,11 @@ class DataPlatformSettings(Settings):
     QC_RECOVERY_MAX_ATTEMPTS: int = 10
     QC_RECOVERY_INTERVAL_SECONDS: float = 3.0
 
+    # T91：数据面服务间凭证——静态预共享 token（与调用方 QC_DP_SERVICE_TOKEN 同值配置）。
+    # 配置后先恒定时间比对该值（命中即放行，支持非 JWT 静态形态）；
+    # 未配置或不命中则走内部 JWT 验签且 role 必须为 "service"。缺省空 = 仅 JWT 模式。
+    DP_SERVICE_TOKEN: str = ""
+
     @model_validator(mode="after")
     def _redis_db_must_not_be_default_zero(self) -> DataPlatformSettings:
         if self.QC_REDIS_DB == 0:

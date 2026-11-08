@@ -17,6 +17,7 @@ import structlog
 
 from app.config import settings
 from app.mcp_errors import MCPError, MCPTimeoutError
+from common.security.rbac import create_token
 from common.security.ssrf import check_outbound_url
 
 logger = structlog.get_logger()
@@ -77,6 +78,15 @@ class BridgeNotFound(Exception):
     """下游返回 404 / 业务 not-found 码：表示查无数据，不是服务故障。"""
 
 
+def _service_token() -> str:
+    """T91：出站服务间凭证——静态配置（MCP_GATEWAY_DP_SERVICE_TOKEN）优先，
+    否则以共享 JWT_SECRET 动态签发内部服务 JWT（dp 数据面强制校验）。"""
+    configured = (getattr(settings, "DP_SERVICE_TOKEN", "") or "").strip()
+    if configured:
+        return configured
+    return create_token({"sub": "service:mcp-gateway", "role": "service"})
+
+
 class BridgeHttpClient:
     """桥 HTTP 客户端：超时/信封/错误映射统一收口。"""
 
@@ -130,7 +140,10 @@ class BridgeHttpClient:
         url = f"{self._base_url}{path}"
         # T22：SSRF 防护——出站前校验协议/主机/网段，拒绝即告警，不发起连接
         validate_outbound_url(url, path)
-        headers = {"X-Trace-Id": trace_id} if trace_id else {}
+        # T91：出站强制服务间凭证（dp 数据面无凭证 401；其他内部服务忽略该头，无害）
+        headers = {"Authorization": f"Bearer {_service_token()}"}
+        if trace_id:
+            headers["X-Trace-Id"] = trace_id
         try:
             client = await self._ensure_client()
             resp = await client.request(
@@ -144,10 +157,16 @@ class BridgeHttpClient:
         if resp.status_code == 404:
             raise BridgeNotFound(path)
         if resp.status_code >= 400:
+            # T108：下游 4xx（参数/协议校验错，如 422）标记不可重试——重试无意义
+            # 且每次都计熔断失败（spec mcp-gateway：下游因参数校验返回的 4xx
+            # MUST 视为不可重试，MUST NOT 计入熔断失败次数）。429（下游限流）
+            # 退避后可能恢复，与 5xx 同保持可重试；5xx/网络错语义不变。
+            non_retryable = 400 <= resp.status_code < 500 and resp.status_code != 429
             raise MCPError(
                 "_bridge",
                 path,
                 f"bridge http {resp.status_code}: {resp.text[:200]}",
+                retryable=not non_retryable,
             )
 
         try:
