@@ -25,7 +25,7 @@ from app.graph.checkpointer import (
 from app.graph.nodes.human_review import human_review_node
 from app.models.state import ComplaintSessionState, ReviewAction, TaskStatus, VerdictType
 from app.service.complaint_service import complaint_service
-from app.service.mode_service import ModeService
+from app.service.mode_service import AuthenticatedApprover, ModeService
 from app.service.recovery_service import RecoveryService
 from app.service.scheduler import (
     cleanup_archived_90d,
@@ -346,17 +346,22 @@ class TestModeService:
 
     def test_switch_invalid_mode(self):
         m = ModeService()
-        ok, err = m.switch("invalid_mode", signers=["ops", "tech"])
+        ok, err = m.switch("invalid_mode", approver=None)
         assert ok is False
 
     def test_switch_rollback_on_redis_failure(self):
-        """Redis set 失败时回滚并返回 A5014。"""
+        """Redis 故障时 switch 返回 A5014（T89：审批记录设施故障同样拒绝不抛出）。"""
         class FailRedis:
             def get(self, k, default=None): return "single_agent"
             def set(self, k, v, ex=None): raise RuntimeError("redis down")
             def delete(self, k): return 1
+            def keys(self, pattern="*"): return []
         m = ModeService(redis_client=FailRedis())
-        ok, err = m.switch("multi_agent", signers=["ops", "tech"], gray_percent=50)
+        ok, err = m.switch(
+            "multi_agent",
+            approver=AuthenticatedApprover(sub="u1", role="admin"),
+            gray_percent=50,
+        )
         assert ok is False
 
     def test_full_switch_requires_consistency(self):

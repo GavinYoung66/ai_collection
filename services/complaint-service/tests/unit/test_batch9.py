@@ -16,7 +16,7 @@ from app.service.complaint_service import complaint_service
 from app.service.degrade_flow import DegradeFlow
 from app.service.degrade_llm import DegradeLLM
 from app.service.degrade_mcp import DegradeMCP
-from app.service.mode_service import ModeService
+from app.service.mode_service import AuthenticatedApprover, ModeService
 from app.service.rate_limiter import RateLimiter
 from app.service.recovery_service import RecoveryService
 from app.service.review_service import RejectReason, ReviewService
@@ -33,13 +33,38 @@ def _clear_events():
 # ── 9.1 mode ──
 
 class TestMode:
-    def test_single_signature_rejected(self):
-        ok, err = ModeService().switch("multi_agent", signers=["ops"])
+    def test_single_signature_registers_pending(self):
+        """T89：单身份第一次调用仅落审批登记，不推进（模式未变化）。"""
+        m = ModeService()
+        ok, err = m.switch(
+            "multi_agent", approver=AuthenticatedApprover(sub="u1", role="admin")
+        )
+        assert ok is True and err is None
+        assert m.get_active() == "single_agent"
+
+    def test_no_authenticated_identity_rejected(self):
+        """T89：无有效审批身份（含请求体自报 signers 已被忽略）→ A5014。"""
+        ok, err = ModeService().switch("multi_agent", approver=None)
         assert ok is False and err == ErrorCode.A5014
 
     def test_dual_signature_success(self):
-        ok, err = ModeService().switch("multi_agent", signers=["ops", "tech"], gray_percent=50)
-        assert ok and err is None
+        """T89：两个不同已认证身份先后审批且参数一致 → 推进切换。"""
+        m = ModeService()
+        ok1, err1 = m.switch(
+            "multi_agent",
+            approver=AuthenticatedApprover(sub="u1", role="admin"),
+            gray_percent=50,
+        )
+        assert ok1 and err1 is None
+        assert m.get_active() == "single_agent"
+        ok2, err2 = m.switch(
+            "multi_agent",
+            approver=AuthenticatedApprover(sub="u2", role="supervisor"),
+            gray_percent=50,
+        )
+        assert ok2 and err2 is None
+        assert m.get_active() == "multi_agent"
+        assert m.get_gray_percent() == 50
 
     def test_consistency_full_switch(self):
         class C:
@@ -48,7 +73,17 @@ class TestMode:
         assert ModeService(consistency_provider=C()).full_switch_if_consistent() is True
 
     def test_mode_switched_event(self):
-        ModeService().switch("multi_agent", signers=["ops", "tech"], gray_percent=100)
+        m = ModeService()
+        m.switch(
+            "multi_agent",
+            approver=AuthenticatedApprover(sub="u1", role="admin"),
+            gray_percent=100,
+        )
+        m.switch(
+            "multi_agent",
+            approver=AuthenticatedApprover(sub="u2", role="supervisor"),
+            gray_percent=100,
+        )
         evs = publisher.list_events("complaint.mode.switched")
         assert evs and "trace_id" in evs[0].payload
 
@@ -63,7 +98,8 @@ class TestMode:
                 raise RuntimeError("down")
 
         ok, err = ModeService(redis_client=FailRedis()).switch(
-            "multi_agent", signers=["ops", "tech"],
+            "multi_agent",
+            approver=AuthenticatedApprover(sub="u1", role="admin"),
         )
         assert ok is False and err == ErrorCode.A5014
 
@@ -76,9 +112,8 @@ class TestMode:
             def set(self, *a, **k):
                 raise RuntimeError("down")
 
-        ok, err = ModeService(redis_client=DirtyFail()).switch(
-            "multi_agent", signers=["ops", "tech"],
-        )
+        # T89：切换/回滚主体直接验证（gray 越界校验已前移至 switch）
+        ok, err = ModeService(redis_client=DirtyFail())._advance("multi_agent", None)
         assert ok is False and err == ErrorCode.A5014
 
 

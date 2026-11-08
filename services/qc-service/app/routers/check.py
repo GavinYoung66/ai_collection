@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.auth import require_roles_if_enabled
 from app.core.config import qc_settings
 from app.deps import get_job_store, get_quality_repo, get_rag_client, get_redis
 from app.errors import envelope, http_status_for, success
@@ -32,6 +33,14 @@ router = APIRouter(prefix="/api/v1/qc", tags=["qc-check"])
 ALLOWED_SPEAKERS = frozenset({"agent", "user", "ai", "human"})
 RAW_RATE_LIMIT = 10
 RAW_RATE_WINDOW = 1
+# T88：sid/batch 限流与 raw 同量级、同 qc:ratelimit:* 命名空间
+SID_RATE_LIMIT = 10
+SID_RATE_WINDOW = 1
+BATCH_RATE_LIMIT = 10
+BATCH_RATE_WINDOW = 1
+
+# T88：三写端点统一鉴权（复用 qc 既有 if-enabled 语义，保持本地调试可用）
+qc_write_roles = require_roles_if_enabled("admin", "supervisor")
 
 
 def _raw_rate_user(request: Request) -> str:
@@ -141,6 +150,34 @@ async def raw_rate_limit(request: Request, redis=Depends(get_redis)) -> None:
         raise BizException(ErrorCode.B0006)
 
 
+async def sid_rate_limit(request: Request, redis=Depends(get_redis)) -> None:
+    """T88：replay/{sid} 限流，键与 raw 同命名空间。"""
+    user = _raw_rate_user(request)
+    configure_redis(redis)
+    allowed = await rate_limit_allow(
+        f"qc:ratelimit:sid:{user}",
+        limit=SID_RATE_LIMIT,
+        window=SID_RATE_WINDOW,
+        context={"trace_id": get_trace_id()},
+    )
+    if not allowed:
+        raise BizException(ErrorCode.B0006)
+
+
+async def batch_rate_limit(request: Request, redis=Depends(get_redis)) -> None:
+    """T88：check/batch 限流，键与 raw 同命名空间。"""
+    user = _raw_rate_user(request)
+    configure_redis(redis)
+    allowed = await rate_limit_allow(
+        f"qc:ratelimit:batch:{user}",
+        limit=BATCH_RATE_LIMIT,
+        window=BATCH_RATE_WINDOW,
+        context={"trace_id": get_trace_id()},
+    )
+    if not allowed:
+        raise BizException(ErrorCode.B0006)
+
+
 def _force_rerun(header: str | None, body_force: bool) -> bool:
     return body_force or (header or "").strip().lower() == "true"
 
@@ -164,6 +201,7 @@ def _result_response(result) -> JSONResponse:
 async def replay_raw(
     body: RawQcSession,
     replay: ReplayService = Depends(get_replay_service),
+    _auth: None = Depends(qc_write_roles),
     _: None = Depends(raw_rate_limit),
     idempotency_key: str = Header(..., alias="X-Idempotency-Key"),
     force_header: str | None = Header(None, alias="X-QC-Force-Rerun"),
@@ -181,6 +219,8 @@ async def replay_raw(
 async def replay_by_id(
     session_id: str,
     replay: ReplayService = Depends(get_replay_service),
+    _auth: None = Depends(qc_write_roles),
+    _rate: None = Depends(sid_rate_limit),
     body: ReplayPathBody | None = None,
     force_header: str | None = Header(None, alias="X-QC-Force-Rerun"),
 ):
@@ -193,7 +233,10 @@ async def replay_by_id(
 async def check_batch(
     body: BatchBody,
     replay: ReplayService = Depends(get_replay_service),
+    _auth: None = Depends(qc_write_roles),
+    _rate: None = Depends(batch_rate_limit),
 ):
+    # 校验顺序：鉴权/限流依赖先行 → QC_BATCH_MAX 上限校验 → 质检管道
     if len(body.session_ids) > qc_settings.QC_BATCH_MAX:
         return _qc_json(ErrorCode.A2004.value)
     accepted: list[dict[str, Any]] = []

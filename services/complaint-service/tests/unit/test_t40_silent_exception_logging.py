@@ -147,7 +147,9 @@ class TestModeSwitchRollbackFailure:
                 raise RuntimeError("redis down")
 
         svc = ModeService(redis_client=_BrokenSetRedis())
-        ok, err = svc.switch("single_agent", signers=["ops", "tech"])
+        # T89：切换/回滚主体为 _advance（gray 越界校验已前移至 switch）；
+        # T40 意图保持——推进失败 + 回滚再失败 MUST 记 warning 且返回 A5014
+        ok, err = svc._advance("single_agent", None)
 
         assert ok is False
         assert err is not None

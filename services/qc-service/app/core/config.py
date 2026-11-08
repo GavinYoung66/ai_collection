@@ -41,6 +41,9 @@ class QcSettings(Settings):
     QC_ALERT_LEVEL_MIN: str = "high"
     QC_BATCH_MAX: int = 100
     QC_MOCK_LLM: bool = False  # true 跳过真实 LLM，不熔断、不发 A2011；默认 false
+    # T87：DEMO_MODE 仅控制 demo seed 的 qc_reviewer token 签发分支，不控制灌数本身；
+    # 缺省 false（fail-closed），需要演示 token 时显式开启
+    DEMO_MODE: bool = False
     QC_DEFAULT_ACTIVE_RULES_VERSION: str = "v1.0"
     QC_R14_RAG_ENABLED: bool = False  # 单测/无 rag 默认 false；compose 演示钉 true
     QC_REDIS_DB: int = 3

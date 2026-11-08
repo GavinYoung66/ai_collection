@@ -1,10 +1,16 @@
-"""演示灌数 API：POST /demo/seed、GET /demo/pending、GET /demo/{session_id}/trace。"""
+"""演示灌数 API：POST /demo/seed、GET /demo/pending、GET /demo/{session_id}/trace。
+
+T87：demo 组整组挂 demo_gate 组合闸门——生产（auth_required=true）整组禁用（404，
+不暴露端点存在性）；本地按 require_roles_if_enabled("admin") 校验后放行。
+"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
+from fastapi.exceptions import HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import require_roles_if_enabled
 from app.deps import get_quality_repo, get_redis
 from app.errors import success
 from app.events.publisher import event_call_id
@@ -13,9 +19,23 @@ from app.repositories.demo_store import DemoSessionStore, DemoTraceStore
 from app.repositories.quality_repo import QualityRepo
 from app.services.demo_seed_service import DemoSeedService
 from app.services.demo_trace import CALL_QC_NOT_INVOKED, CALL_QC_STATUS_FIELD, build_langsmith_url
+from common.config.settings import settings
 from common.db.session import get_session
 
-router = APIRouter(prefix="/api/v1/qc/demo", tags=["qc-demo"])
+
+async def demo_gate(request: Request) -> None:
+    """T87：生产禁用优先于角色校验；本地仅 admin 可用。"""
+    if settings.auth_required:
+        # 禁用形态与未知路径 404 一致，不暴露 demo 端点存在性
+        raise HTTPException(status_code=404)
+    payload = await require_roles_if_enabled("admin")(request)
+    request.state.user = payload
+
+
+router = APIRouter(
+    prefix="/api/v1/qc/demo", tags=["qc-demo"], dependencies=[Depends(demo_gate)]
+)
+
 
 
 async def get_demo_seed_service(
