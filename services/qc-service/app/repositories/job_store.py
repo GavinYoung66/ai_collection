@@ -182,6 +182,18 @@ class QcJobStore:
         self._assert_db3()
         await self._redis.set(replay_run_key(session_id), token)
 
+    async def acquire_replay_run(self, session_id: str, token: str) -> bool:
+        """T100：SET NX 原子占坑（spec runtime-correctness：幂等登记 MUST 原子）。
+
+        True=首次占坑（本请求负责执行）；False=键已被占（同幂等键的并发执行方
+        在途或已完成）。消除 get_replay_run→set_replay_run 的 check-then-act
+        窗口，并发同幂等键只执行一次；窄窗口（占坑失败且结果未落库）由
+        qc_records.session_id 唯一约束 + IntegrityError 转读回兜底（design D2.3）。
+        """
+        self._assert_db3()
+        acquired = await self._redis.set(replay_run_key(session_id), token, nx=True)
+        return bool(acquired)
+
     async def get_replay_run(self, session_id: str) -> str | None:
         self._assert_db3()
         raw = await self._redis.get(replay_run_key(session_id))

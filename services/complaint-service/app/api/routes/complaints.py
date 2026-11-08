@@ -42,6 +42,7 @@ from app.models.state import TaskStatus
 from app.service.complaint_service import (
     ComplaintNotFound,
     ComplaintPersistError,
+    _mock_demo_mode,
     complaint_service,
 )
 from app.service.guardrails_postcheck import postcheck
@@ -57,6 +58,28 @@ router = APIRouter(
     tags=["complaints"],
     dependencies=[Depends(require_roles("admin", "supervisor", "agent"))],
 )
+
+
+def judge_default_run_graph() -> bool:
+    """T95：run_graph 缺省（body 缺省/schema 缺省）时的默认值。
+
+    生产（Mock 关闭）默认 True 走真实研判图，MUST NOT 因 body 缺省落到 stub
+    伪造"坐席违规"结论（spec llm-layer：Mock/Stub 路径的生产门控）；
+    演示（USE_MOCK_MCP/USE_MOCK_LLM 双开）保持 False stub 语义。
+    显式 run_graph=false 的生产请求仍会被 _judge_stub 内门控拒绝（A5004）。
+    """
+    return not _mock_demo_mode()
+
+
+def resolve_run_graph(req: Optional[JudgeRequest]) -> bool:
+    """T95：判定一次 judge 的生效 run_graph。
+
+    显式 True/False 优先（含 body `{}` 之外的显式 false）；未指定（无 body 或
+    body 缺省字段）按部署形态默认——schema 不得用 False 缺省掩盖"未指定"。
+    """
+    if req is not None and req.run_graph is not None:
+        return bool(req.run_graph)
+    return judge_default_run_graph()
 
 
 async def _flush_session(rec: dict) -> None:
@@ -203,7 +226,10 @@ async def judge_complaint(complaint_id: str, request: Request, req: JudgeRequest
         rate_limiter,
     )
 
-    run_graph = bool(req.run_graph) if req is not None else False
+    # T95：缺省（无 body / body 缺省 run_graph=None）按部署形态分流——生产默认
+    # True 走真实研判图，演示保持 False stub 语义；显式值优先（口径见
+    # resolve_run_graph docstring）。
+    run_graph = resolve_run_graph(req)
     # 先验存在：防 404 工单先占用幂等锁/排队位
     try:
         await complaint_service.aget_or_raise(complaint_id)

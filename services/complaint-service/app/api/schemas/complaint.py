@@ -80,7 +80,11 @@ class ComplaintDetailResponse(BaseModel):
 # ── judge ──
 
 class JudgeRequest(BaseModel):
-    run_graph: bool = Field(default=False, description="是否真实跑图（默认 False stub）")
+    # T95：None = 未显式指定，由路由按部署形态取默认（生产 True / 演示 False）；
+    # 显式 True/False 优先，MUST NOT 用 schema 缺省值掩盖"未指定"语义。
+    run_graph: Optional[bool] = Field(
+        default=None, description="是否真实跑图；缺省按部署形态（生产 True）"
+    )
 
 
 class JudgeResponse(BaseModel):

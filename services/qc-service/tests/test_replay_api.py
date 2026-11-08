@@ -1,6 +1,7 @@
 """QC-6.1 / QC-6.2 / QC-6.3：replay / raw / batch HTTP。"""
 from __future__ import annotations
 
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
@@ -11,7 +12,7 @@ from app.deps import get_rag_client, get_redis
 from app.integrations.qc_session import QCSession
 from app.integrations.rag_client import RagClient
 from app.main import app
-from app.models.qc import QcRecord
+from app.models.qc import QcAlert, QcRecord, QcViolation
 from app.repositories.job_store import QcJobStore, wait_retry_key
 from app.routers.check import get_dp_client, get_llm_reviewer, get_quality_repo
 from app.services.llm_reviewer import LLMReviewer
@@ -34,6 +35,19 @@ class _OneOrNoneResult:
         return self._row
 
 
+class _RowsResult:
+    """T97 重放分支明细判重读取（qc_violations / qc_alerts）的行集回放。"""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return list(self._rows)
+
+
 class ApiFakeSession:
     def __init__(self):
         self.added: list = []
@@ -51,9 +65,16 @@ class ApiFakeSession:
 
     async def execute(self, stmt):
         # replay_session 会读一次 active 规则包；HTTP 测试双无 active 行 →
-        # 管道按 v1.0 种子等价回退，其它 SQL 一律禁止。
-        if "qc_rules" in str(stmt):
+        # 管道按 v1.0 种子等价回退。T97 重放分支的明细判重查询
+        # （qc_violations / qc_alerts）从本 fake 已 add 的 ORM 对象回放；
+        # 其余 SQL 一律禁止。
+        s = str(stmt)
+        if "qc_rules" in s:
             return _OneOrNoneResult(None)
+        if "qc_violations" in s:
+            return _RowsResult([o for o in self.added if isinstance(o, QcViolation)])
+        if "qc_alerts" in s:
+            return _RowsResult([o for o in self.added if isinstance(o, QcAlert)])
         raise AssertionError("SQL should not run in HTTP fakes")
 
 
@@ -63,6 +84,8 @@ class FakeQualityRepo:
     def __init__(self, session: ApiFakeSession, job_store: QcJobStore | None = None):
         self.session = session
         self.job_store = job_store
+        # T97：重放分支明细判重读取的内存镜像（id 对齐 ORM column default 形态）
+        self.violations_store: list[SimpleNamespace] = []
 
     async def call_record_exists(self, session_id: str) -> bool:
         return session_id in self.session.call_ids
@@ -93,7 +116,24 @@ class FakeQualityRepo:
 
     async def add_violation(self, record, **fields):
         self.session.add(("violation", getattr(record, "id", None), fields))
-        return None
+        # T97：返回带 id 的镜像行（对齐 ORM column default 形态），闭合
+        # violation_ids → QcAlert.violation_id 的告警判重关联链
+        row = SimpleNamespace(
+            id=uuid4(),
+            qc_record_id=getattr(record, "id", None),
+            rule_id=fields.get("rule_id"),
+            turn_id=fields.get("turn_id"),
+            speaker=fields.get("speaker"),
+        )
+        self.violations_store.append(row)
+        return row
+
+    async def list_violations(self, qc_record_id):
+        return [
+            row
+            for row in self.violations_store
+            if row.qc_record_id == qc_record_id
+        ]
 
     async def record_skipped_rules(self, *, qc_record_id, skipped_rules=None):
         self.session.add(("skip", qc_record_id, list(skipped_rules or [])))

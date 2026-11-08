@@ -7,6 +7,7 @@ import time
 from typing import Any, Awaitable, Callable, Sequence
 from uuid import uuid4
 
+import structlog
 from pydantic import ValidationError
 
 from app.core.config import qc_settings
@@ -33,6 +34,11 @@ from common.llm.transport import message_content_from_completions, post_chat_com
 from common.resilience.timeout import Timeout
 from common.security.mask import mask_text
 from common.trace.middleware import get_trace_id
+
+# T96：埋点兜底路径（_write_log 独立短事务持久化失败）此前引用未定义 logger，
+# DB 闪断时抛 NameError 传播为 A2001 PARTIAL，违反"埋点不阻塞质检"声明（spec
+# observability：旁路埋点故障不阻断主流程）。
+logger = structlog.get_logger()
 
 _QC_PROMPT_ID = "qc_review"
 _QC_PROMPT_BASE_VERSION = "1.0.0"

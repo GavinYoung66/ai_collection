@@ -5,6 +5,9 @@ import time
 from typing import Any, Mapping
 from uuid import UUID
 
+from redis.exceptions import RedisError
+from sqlalchemy.exc import IntegrityError
+
 from app.events.publisher import event_call_id
 from app.integrations.dp_client import DpClient
 from app.integrations.qc_session import QCSession
@@ -23,6 +26,12 @@ from common.errors.exceptions import BizException
 from common.security.mask import mask_text
 
 NO_MASTER_MSG = "需先落通话主数据"
+
+# T97：replay 重投短路的"已落库终态"集合——这些状态下明细已写、告警已推送，
+# at-least-once 重投 MUST 短路回读，不重跑管道、不重写明细、不重发事件。
+# REVIEWED 不在此列：非 force 由 _assert_force_rerun 以 A2002 拒绝，force 走
+# 显式重跑分支（明细去重保底）。PARTIAL 保持可重试语义，由明细去重防双写。
+_REPLAY_SHORT_CIRCUIT_STATUSES = frozenset({"DONE", "PENDING_REVIEW"})
 
 
 def _as_uuid(value: str | None) -> UUID | None:
@@ -143,14 +152,18 @@ class ReplayService:
             rule_pack=rule_pack,
         )
 
-    async def _assert_force_rerun(self, session_id: str, *, force: bool) -> None:
+    async def _assert_force_rerun(self, session_id: str, *, force: bool) -> QcRecord | None:
+        """REVIEWED 非 force 拒绝（A2002）；返回已落库记录供终态短路复用。"""
         if self.quality_repo is None:
-            return
+            return None
         existing = await self.quality_repo.get_by_session_id(session_id)
         if existing is not None and existing.qc_status == "REVIEWED" and not force:
             raise BizException(ErrorCode.A2002)
+        return existing
 
-    async def _persist(self, result: QcRunResult, qc: QCSession) -> QcRunResult:
+    async def _persist(
+        self, result: QcRunResult, qc: QCSession, *, force: bool = False
+    ) -> QcRunResult:
         if self.quality_repo is None:
             return result
         if result.job_status == "WAIT_TEXT":
@@ -158,6 +171,18 @@ class ReplayService:
         if result.code == ErrorCode.A2003.value and result.qc_status != "PARTIAL":
             return result
         existing = await self.quality_repo.get_by_session_id(qc.session_id)
+        # T97（spec runtime-correctness：事件重投下明细写入幂等）：已落库终态
+        # （DONE/PENDING_REVIEW）在 at-least-once 重投下直接短路回读已有终态行——
+        # 不重跑落库、不重写明细、不重发事件（_result_from_record.inserted=False 使
+        # _publish_terminal_events 不可达，告警不重复推送）。主防线在 replay_session
+        # 层（管道重跑前），此处为直接调用 _persist 场景的纵深防御。
+        # force rerun 为显式人工重放意图，不受此限（走下方去重重跑分支）。
+        if (
+            existing is not None
+            and existing.qc_status in _REPLAY_SHORT_CIRCUIT_STATUSES
+            and not force
+        ):
+            return _result_from_record(existing, qc)
         score = result.score
         high = score.high_count if score else 0
         med = score.med_count if score else 0
@@ -170,19 +195,32 @@ class ReplayService:
         qc_status = result.qc_status or "DONE"
         case_id = _as_uuid(qc.case_id)
         if existing is None:
-            row = await self.quality_repo.insert_record(
-                session_id=qc.session_id,
-                compliance_score=compliance,
-                deduction_total=deduction,
-                risk_level=risk,
-                qc_result=qc_result,
-                qc_status=qc_status,
-                grade=result.grade,
-                case_id=case_id,
-                high_count=high,
-                med_count=med,
-                low_count=low,
-            )
+            try:
+                row = await self.quality_repo.insert_record(
+                    session_id=qc.session_id,
+                    compliance_score=compliance,
+                    deduction_total=deduction,
+                    risk_level=risk,
+                    qc_result=qc_result,
+                    qc_status=qc_status,
+                    grade=result.grade,
+                    case_id=case_id,
+                    high_count=high,
+                    med_count=med,
+                    low_count=low,
+                )
+            except IntegrityError:
+                # T100 兜底（design D2.3）：SET NX 窗口外的并发双跑在
+                # qc_records.session_id 唯一约束（pgcode 23505）处收敛——回滚后
+                # 读回并发方已落库的终态行短路回读，明细不双写（与 r2
+                # aensure_persisted 的 ON CONFLICT DO NOTHING 基线同语义）。
+                rollback = getattr(self.quality_repo.session, "rollback", None)
+                if rollback is not None:
+                    await rollback()
+                existing = await self.quality_repo.get_by_session_id(qc.session_id)
+                if existing is not None:
+                    return _result_from_record(existing, qc)
+                raise
         else:
             existing.compliance_score = compliance
             existing.deduction_total = deduction
@@ -200,6 +238,17 @@ class ReplayService:
         # 违规行三字段与打分同源：复用本次运行快照（由 RuleRepo active 包产出，不在此处硬编码种子）。
         penalty_map = result.penalty_snapshot or {}
         policy_map = result.deduction_policy_snapshot or {}
+        # T97 明细幂等：重放/重跑分支（existing 非 None）先取已有明细指纹，
+        # (rule_id, turn_id, speaker) 重复的 hit 跳过 INSERT 并复用已有行 id，
+        # 防止 at-least-once 重投 / SET NX 窗口外并发下 qc_violations 行数翻倍。
+        # 说明：qc_violations 无 (qc_record_id, rule_id, turn_id) 唯一索引且本变更
+        # 不含 DB 迁移（proposal Impact 明确仅 T119 涉及索引），PG 的
+        # ON CONFLICT(index_elements) 无唯一约束支撑无法落地，故以应用层等价
+        # 幂等实现（对齐 aensure_persisted"存在即跳过写"基线），验收语义一致。
+        prev_violations: dict[tuple[Any, Any, Any], Any] = {}
+        if existing is not None:
+            for vrow_prev in await self.quality_repo.list_violations(row.id):
+                prev_violations[(vrow_prev.rule_id, vrow_prev.turn_id, vrow_prev.speaker)] = vrow_prev
         violation_ids: dict[tuple[Any, Any, Any], Any] = {}
         for hit in result.hits:
             policy_fields = resolve_policy_fields(
@@ -217,6 +266,13 @@ class ReplayService:
             hit.extras["points"] = points
             hit.extras["policy_clause"] = policy_fields["policy_clause"]
             hit.extras["policy_text"] = policy_fields["policy_text"]
+            hit_key = (hit.rule_id, hit.turn_id, hit.speaker)
+            prev_vrow = prev_violations.get(hit_key)
+            if prev_vrow is not None:
+                # 已有同指纹明细行：跳过 INSERT，violations 关联复用已有行 id
+                if getattr(prev_vrow, "id", None) is not None:
+                    violation_ids[hit_key] = prev_vrow.id
+                continue
             vrow = await self.quality_repo.add_violation(
                 row,
                 turn_id=hit.turn_id,
@@ -233,11 +289,23 @@ class ReplayService:
                 policy_text=policy_fields["policy_text"],
             )
             if vrow is not None and getattr(vrow, "id", None) is not None:
-                violation_ids[(hit.rule_id, hit.turn_id, hit.speaker)] = vrow.id
+                violation_ids[hit_key] = vrow.id
         if result.alerts:
             alert_repo = AlertRepo(self.quality_repo.session)
+            # T97 告警幂等：重放分支按 violation_id 关联判重——同一违规行的告警
+            # 已存在则跳过插入并回填既有 id/status，重投不重复推送告警。
+            prev_alerts_by_vid: dict[Any, Any] = {}
+            if existing is not None:
+                for arow_prev in await alert_repo.list_by_record(row.id):
+                    if arow_prev.violation_id is not None:
+                        prev_alerts_by_vid[arow_prev.violation_id] = arow_prev
             for alert in result.alerts:
                 vid = violation_ids.get((alert.get("rule_id"), alert.get("turn_id"), alert.get("speaker")))
+                prev_alert = prev_alerts_by_vid.get(vid) if vid is not None else None
+                if prev_alert is not None:
+                    alert["id"] = str(prev_alert.id)
+                    alert["status"] = prev_alert.status
+                    continue
                 inserted = await alert_repo.insert_high(
                     qc_record_id=row.id,
                     violation_id=vid,
@@ -360,7 +428,18 @@ class ReplayService:
                     case_id=qc.case_id,
                     call_id=qc.call_id,
                 )
-            await self._assert_force_rerun(qc.session_id, force=force)
+            existing = await self._assert_force_rerun(qc.session_id, force=force)
+            # T97（spec runtime-correctness：事件重投下明细写入幂等）：已落库终态
+            # （DONE/PENDING_REVIEW）在 at-least-once 重投下于管道重跑前短路回读——
+            # 不消耗 LLM、不重写明细、不重发事件（inserted=False 使
+            # _publish_terminal_events 不可达）。force rerun 为显式人工重放意图，
+            # 不受此限（走 _persist 内明细去重重跑分支）。
+            if (
+                not force
+                and existing is not None
+                and existing.qc_status in _REPLAY_SHORT_CIRCUIT_STATUSES
+            ):
+                return _result_from_record(existing, qc)
         retries = 0
         if self.job_store is not None:
             retries = await self.job_store.get_wait_retries(qc.session_id)
@@ -375,7 +454,7 @@ class ReplayService:
         if result.job_status == "WAIT_TEXT" and self.job_store is not None:
             await self.job_store.incr_wait_retries(qc.session_id)
         if persist:
-            result = await self._persist(result, qc)
+            result = await self._persist(result, qc, force=force)
         return result
 
     async def replay_by_session_id(self, session_id: str, *, force: bool = False) -> QcRunResult:
@@ -410,5 +489,29 @@ class ReplayService:
                 existing = await self.quality_repo.get_by_session_id(qc.session_id)
                 if existing is not None:
                     return _result_from_record(existing, qc)
-            await self.job_store.set_replay_run(qc.session_id, idempotency_key)
+            if prev is None:
+                # T100（spec runtime-correctness：事件重投下明细写入幂等）：
+                # SET NX 原子占坑，消除 get_replay_run→set_replay_run 的
+                # check-then-act 窗口——并发同 idempotency key 只执行一次。
+                # 占坑失败=并发执行方已登记 → 读回已有结果；无结果（执行方
+                # 在途未落库的窄窗口）则放行执行，落库由 qc_records.session_id
+                # 唯一约束 + _persist IntegrityError 转读回兜底（design D2.3）。
+                # Redis 故障降级放行（与限流层 degraded-allow 同形态）：
+                # 幂等登记不可用时按占坑成功继续执行，由 DB 唯一约束 +
+                # T97 明细幂等兜底，不因幂等设施故障放大为 5xx。
+                try:
+                    acquired = await self.job_store.acquire_replay_run(
+                        qc.session_id, idempotency_key
+                    )
+                except (RedisError, OSError):
+                    acquired = True
+                if not acquired:
+                    if self.quality_repo is not None:
+                        existing = await self.quality_repo.get_by_session_id(qc.session_id)
+                        if existing is not None:
+                            return _result_from_record(existing, qc)
+            else:
+                # 不同 idempotency key：显式新重放请求 → 覆盖登记并重跑（保持
+                # 手工 replay 语义；同 key 重放已被上方读回分支承接）。
+                await self.job_store.set_replay_run(qc.session_id, idempotency_key)
         return await self.replay_session(qc, force=force, persist=True)

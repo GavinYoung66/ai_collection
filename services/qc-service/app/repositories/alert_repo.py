@@ -43,6 +43,21 @@ class AlertRepo:
             row.id = aid or uuid4()
         return row
 
+    async def list_by_record(self, qc_record_id: UUID | str) -> list[QcAlert]:
+        """T97：重放告警判重读取——返回该质检记录的全部未删告警行。
+
+        供 replay 重放分支按 violation_id 关联判重：同一违规行的告警已存在则
+        跳过插入，at-least-once 重投不重复推送告警（qc_alerts 无唯一索引，
+        以应用层判重实现明细幂等）。
+        """
+        rid = qc_record_id if isinstance(qc_record_id, UUID) else UUID(str(qc_record_id))
+        stmt = select(QcAlert).where(
+            QcAlert.qc_record_id == rid,
+            QcAlert.is_delete == "0",
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def get(self, alert_id: UUID | str) -> QcAlert | None:
         try:
             aid = alert_id if isinstance(alert_id, UUID) else UUID(str(alert_id))

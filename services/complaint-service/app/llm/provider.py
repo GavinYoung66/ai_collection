@@ -18,6 +18,7 @@ import base64
 import json
 import os
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Type
 
@@ -40,6 +41,15 @@ _SERVICE_NAME = "csmp"
 
 _SCHEMA_RETRY_MAX = 3
 _DEFAULT_MAX_TOKENS = 50000
+
+# T98（spec runtime-correctness：常驻进程内存有界）：调用审计日志容量上限为
+# 显式常量——`_call_log` 为进程级单例缓冲，改用 deque(maxlen) 环形截断后
+# 万级调用长度稳定在上限内，RSS 不随调用次数线性增长。
+# 500 >> 单轮研判 LLM 调用量（6 节点 × fallback×schema 重试 ≤ ~20 条），
+# `filter_new_logs(start_index)` 按轮取增量在正常轮次内不受淘汰影响。
+CALL_LOG_MAXLEN = 500
+# 审计条目只保留预览摘要，MUST NOT 驻留全量 prompt/response 正文（脱敏后仍全量）。
+LOG_PREVIEW_CHARS = 200
 
 
 class TokenLimitExceededError(Exception):
@@ -124,7 +134,8 @@ class ComplaintLLMProvider:
         self._max_token_threshold = max_token_threshold
         self._llm_timeout = llm_timeout or Timeout(total=120.0)
         self._total_tokens_consumed: int = 0
-        self._call_log: list[dict] = []
+        # T98：有界环形缓冲（deque maxlen），不随调用次数线性增长
+        self._call_log: deque[dict] = deque(maxlen=CALL_LOG_MAXLEN)
         # 韧性 key 派生依赖服务名（invoke_llm 熔断/降级 key 前缀），幂等设置
         set_default_service(_SERVICE_NAME)
 
@@ -349,11 +360,15 @@ class ComplaintLLMProvider:
             "status": "error" if error else "success",
             "error": error,
             "provider_path": "mock" if getattr(settings, "USE_MOCK_LLM", True) else "real",
-            # 落库前脱敏：llm_call_logs.prompt / response 不落明文 PII
-            "prompt": mask_before_persist(prompt),
-            "prompt_preview": mask_before_persist(prompt[:80]),
-            "response": mask_before_persist(resp_text) if resp_text else "",
-            "response_preview": mask_before_persist(resp_text[:80]) if resp_text else "",
+            # T98（spec runtime-correctness：常驻进程内存有界）：审计条目 MUST NOT
+            # 驻留全量 prompt/response 正文，只保留脱敏后的预览摘要
+            # （LOG_PREVIEW_CHARS 截断）；脱敏单源 mask_before_persist 不变。
+            # 消费方（trace.llm_entry_to_event / filter_new_logs / call_log_sink）
+            # 均只读 preview 与状态字段，移除全文无行为影响。
+            "prompt_preview": mask_before_persist(prompt[:LOG_PREVIEW_CHARS]),
+            "response_preview": (
+                mask_before_persist(resp_text[:LOG_PREVIEW_CHARS]) if resp_text else ""
+            ),
         }
         self._call_log.append(entry)
         try:

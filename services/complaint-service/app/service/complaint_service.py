@@ -29,10 +29,21 @@ from app.service.graph_lock import (
 from app.service.rate_limiter import rate_limiter
 from app.service.security import prepare_agent_log
 from app.service.session_service import session_service
+from common.errors.codes import ErrorCode
+from common.errors.exceptions import BizException
 from common.utils.spawn import spawn_tracked
 from common.utils.time_parse import parse_epoch_or_datetime
 
 logger = structlog.get_logger()
+
+
+def _mock_demo_mode() -> bool:
+    """T95：Mock 演示模式判定（单一事实源）。
+
+    仅当 `USE_MOCK_MCP` 与 `USE_MOCK_LLM` 双开关显式开启时视为演示模式；
+    生产（任一 Mock 关闭）stub/sim 自动审阅等演示语义 MUST 不可达。
+    """
+    return bool(settings.USE_MOCK_MCP) and bool(settings.USE_MOCK_LLM)
 
 
 class ComplaintPersistError(Exception):
@@ -542,10 +553,22 @@ class ComplaintService:
         return self._judge_stub(complaint_id)
 
     async def _maybe_sim_auto_review(self, complaint_id: str) -> None:
-        """SIM_AUTO_REVIEW：同栈、无轮询；仅 next 含 human_review 才 Command(resume)。"""
+        """SIM_AUTO_REVIEW：同栈、无轮询；仅 next 含 human_review 才 Command(resume)。
+
+        V10（r3 清单待验证线索，随 T95 同批评估）：SIM_AUTO_REVIEW=true 时
+        judge 同栈自动 approve 结案，属演示语义；生产（Mock 关闭）MUST 忽略并
+        留痕，防止演示开关泄漏到生产自动通过人工复核环节。
+        """
         from app.config import settings as _settings
 
         if not getattr(_settings, "SIM_AUTO_REVIEW", False):
+            return
+        if not _mock_demo_mode():
+            logger.warning(
+                "sim_auto_review_disabled_in_production",
+                complaint_id=complaint_id,
+                hint="SIM_AUTO_REVIEW 属演示语义，生产环境已忽略（V10/T95 门控）",
+            )
             return
         from langgraph.types import Command
 
@@ -656,7 +679,25 @@ class ComplaintService:
         return True
 
     def _judge_stub(self, complaint_id: str) -> dict:
-        """stub 路径：沿合法状态机推进到 pending_review，写 mock verdict。"""
+        """stub 路径：沿合法状态机推进到 pending_review，写 mock verdict。
+
+        T95 生产门控（spec llm-layer：Mock/Stub 路径的生产门控）：stub 属批次 1
+        演示语义，仅在 USE_MOCK_MCP 与 USE_MOCK_LLM 双开关开启时可达；生产
+        MUST 拒绝执行，MUST NOT 伪造"坐席违规"结论并发布 complaint.judged /
+        case.risk.upgraded 真实业务事件。
+        """
+        if not _mock_demo_mode():
+            logger.warning(
+                "judge_stub_rejected_in_production",
+                complaint_id=complaint_id,
+                use_mock_mcp=settings.USE_MOCK_MCP,
+                use_mock_llm=settings.USE_MOCK_LLM,
+            )
+            raise BizException(
+                ErrorCode.A5004,
+                "judge stub 仅在演示模式（USE_MOCK_MCP/USE_MOCK_LLM 均开启）可用，"
+                "生产环境 MUST 走真实研判图",
+            )
         rec = self.get_or_raise(complaint_id)
         sid = rec["session_id"]
         ok = session_service.transition(sid, TaskStatus.pending_review)
